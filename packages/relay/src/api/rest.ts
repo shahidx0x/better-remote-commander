@@ -85,9 +85,14 @@ export function restRouter(d: RestDeps): Router {
   };
 
   // Public spec. Single-user v1: built from the admin's cached tools so it works even with all devices offline.
-  r.get('/openapi.json', (_req, res) => {
+  // GPT Actions accept exactly one security scheme: ?auth=bearer (default, API key) or ?auth=oauth.
+  r.get('/openapi.json', (req, res) => {
     const cached = d.store.cachedTools(d.adminUserId);
-    res.json(buildOpenApi(d.publicUrl, cached, d.relayVersion));
+    const mode = String(req.query.auth ?? 'bearer') === 'oauth' ? 'oauth' : 'bearer';
+    const spec = buildOpenApi(d.publicUrl, cached, d.relayVersion) as { components: { securitySchemes: Record<string, unknown> }; security: unknown[] };
+    if (mode === 'bearer') { spec.components.securitySchemes = { bearerAuth: spec.components.securitySchemes.bearerAuth }; spec.security = [{ bearerAuth: [] }]; }
+    else { spec.components.securitySchemes = { oauth2: spec.components.securitySchemes.oauth2 }; spec.security = [{ oauth2: ['mcp:tools'] }]; }
+    res.json(spec);
   });
 
   r.get('/api/devices', d.bearer, (req, res) => {
