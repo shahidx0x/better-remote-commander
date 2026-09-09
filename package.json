@@ -9,16 +9,16 @@
                     "node":  "\u003e=20"
                 },
     "scripts":  {
-                    "build":  "pnpm -r --filter ./packages/* build",
-                    "clean":  "pnpm -r --filter ./packages/* exec rimraf dist",
-                    "typecheck":  "pnpm -r --filter ./packages/* exec tsc --noEmit",
+                    "build":  "pnpm -r --filter \"./packages/*\" build",
+                    "clean":  "pnpm -r --filter \"./packages/*\" exec rimraf dist",
+                    "typecheck":  "pnpm -r --filter \"./packages/*\" exec tsc --noEmit",
                     "agent":  "pnpm --filter @ses-systems/rdp-agent start",
                     "relay":  "pnpm --filter @ses-systems/rdp-relay start",
                     "dev:relay":  "pnpm --filter @ses-systems/rdp-relay build \u0026\u0026 node packages/relay/dist/cli.js",
                     "dev:agent":  "pnpm --filter @ses-systems/rdp-agent build \u0026\u0026 node packages/agent/dist/cli.js",
                     "extract-tools":  "node scripts/extract-tools.mjs",
-                    "pack:all":  "pnpm -r --filter ./packages/* exec pnpm pack --pack-destination ../../dist-pack",
-                    "publish:all":  "pnpm -r --filter ./packages/* publish --access public",
+                    "pack:all":  "pnpm -r --filter \"./packages/*\" exec pnpm pack --pack-destination ../../dist-pack",
+                    "publish:all":  "pnpm -r --filter \"./packages/*\" publish --access public",
                     "test:unit":  "node --test packages/relay/test/unit.test.mjs",
                     "test:e2e":  "node scripts/e2e-all.mjs",
                     "test":  "pnpm test:unit \u0026\u0026 pnpm test:e2e"

@@ -10,7 +10,7 @@ const [repo, tag] = process.argv.slice(2);
 if (!repo || !tag) { console.error('usage: pack-release <owner/repo> <tag>'); process.exit(2); }
 const out = path.resolve('dist-pack');
 rmSync(out, { recursive: true, force: true }); mkdirSync(out);
-execSync('pnpm -r --filter ./packages/* exec pnpm pack --pack-destination ../../dist-pack', { stdio: 'inherit' });
+execSync('pnpm -r --filter "./packages/*" exec pnpm pack --pack-destination ../../dist-pack', { stdio: 'inherit' });
 
 const files = readdirSync(out).filter((f) => f.endsWith('.tgz'));
 const shared = files.find((f) => f.includes('rdp-shared'));
