@@ -60,7 +60,23 @@ export function homePage(publicUrl: string, loggedIn: boolean, devices: { device
     ? `<ul>${devices.map((d) => `<li><code>${esc(d.name)}</code> ${esc(d.platform ?? '')} — ${d.online ? '<span class="ok">online</span>' : 'offline'}${d.paused ? ' (paused)' : ''}</li>`).join('')}</ul>`
     : '<p>No devices paired yet.</p>';
   return layout('Relay', `<h1>SES-RDP relay</h1>
-<p>MCP endpoint: <code>${esc(publicUrl)}/mcp</code></p>
-${loggedIn ? `<p>Devices:</p>${list}<div class="row"><a href="/device/verify"><button class="primary">Pair a device</button></a><a href="/auth/logout"><button class="secondary">Sign out</button></a></div>`
+<p>MCP: <code>${esc(publicUrl)}/mcp</code><br>OpenAPI: <code>${esc(publicUrl)}/openapi.json</code></p>
+${loggedIn ? `<p>Devices:</p>${list}<div class="row"><a href="/device/verify"><button class="primary">Pair a device</button></a><a href="/auth/clients"><button class="secondary">OAuth clients</button></a><a href="/auth/logout"><button class="secondary">Sign out</button></a></div>`
   : `<div class="row"><a href="/auth/login?returnTo=/"><button class="primary">Sign in</button></a></div>`}`);
+}
+
+export function clientsPage(clients: { client_id: string; name: string; redirect_uris: string[]; hasSecret: boolean; created_at: number }[], created?: { client_id: string; client_secret: string }): string {
+  const rows = clients.length
+    ? `<ul>${clients.map((c) => `<li><strong>${esc(c.name)}</strong><br><code>${esc(c.client_id)}</code>${c.hasSecret ? ' · secret' : ' · public (PKCE)'}<br><small>${c.redirect_uris.map(esc).join('<br>')}</small>
+<form method="post" action="/auth/clients/delete" style="display:inline"><input type="hidden" name="client_id" value="${esc(c.client_id)}"><button class="secondary" style="padding:4px 10px;margin-top:6px" onclick="return confirm('Delete client and revoke its tokens?')">Delete</button></form></li>`).join('')}</ul>`
+    : '<p>No OAuth clients yet. Claude registers itself automatically; ChatGPT GPT Actions need one created here.</p>';
+  const banner = created ? `<p class="ok">Client created. Copy the secret now — it is not shown again.</p>
+<label>Client ID</label><input readonly value="${esc(created.client_id)}" onclick="this.select()"><label>Client secret</label><input readonly value="${esc(created.client_secret)}" onclick="this.select()">` : '';
+  return layout('OAuth clients', `<h1>OAuth clients</h1>${banner}
+<p>For a ChatGPT GPT Action: create a client, paste ID + secret into the Action's OAuth settings, then come back and add the callback URL ChatGPT shows you.</p>
+<form method="post" action="/auth/clients"><label>Name</label><input name="name" placeholder="ChatGPT GPT Action" required>
+<label>Redirect URI(s), one per line</label><textarea name="redirect_uris" rows="2" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d3d1c8;border-radius:8px;font:inherit" placeholder="https://chat.openai.com/aip/g-XXXX/oauth/callback"></textarea>
+<div class="row"><button class="primary" type="submit">Create client</button></div></form>
+<h1 style="margin-top:22px">Existing</h1>${rows}
+<p><a href="/">Back</a></p>`);
 }

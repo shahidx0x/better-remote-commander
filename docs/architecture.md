@@ -90,3 +90,18 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
     docker compose --profile tunnel --profile ngrok up -d           # + NGROK_AUTHTOKEN, NGROK_DOMAIN, PUBLIC_URL=https://<domain>
     docker compose --profile cloud up -d                            # VPS: DOMAIN=..., PUBLIC_URL=https://DOMAIN
     docker run -d -v ses-rdp-agent:/home/rdp/.ses-rdp -e SES_RDP_RELAY=https://... -e SES_RDP_NAME=srv ses-systems/rdp-agent
+
+## Phase 4 status (done)
+- shared invocation path `mcp/invoke.ts` (device resolution, pause check, audit) used by both /mcp and /api
+- REST for GPT Actions: GET /api/devices, GET /api/tools, POST /api/tools/{tool} (body = args + optional deviceId); 40 s call cap, text clipped at 90 KB with a note; images omitted
+- GET /openapi.json (public): OpenAPI 3.1 built from cached tool definitions (`device_tools` table filled on every agent hello, so the spec is stable even with devices offline); <= 30 operations; oauth2 authorizationCode security scheme
+- OAuth client management page /auth/clients: create confidential clients (client_secret_post) with redirect URIs, delete = revoke
+- `auth/pkce-compat.ts`: ChatGPT GPT Actions do not send PKCE; for confidential clients only, a deterministic PKCE pair is synthesized so the SDK's mandatory check passes (secret still required at /token). Public clients always need real PKCE
+- ChatGPT remote MCP (Developer mode / connectors): uses the same /mcp + DCR as Claude, nothing extra needed. Deep-research connectors would additionally want `search`/`fetch` tools - not implemented
+- e2e: `node scripts/e2e-gpt-actions.mjs <url> <user> <pass>` 13/13; `e2e-oauth.mjs` 14/14 (tests now shell-agnostic: fresh agents on Windows default to cmd.exe)
+
+### Connect a Custom GPT
+1. Relay must be public (Phase 3). Sign in at PUBLIC_URL -> OAuth clients -> create "ChatGPT" (redirect can be empty for now) -> copy ID + secret
+2. GPT builder -> Actions -> Import from URL: PUBLIC_URL/openapi.json
+3. Authentication: OAuth; Client ID/Secret from step 1; Auth URL PUBLIC_URL/authorize; Token URL PUBLIC_URL/token; Scope mcp:tools; Token exchange: Default (POST)
+4. ChatGPT shows the callback URL (https://chat.openai.com/aip/g-.../oauth/callback) -> edit the client on /auth/clients and add it (delete + recreate in v1)

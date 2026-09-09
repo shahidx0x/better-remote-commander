@@ -1,86 +1,59 @@
 /**
  * MCP server factory: one low-level Server per HTTP request (stateless Streamable HTTP).
  * Tools = `list_devices` + union of tools reported by the user's online agents,
- * each augmented with an optional `deviceId` argument.
+ * each augmented with an optional `deviceId` argument. Invocation goes through invoke.ts.
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { DeviceHub } from '../device-hub.js';
 import type { SqliteStore } from '../store/sqlite.js';
-import { createHash } from 'node:crypto';
+import { invokeTool, listUserDevices, type InvokeContext } from './invoke.js';
 
-export interface McpContext {
-  userId: string;
-  clientId: string;
-}
+export type McpContext = InvokeContext;
 
-const DEVICE_ID_PROP = {
+export const DEVICE_ID_PROP = {
   deviceId: { type: 'string', description: 'Target device id (from list_devices). Required when more than one device is online; may be omitted when only one device is connected.' },
 };
 
-function withDeviceId(schema: unknown): unknown {
-  const s = (schema && typeof schema === 'object' ? { ...(schema as Record<string, unknown>) } : { type: 'object' }) as Record<string, unknown>;
+export function withDeviceId(schema: unknown): Record<string, unknown> {
+  const s = (schema && typeof schema === 'object' ? { ...(schema as Record<string, unknown>) } : {}) as Record<string, unknown>;
+  delete s.$schema;
   s.type = 'object';
   s.properties = { ...((s.properties as Record<string, unknown>) ?? {}), ...DEVICE_ID_PROP };
   return s;
 }
 
-const argsHash = (args: unknown) => createHash('sha256').update(JSON.stringify(args ?? {})).digest('hex').slice(0, 16);
+export const LIST_DEVICES_TOOL = {
+  name: 'list_devices',
+  description: 'List devices paired to this relay, with online state and ids. Call this first when more than one device may be connected.',
+  inputSchema: { type: 'object', properties: {} },
+  annotations: { title: 'List devices', readOnlyHint: true },
+};
+
+/** Live tool set for a user: union across online, non-paused devices (with deviceId prop). */
+export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
+  const online = hub.list(userId).filter((d) => !store.getDevice(d.deviceId)?.paused);
+  const merged = new Map<string, { name: string; description: string; inputSchema: unknown; annotations?: Record<string, unknown> }>();
+  for (const d of online) for (const t of hub.get(d.deviceId)?.tools ?? []) if (!merged.has(t.name)) merged.set(t.name, { ...t, inputSchema: withDeviceId(t.inputSchema) });
+  return { online: online.length, tools: [...merged.values()] };
+}
 
 export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string): Server {
   const server = new Server({ name: 'ses-rdp', version: relayVersion }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const online = hub.list(ctx.userId).filter((d) => !store.getDevice(d.deviceId)?.paused);
-    const merged = new Map<string, { name: string; description: string; inputSchema: unknown; annotations?: Record<string, unknown> }>();
-    for (const d of online) {
-      const dev = hub.get(d.deviceId);
-      for (const t of dev?.tools ?? []) if (!merged.has(t.name)) merged.set(t.name, { ...t, inputSchema: withDeviceId(t.inputSchema) });
-    }
-    const listDevices = {
-      name: 'list_devices',
-      description: `List devices paired to this relay, with online state and ids. Call this first when more than one device may be connected. ${online.length} device(s) currently online.`,
-      inputSchema: { type: 'object', properties: {} },
-      annotations: { title: 'List devices', readOnlyHint: true },
-    };
-    return { tools: [listDevices, ...merged.values()] };
+    const { online, tools } = liveTools(hub, store, ctx.userId);
+    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.` }, ...tools] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const { name, arguments: rawArgs } = req.params;
-    const args = { ...(rawArgs ?? {}) } as Record<string, unknown>;
-
+    const { name, arguments: args } = req.params;
     if (name === 'list_devices') {
-      const online = new Set(hub.list(ctx.userId).map((d) => d.deviceId));
-      const rows = store.listDevices(ctx.userId).map((d) => ({
-        deviceId: d.device_id, name: d.name, platform: d.platform, online: online.has(d.device_id), paused: !!d.paused, lastSeen: d.last_seen,
-      }));
-      return { content: [{ type: 'text', text: JSON.stringify({ devices: rows }, null, 2) }] };
+      return { content: [{ type: 'text', text: JSON.stringify({ devices: listUserDevices(hub, store, ctx.userId) }, null, 2) }] };
     }
-
-    const requested = typeof args.deviceId === 'string' ? args.deviceId : undefined;
-    delete args.deviceId;
-    const deviceId = requested ?? hub.resolveDefault(ctx.userId);
-    if (!deviceId) {
-      const n = hub.list(ctx.userId).length;
-      const msg = n === 0 ? 'No device is online. Start ses-rdp-agent on the target machine.' : `${n} devices are online; pass deviceId (see list_devices).`;
-      return { content: [{ type: 'text', text: msg }], isError: true };
-    }
-    const dev = hub.get(deviceId);
-    if (!dev || dev.ownerId !== ctx.userId) return { content: [{ type: 'text', text: `Device ${deviceId} is not online or not yours.` }], isError: true };
-    if (store.getDevice(deviceId)?.paused) return { content: [{ type: 'text', text: `Device ${dev.info.name} is paused by its owner.` }], isError: true };
-
-    const started = Date.now();
-    try {
-      const result = await hub.call(deviceId, name, args, { client: { name: ctx.clientId } });
-      store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool: name, args_hash: argsHash(args), ok: result.isError ? 0 : 1, ms: Date.now() - started, error: null });
-      store.touchDevice(deviceId);
-      return { content: result.content, isError: result.isError ?? false, _meta: { deviceId, deviceName: dev.info.name } } as never;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool: name, args_hash: argsHash(args), ok: 0, ms: Date.now() - started, error: message });
-      return { content: [{ type: 'text', text: `Relay error: ${message}` }], isError: true };
-    }
+    const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined);
+    if (!out.ok) return { content: [{ type: 'text', text: out.message }], isError: true };
+    return { content: out.result.content, isError: out.result.isError ?? false, _meta: { deviceId: out.deviceId, deviceName: out.deviceName } } as never;
   });
 
   return server;

@@ -21,8 +21,10 @@ import { DeviceHub } from './device-hub.js';
 import { SqliteStore, verifyPassword } from './store/sqlite.js';
 import { RelayOAuthProvider, SCOPES } from './auth/provider.js';
 import { Sessions } from './auth/sessions.js';
+import { pkceCompat } from './auth/pkce-compat.js';
 import { createMcpServer } from './mcp/server.js';
 import * as pages from './pages/html.js';
+import { restRouter } from './api/rest.js';
 
 export interface RelayConfig {
   port: number;
@@ -62,6 +64,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const admin = store.upsertUser(cfg.adminUser, cfg.adminPassword);
   const sessions = new Sessions(cfg.sessionSecret, cfg.publicUrl.startsWith('https://'));
   const hub = new DeviceHub(cfg.relayVersion, log);
+  hub.onHello = (device, tools) => store.saveDeviceTools(device.deviceId, tools);
   const publicUrl = new URL(cfg.publicUrl);
 
   const app = express();
@@ -81,6 +84,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
       res.type('html').send(pages.consentPage(pendingId, client.client_name ?? client.client_id, client.redirect_uris?.[0] ?? '', scopes)),
   });
 
+  app.use(pkceCompat(store));
   app.use(mcpAuthRouter({
     provider,
     issuerUrl: publicUrl,
@@ -181,6 +185,28 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     res.type('html').send(pages.messagePage('Device approved', `${row.client_name} can now connect. The agent will finish pairing automatically.`));
   });
 
+
+  /* ---------- OAuth client management (for GPT Actions etc.) ---------- */
+  const clientRows = () => store.listClients().map((c) => {
+    const m = JSON.parse(c.metadata) as { client_name?: string; redirect_uris?: string[] };
+    return { client_id: c.client_id, name: m.client_name ?? c.client_id, redirect_uris: m.redirect_uris ?? [], hasSecret: !!c.client_secret, created_at: c.created_at };
+  });
+  app.get('/auth/clients', requireLogin, (_req, res) => res.type('html').send(pages.clientsPage(clientRows())));
+  app.post('/auth/clients', requireLogin, (req, res) => {
+    const name = String(req.body.name ?? '').trim().slice(0, 80) || 'client';
+    const uris = String(req.body.redirect_uris ?? '').split(/\r?\n/).map((s) => s.trim()).filter((s) => /^https?:\/\//.test(s));
+    const created = provider.clientsStore.registerClient({
+      client_name: name, redirect_uris: uris, grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
+      token_endpoint_auth_method: 'client_secret_post', scope: SCOPES.join(' '),
+    });
+    log('info', `oauth client created: ${name} [${created.client_id}]`);
+    res.type('html').send(pages.clientsPage(clientRows(), { client_id: created.client_id, client_secret: created.client_secret ?? '' }));
+  });
+  app.post('/auth/clients/delete', requireLogin, (req, res) => {
+    store.deleteClient(String(req.body.client_id ?? ''));
+    res.redirect('/auth/clients');
+  });
+
   /* ---------- MCP endpoint (stateless: new server + transport per request) ---------- */
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
@@ -199,6 +225,9 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
       if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'internal error' }, id: null });
     }
   });
+
+  /* ---------- REST + OpenAPI (GPT Actions) ---------- */
+  app.use(restRouter({ hub, store, bearer, publicUrl: cfg.publicUrl, relayVersion: cfg.relayVersion, adminUserId: admin.id }));
 
   /* ---------- agent WebSocket (device token) ---------- */
   const http = createServer(app);

@@ -40,6 +40,8 @@ export class DeviceHub {
   private pending = new Map<string, Pending>();
   private heartbeat: NodeJS.Timeout;
 
+  onHello?: (device: DeviceInfo, tools: ToolDefinition[]) => void;
+
   constructor(private readonly relayVersion: string, private readonly log: (l: string, m: string) => void) {
     this.heartbeat = setInterval(() => this.tick(), DEFAULTS.pingIntervalMs);
   }
@@ -70,6 +72,7 @@ export class DeviceHub {
         this.devices.set(deviceId, { info: msg.device, tools: msg.tools, ownerId, connectedAt: Date.now(), lastSeen: Date.now(), socket });
         this.sendTo(socket, { type: 'welcome', protocol: SES_RDP_PROTOCOL_VERSION, relayVersion: this.relayVersion, serverTime: Date.now() });
         this.log('info', `device online: ${msg.device.name} [${deviceId}] ${msg.device.platform} tools=${msg.tools.length}`);
+        try { this.onHello?.(msg.device, msg.tools); } catch (e) { this.log('warn', `onHello failed: ${e instanceof Error ? e.message : String(e)}`); }
         return;
       }
 

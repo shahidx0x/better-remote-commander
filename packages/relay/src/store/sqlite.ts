@@ -192,5 +192,33 @@ export class SqliteStore {
     this.db.prepare('DELETE FROM tokens WHERE expires_at IS NOT NULL AND expires_at < ?').run(now - 7 * 86_400_000);
   }
 
+
+  /* ---------- cached tool definitions (for OpenAPI when devices are offline) ---------- */
+  saveDeviceTools(deviceId: string, tools: unknown): void {
+    this.db.exec('CREATE TABLE IF NOT EXISTS device_tools (device_id TEXT PRIMARY KEY, tools TEXT NOT NULL, updated_at INTEGER NOT NULL)');
+    this.db.prepare('INSERT INTO device_tools VALUES (?,?,?) ON CONFLICT(device_id) DO UPDATE SET tools = excluded.tools, updated_at = excluded.updated_at')
+      .run(deviceId, JSON.stringify(tools), Date.now());
+  }
+  /** Union of cached tool definitions across a user's devices (newest definition per name wins). */
+  cachedTools(userId: string): { name: string; description: string; inputSchema: unknown; annotations?: Record<string, unknown> }[] {
+    this.db.exec('CREATE TABLE IF NOT EXISTS device_tools (device_id TEXT PRIMARY KEY, tools TEXT NOT NULL, updated_at INTEGER NOT NULL)');
+    const rows = this.db.prepare('SELECT t.tools FROM device_tools t JOIN devices d ON d.device_id = t.device_id WHERE d.user_id = ? ORDER BY t.updated_at DESC').all(userId) as { tools: string }[];
+    const merged = new Map<string, { name: string; description: string; inputSchema: unknown; annotations?: Record<string, unknown> }>();
+    for (const r of rows) for (const t of JSON.parse(r.tools) as { name: string; description: string; inputSchema: unknown; annotations?: Record<string, unknown> }[]) if (!merged.has(t.name)) merged.set(t.name, t);
+    return [...merged.values()];
+  }
+
+  /* ---------- OAuth clients (management) ---------- */
+  listClients(): ClientRow[] {
+    return this.db.prepare('SELECT * FROM oauth_clients ORDER BY created_at DESC').all() as unknown as ClientRow[];
+  }
+  updateClientMetadata(clientId: string, metadata: string): void {
+    this.db.prepare('UPDATE oauth_clients SET metadata = ? WHERE client_id = ?').run(metadata, clientId);
+  }
+  deleteClient(clientId: string): void {
+    this.db.prepare('UPDATE tokens SET revoked = 1 WHERE client_id = ?').run(clientId);
+    this.db.prepare('DELETE FROM oauth_clients WHERE client_id = ?').run(clientId);
+  }
+
   close(): void { this.db.close(); }
 }
