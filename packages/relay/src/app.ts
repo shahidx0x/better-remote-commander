@@ -52,7 +52,7 @@ export function loadConfig(): RelayConfig {
     sessionSecret: env.SES_RDP_SESSION_SECRET ?? '',
     adminUser: env.SES_RDP_ADMIN_USER ?? 'admin',
     adminPassword: env.SES_RDP_ADMIN_PASSWORD ?? '',
-    relayVersion: '1.0.0',
+    relayVersion: '1.0.1',
   };
 }
 

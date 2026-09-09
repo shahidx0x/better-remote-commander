@@ -34,7 +34,7 @@ Images are published to `ghcr.io/shahidx0x/better-remote-commander/relay` and `/
 
 **Without Docker**
 ```bash
-npm i -g https://github.com/shahidx0x/better-remote-commander/releases/latest/download/ses-systems-rdp-relay-1.0.0.tgz
+npm i -g https://github.com/shahidx0x/better-remote-commander/releases/latest/download/ses-systems-rdp-relay-1.0.1.tgz
 PUBLIC_URL=https://rdp.example.com SES_RDP_ADMIN_PASSWORD=... SES_RDP_SESSION_SECRET=... ses-rdp-relay
 ```
 Put it behind any HTTPS reverse proxy (Caddy, nginx, Cloudflare Tunnel) that forwards WebSockets, and set `TRUST_PROXY=true`.

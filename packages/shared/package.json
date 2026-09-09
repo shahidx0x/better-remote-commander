@@ -1,6 +1,6 @@
 {
     "name":  "@ses-systems/rdp-shared",
-    "version":  "1.0.0",
+    "version":  "1.0.1",
     "description":  "SES-RDP shared protocol types and tool schemas",
     "license":  "MIT",
     "type":  "module",

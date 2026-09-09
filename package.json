@@ -1,7 +1,7 @@
 {
     "name":  "ses-rdp",
     "private":  true,
-    "version":  "0.3.0",
+    "version":  "1.0.1",
     "description":  "SES-RDP - self-hosted remote desktop agent + relay for Claude and ChatGPT (MCP / REST)",
     "license":  "MIT",
     "packageManager":  "pnpm@11.24.0",
@@ -21,7 +21,8 @@
                     "publish:all":  "pnpm -r --filter \"./packages/*\" publish --access public",
                     "test:unit":  "node --test packages/relay/test/unit.test.mjs",
                     "test:e2e":  "node scripts/e2e-all.mjs",
-                    "test":  "pnpm test:unit \u0026\u0026 pnpm test:e2e"
+                    "test":  "pnpm test:unit \u0026\u0026 pnpm test:e2e",
+                    "check:openapi":  "node scripts/check-openapi-gpt.mjs http://localhost:3000"
                 },
     "devDependencies":  {
                             "@types/node":  "^24.0.0",
