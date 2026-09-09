@@ -16,6 +16,23 @@ const AUTH_CODE_TTL_MS = 10 * 60_000;
 const ACCESS_TTL_MS = 60 * 60_000;
 const REFRESH_TTL_MS = 30 * 86_400_000;
 
+/** Per-client option (metadata key `x_redirect_base`): after consent, send the browser to this origin
+ *  instead of the client's requested redirect_uri host. Path, `code` and `state` are preserved.
+ *  The requested redirect_uri is still validated against the registered list. */
+export const REDIRECT_BASE_KEY = 'x_redirect_base';
+export function applyRedirectOverride(client: OAuthClientInformationFull, url: URL): string {
+  const base = (client as Record<string, unknown>)[REDIRECT_BASE_KEY];
+  if (typeof base !== 'string' || !/^https?:\/\//.test(base)) return url.toString();
+  try {
+    const b = new URL(base);
+    const out = new URL(url.toString());
+    out.protocol = b.protocol; out.host = b.host;
+    const prefix = b.pathname.replace(/\/$/, '');
+    if (prefix) out.pathname = prefix + out.pathname;
+    return out.toString();
+  } catch { return url.toString(); }
+}
+
 export class RelayClientsStore implements OAuthRegisteredClientsStore {
   constructor(private readonly store: SqliteStore) {}
 
@@ -83,7 +100,7 @@ export class RelayOAuthProvider implements OAuthServerProvider {
     const url = new URL(p.params.redirectUri);
     url.searchParams.set('code', code);
     if (p.params.state) url.searchParams.set('state', p.params.state);
-    return url.toString();
+    return applyRedirectOverride(p.client, url);
   }
 
   denyCode(pendingId: string): string | null {
@@ -93,7 +110,7 @@ export class RelayOAuthProvider implements OAuthServerProvider {
     const url = new URL(p.params.redirectUri);
     url.searchParams.set('error', 'access_denied');
     if (p.params.state) url.searchParams.set('state', p.params.state);
-    return url.toString();
+    return applyRedirectOverride(p.client, url);
   }
 
   async challengeForAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {

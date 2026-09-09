@@ -19,7 +19,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { DeviceHub } from './device-hub.js';
 import { SqliteStore, verifyPassword } from './store/sqlite.js';
-import { RelayOAuthProvider, SCOPES } from './auth/provider.js';
+import { RelayOAuthProvider, SCOPES, REDIRECT_BASE_KEY } from './auth/provider.js';
 import { Sessions } from './auth/sessions.js';
 import { pkceCompat } from './auth/pkce-compat.js';
 import { createMcpServer } from './mcp/server.js';
@@ -204,17 +204,19 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
 
   /* ---------- OAuth client management (for GPT Actions etc.) ---------- */
   const clientRows = () => store.listClients().map((c) => {
-    const m = JSON.parse(c.metadata) as { client_name?: string; redirect_uris?: string[] };
-    return { client_id: c.client_id, name: m.client_name ?? c.client_id, redirect_uris: m.redirect_uris ?? [], hasSecret: !!c.client_secret, created_at: c.created_at };
+    const m = JSON.parse(c.metadata) as { client_name?: string; redirect_uris?: string[]; [k: string]: unknown };
+    return { client_id: c.client_id, name: m.client_name ?? c.client_id, redirect_uris: m.redirect_uris ?? [], redirect_base: typeof m[REDIRECT_BASE_KEY] === 'string' ? (m[REDIRECT_BASE_KEY] as string) : '', hasSecret: !!c.client_secret, created_at: c.created_at };
   });
   app.get('/auth/clients', requireLogin, (_req, res) => res.type('html').send(pages.clientsPage(clientRows())));
   app.post('/auth/clients', requireLogin, (req, res) => {
     const name = String(req.body.name ?? '').trim().slice(0, 80) || 'client';
     const uris = String(req.body.redirect_uris ?? '').split(/\r?\n/).map((s) => s.trim()).filter((s) => /^https?:\/\//.test(s));
+    const redirectBase = String(req.body.redirect_base ?? '').trim();
     const created = provider.clientsStore.registerClient({
       client_name: name, redirect_uris: uris, grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
       token_endpoint_auth_method: 'client_secret_post', scope: SCOPES.join(' '),
-    });
+      ...(/^https?:\/\//.test(redirectBase) ? { [REDIRECT_BASE_KEY]: redirectBase } : {}),
+    } as never);
     log('info', `oauth client created: ${name} [${created.client_id}]`);
     res.type('html').send(pages.clientsPage(clientRows(), { client_id: created.client_id, client_secret: created.client_secret ?? '' }));
   });
@@ -277,6 +279,8 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const meta = JSON.parse(row.metadata) as Record<string, unknown>;
     meta.client_name = String(req.body.name ?? '').trim().slice(0, 80) || meta.client_name;
     meta.redirect_uris = String(req.body.redirect_uris ?? '').split(/\r?\n/).map((s) => s.trim()).filter((s) => /^https?:\/\//.test(s));
+    const redirectBase = String(req.body.redirect_base ?? '').trim();
+    if (/^https?:\/\//.test(redirectBase)) meta[REDIRECT_BASE_KEY] = redirectBase; else delete meta[REDIRECT_BASE_KEY];
     store.updateClientMetadata(row.client_id, JSON.stringify(meta));
     res.redirect('/auth/clients');
   });

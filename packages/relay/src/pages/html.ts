@@ -77,6 +77,8 @@ export function clientsPage(clients: { client_id: string; name: string; redirect
 <p>For a ChatGPT GPT Action: create a client, paste ID + secret into the Action's OAuth settings, then come back and add the callback URL ChatGPT shows you.</p>
 <form method="post" action="/auth/clients"><label>Name</label><input name="name" placeholder="ChatGPT GPT Action" required>
 <label>Redirect URI(s), one per line</label><textarea name="redirect_uris" rows="2" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d3d1c8;border-radius:8px;font:inherit" placeholder="https://chat.openai.com/aip/g-XXXX/oauth/callback"></textarea>
+<label>After-consent redirect base (optional)</label><input name="redirect_base" placeholder="https://chatgpt.example.com">
+<p style="font-size:12px">If set, the browser is sent to this host (same path, code and state) instead of the client's own callback host.</p>
 <div class="row"><button class="primary" type="submit">Create client</button></div></form>
 <h1 style="margin-top:22px">Existing</h1>${rows}
 <p><a href="/">Back</a></p>`);

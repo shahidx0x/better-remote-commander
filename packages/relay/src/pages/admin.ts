@@ -32,10 +32,11 @@ export function adminPage(publicUrl: string, devices: DeviceView[], audit: Audit
 <table style="width:100%;font-size:13px;border-collapse:collapse"><tr><th align="left">when</th><th align="left">device</th><th align="left">tool</th><th align="left">result</th><th align="left">ms</th><th align="left">error</th></tr>${auditRows}</table>`, 'wide');
 }
 
-export function clientEditPage(c: { client_id: string; name: string; redirect_uris: string[] }): string {
+export function clientEditPage(c: { client_id: string; name: string; redirect_uris: string[]; redirect_base?: string }): string {
   return layout('Edit client', `<h1>Edit ${esc(c.name)}</h1><p><code>${esc(c.client_id)}</code></p>
 <form method="post" action="/auth/clients/edit"><input type="hidden" name="client_id" value="${esc(c.client_id)}">
 <label>Name</label><input name="name" value="${esc(c.name)}" required>
 <label>Redirect URI(s), one per line</label><textarea name="redirect_uris" rows="3" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d3d1c8;border-radius:8px;font:inherit">${esc(c.redirect_uris.join('\n'))}</textarea>
+<label>After-consent redirect base (optional)</label><input name="redirect_base" value="${esc(c.redirect_base ?? '')}" placeholder="https://chatgpt.example.com">
 <div class="row"><a href="/auth/clients"><button type="button" class="secondary">Cancel</button></a><button class="primary" type="submit">Save</button></div></form>`);
 }
