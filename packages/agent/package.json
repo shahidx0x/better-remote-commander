@@ -1,6 +1,6 @@
 {
     "name":  "@ses-systems/rdp-agent",
-    "version":  "0.3.0",
+    "version":  "1.0.0",
     "description":  "SES-RDP device agent - runs on the machine to be controlled, connects outbound to an SES-RDP relay",
     "license":  "MIT",
     "type":  "module",

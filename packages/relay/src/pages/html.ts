@@ -1,14 +1,14 @@
 /** Server-rendered HTML pages for the relay (no framework, no JS needed). */
 
-const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+export const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
-function layout(title: string, body: string): string {
+export function layout(title: string, body: string, width: 'narrow' | 'wide' = 'narrow'): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)} · SES-RDP</title>
 <style>
 :root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;margin:0;background:#f5f5f4;color:#1c1c1a;display:flex;min-height:100vh;align-items:center;justify-content:center}
 @media(prefers-color-scheme:dark){body{background:#151513;color:#e8e6df}.card{background:#1f1f1c!important;border-color:#33332f!important}input{background:#151513;color:#e8e6df;border-color:#44443f!important}}
-.card{background:#fff;border:1px solid #e2e0d8;border-radius:12px;padding:28px 32px;width:min(420px,92vw)}
+.card{background:#fff;border:1px solid #e2e0d8;border-radius:12px;padding:28px 32px;width:min(${width === 'wide' ? '900px' : '420px'},92vw)}
 h1{font-size:20px;font-weight:500;margin:0 0 4px}p{margin:8px 0;color:#6b6a64}.brand{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#8a8983;margin-bottom:14px}
 label{display:block;font-size:13px;margin:12px 0 4px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d3d1c8;border-radius:8px;font:inherit}
 input.code{font:22px/1 ui-monospace,monospace;letter-spacing:.2em;text-align:center;text-transform:uppercase}
@@ -61,13 +61,14 @@ export function homePage(publicUrl: string, loggedIn: boolean, devices: { device
     : '<p>No devices paired yet.</p>';
   return layout('Relay', `<h1>SES-RDP relay</h1>
 <p>MCP: <code>${esc(publicUrl)}/mcp</code><br>OpenAPI: <code>${esc(publicUrl)}/openapi.json</code></p>
-${loggedIn ? `<p>Devices:</p>${list}<div class="row"><a href="/device/verify"><button class="primary">Pair a device</button></a><a href="/auth/clients"><button class="secondary">OAuth clients</button></a><a href="/auth/logout"><button class="secondary">Sign out</button></a></div>`
+${loggedIn ? `<p>Devices:</p>${list}<div class="row"><a href="/admin"><button class="primary">Admin</button></a><a href="/device/verify"><button class="secondary">Pair a device</button></a><a href="/auth/clients"><button class="secondary">OAuth clients</button></a><a href="/auth/logout"><button class="secondary">Sign out</button></a></div>`
   : `<div class="row"><a href="/auth/login?returnTo=/"><button class="primary">Sign in</button></a></div>`}`);
 }
 
 export function clientsPage(clients: { client_id: string; name: string; redirect_uris: string[]; hasSecret: boolean; created_at: number }[], created?: { client_id: string; client_secret: string }): string {
   const rows = clients.length
     ? `<ul>${clients.map((c) => `<li><strong>${esc(c.name)}</strong><br><code>${esc(c.client_id)}</code>${c.hasSecret ? ' · secret' : ' · public (PKCE)'}<br><small>${c.redirect_uris.map(esc).join('<br>')}</small>
+<a href="/auth/clients/edit?client_id=${esc(c.client_id)}"><button type="button" class="secondary" style="padding:4px 10px;margin-top:6px">Edit</button></a>
 <form method="post" action="/auth/clients/delete" style="display:inline"><input type="hidden" name="client_id" value="${esc(c.client_id)}"><button class="secondary" style="padding:4px 10px;margin-top:6px" onclick="return confirm('Delete client and revoke its tokens?')">Delete</button></form></li>`).join('')}</ul>`
     : '<p>No OAuth clients yet. Claude registers itself automatically; ChatGPT GPT Actions need one created here.</p>';
   const banner = created ? `<p class="ok">Client created. Copy the secret now — it is not shown again.</p>

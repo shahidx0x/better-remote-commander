@@ -220,5 +220,13 @@ export class SqliteStore {
     this.db.prepare('DELETE FROM oauth_clients WHERE client_id = ?').run(clientId);
   }
 
+  renameDevice(deviceId: string, name: string): void {
+    this.db.prepare('UPDATE devices SET name = ? WHERE device_id = ?').run(name, deviceId);
+  }
+  auditStats(userId: string): { total: number; failed: number; last24h: number } {
+    const row = this.db.prepare('SELECT COUNT(*) AS total, SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failed, SUM(CASE WHEN ts > ? THEN 1 ELSE 0 END) AS last24h FROM audit WHERE user_id = ?').get(Date.now() - 86_400_000, userId) as { total: number; failed: number | null; last24h: number | null };
+    return { total: row.total, failed: row.failed ?? 0, last24h: row.last24h ?? 0 };
+  }
+
   close(): void { this.db.close(); }
 }

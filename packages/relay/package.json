@@ -1,6 +1,6 @@
 {
     "name":  "@ses-systems/rdp-relay",
-    "version":  "0.3.0",
+    "version":  "1.0.0",
     "description":  "SES-RDP relay - self-hosted MCP + REST server that routes tool calls to paired device agents",
     "license":  "MIT",
     "type":  "module",

@@ -105,3 +105,17 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
 2. GPT builder -> Actions -> Import from URL: PUBLIC_URL/openapi.json
 3. Authentication: OAuth; Client ID/Secret from step 1; Auth URL PUBLIC_URL/authorize; Token URL PUBLIC_URL/token; Scope mcp:tools; Token exchange: Default (POST)
 4. ChatGPT shows the callback URL (https://chat.openai.com/aip/g-.../oauth/callback) -> edit the client on /auth/clients and add it (delete + recreate in v1)
+
+## Phase 5 status (done) - v1.0
+- /admin dashboard: devices (rename / pause / resume / delete = revoke token + disconnect), call stats, last 100 audit rows
+- pause enforced on /mcp and /api (HTTP 423); delete closes the live socket with 4401
+- OAuth client edit page (/auth/clients/edit): name + redirect URIs (needed once ChatGPT reveals its callback URL)
+- login rate limit: 5 failures per IP+username -> 5 min lock (429)
+- agent `--install-service` / `--uninstall-service`: Windows Task Scheduler (ONLOGON, hidden via .cmd + wscript, log ~/.ses-rdp/agent.log), Linux systemd --user unit, macOS LaunchAgent. Pair first, then install
+- agent `--allow-dir <path>` (repeatable) persists allowedDirectories; upstream default is the home directory, blocked-commands list unchanged
+- e2e: `scripts/e2e-admin.mjs` 8/8; previous suites unchanged
+
+### Not done (deliberately)
+- Postgres store: SQLite is sufficient for a single relay instance; add only for multi-instance
+- multi-tenant users: v1 is single admin user
+- dropping md-to-pdf/puppeteer from the agent (write_pdf downloads Chrome on first use)

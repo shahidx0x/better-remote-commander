@@ -13,7 +13,7 @@ import { callTool, listTools } from './dispatcher.js';
 import { VERSION as CORE_VERSION } from './core/version.js';
 import { setCurrentClient } from './context.js';
 
-const AGENT_VERSION = '0.3.0';
+const AGENT_VERSION = '1.0.0';
 
 function arg(name: string, env?: string, def?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -32,6 +32,32 @@ const log = (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => {
 if (flag('logout')) {
   console.log(clearCredentials() ? 'Credentials removed.' : 'No saved credentials.');
   process.exit(0);
+}
+if (flag('install-service') || flag('uninstall-service')) {
+  const { installService, uninstallService } = await import('./service.js');
+  try {
+    if (flag('uninstall-service')) { console.log(uninstallService()); process.exit(0); }
+    if (!loadCredentials()) { console.error('Pair first: run the agent once interactively with --relay <url>, then --install-service.'); process.exit(2); }
+    // Service uses saved credentials; only pass through policy/debug flags.
+    const keep = new Set(['--debug', '--allow-dir']);
+    const passthrough: string[] = [];
+    const argv = process.argv.slice(2);
+    for (let i = 0; i < argv.length; i++) {
+      if (!keep.has(argv[i])) continue;
+      passthrough.push(argv[i]);
+      if (argv[i] === '--allow-dir' && argv[i + 1]) passthrough.push(argv[++i]);
+    }
+    console.log(installService(passthrough));
+  } catch (e) { console.error(`Service setup failed: ${e instanceof Error ? e.message : String(e)}`); process.exit(1); }
+  process.exit(0);
+}
+
+// --allow-dir <path> (repeatable): restrict tools to these directories (agent-side policy, persisted in config)
+const allowDirs = process.argv.flatMap((a, i, all) => (a === '--allow-dir' && all[i + 1] ? [all[i + 1]] : []));
+if (allowDirs.length) {
+  const { configManager } = await import('./core/config-manager.js');
+  await configManager.setValue('allowedDirectories', allowDirs);
+  console.log(`allowedDirectories set to: ${allowDirs.join(', ')}`);
 }
 
 async function resolveCredentials(): Promise<DeviceCredentials> {

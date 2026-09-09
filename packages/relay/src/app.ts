@@ -25,6 +25,8 @@ import { pkceCompat } from './auth/pkce-compat.js';
 import { createMcpServer } from './mcp/server.js';
 import * as pages from './pages/html.js';
 import { restRouter } from './api/rest.js';
+import * as adminPages from './pages/admin.js';
+import { LoginLimiter } from './auth/rate-limit.js';
 
 export interface RelayConfig {
   port: number;
@@ -50,7 +52,7 @@ export function loadConfig(): RelayConfig {
     sessionSecret: env.SES_RDP_SESSION_SECRET ?? '',
     adminUser: env.SES_RDP_ADMIN_USER ?? 'admin',
     adminPassword: env.SES_RDP_ADMIN_PASSWORD ?? '',
-    relayVersion: '0.3.0',
+    relayVersion: '1.0.0',
   };
 }
 
@@ -120,13 +122,19 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const safeReturn = (v: unknown) => (typeof v === 'string' && v.startsWith('/') && !v.startsWith('//') ? v : '/');
 
   app.get('/auth/login', (req, res) => res.type('html').send(pages.loginPage(safeReturn(req.query.returnTo))));
+  const limiter = new LoginLimiter();
   app.post('/auth/login', (req, res) => {
     const { username, password, returnTo } = req.body as Record<string, string>;
+    const key = `${req.ip}|${String(username ?? '').toLowerCase()}`;
+    const wait = limiter.locked(key);
+    if (wait) return res.status(429).type('html').send(pages.loginPage(safeReturn(returnTo), `Too many attempts. Try again in ${wait} s.`));
     const user = store.getUserByName(String(username ?? ''));
     if (!user || !verifyPassword(String(password ?? ''), user.password_hash)) {
+      limiter.fail(key);
       log('warn', `login failed for "${username}" from ${req.ip}`);
       return res.status(401).type('html').send(pages.loginPage(safeReturn(returnTo), 'Invalid username or password.'));
     }
+    limiter.ok(key);
     sessions.issue(res, user.id);
     res.redirect(safeReturn(returnTo));
   });
@@ -224,6 +232,45 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
       log('error', `mcp request failed: ${err instanceof Error ? err.message : String(err)}`);
       if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'internal error' }, id: null });
     }
+  });
+
+  /* ---------- admin dashboard ---------- */
+  app.get('/admin', requireLogin, (req, res) => {
+    const userId = currentUser(req)!;
+    const online = new Set(hub.list(userId).map((d) => d.deviceId));
+    const devices = store.listDevices(userId).map((d) => ({ ...d, online: online.has(d.device_id) }));
+    const names = new Map(devices.map((d) => [d.device_id, d.name]));
+    const audit = store.recentAudit(userId, 100).map((a) => ({ ts: a.ts, device: names.get(a.device_id ?? '') ?? (a.device_id ?? '?').slice(0, 8), client: a.client, tool: a.tool, ok: a.ok, ms: a.ms, error: a.error }));
+    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, store.auditStats(userId)));
+  });
+  app.post('/admin/device', requireLogin, (req, res) => {
+    const userId = currentUser(req)!;
+    const { device_id, action, name } = req.body as Record<string, string>;
+    const dev = store.getDevice(String(device_id ?? ''));
+    if (!dev || dev.user_id !== userId) return res.status(404).type('html').send(pages.messagePage('Not found', 'Unknown device.', false));
+    switch (action) {
+      case 'rename': store.renameDevice(dev.device_id, String(name ?? '').trim().slice(0, 80) || dev.name); break;
+      case 'pause': store.setDevicePaused(dev.device_id, true); break;
+      case 'resume': store.setDevicePaused(dev.device_id, false); break;
+      case 'delete': store.deleteDevice(dev.device_id); hub.get(dev.device_id)?.socket.close(4401, 'device removed'); break;
+    }
+    log('info', `admin: ${action} device ${dev.device_id}`);
+    res.redirect('/admin');
+  });
+
+  app.get('/auth/clients/edit', requireLogin, (req, res) => {
+    const c = clientRows().find((x) => x.client_id === String(req.query.client_id ?? ''));
+    if (!c) return res.status(404).type('html').send(pages.messagePage('Not found', 'Unknown client.', false));
+    res.type('html').send(adminPages.clientEditPage(c));
+  });
+  app.post('/auth/clients/edit', requireLogin, (req, res) => {
+    const row = store.getClient(String(req.body.client_id ?? ''));
+    if (!row) return res.status(404).type('html').send(pages.messagePage('Not found', 'Unknown client.', false));
+    const meta = JSON.parse(row.metadata) as Record<string, unknown>;
+    meta.client_name = String(req.body.name ?? '').trim().slice(0, 80) || meta.client_name;
+    meta.redirect_uris = String(req.body.redirect_uris ?? '').split(/\r?\n/).map((s) => s.trim()).filter((s) => /^https?:\/\//.test(s));
+    store.updateClientMetadata(row.client_id, JSON.stringify(meta));
+    res.redirect('/auth/clients');
   });
 
   /* ---------- REST + OpenAPI (GPT Actions) ---------- */
