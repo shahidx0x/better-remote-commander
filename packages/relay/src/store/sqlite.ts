@@ -228,5 +228,31 @@ export class SqliteStore {
     return { total: row.total, failed: row.failed ?? 0, last24h: row.last24h ?? 0 };
   }
 
+  /* ---------- API keys (static bearer tokens) ---------- */
+  private ensureApiKeys(): void {
+    this.db.exec('CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, prefix TEXT NOT NULL, created_at INTEGER NOT NULL, last_used INTEGER, revoked INTEGER NOT NULL DEFAULT 0)');
+  }
+  createApiKey(userId: string, name: string): { raw: string; prefix: string } {
+    this.ensureApiKeys();
+    const raw = `sesrdp_ak_${randomToken(32)}`;
+    const prefix = raw.slice(0, 18);
+    this.db.prepare('INSERT INTO api_keys (key_hash, user_id, name, prefix, created_at) VALUES (?,?,?,?,?)').run(sha256(raw), userId, name, prefix, Date.now());
+    return { raw, prefix };
+  }
+  getApiKey(raw: string): { user_id: string; name: string; prefix: string } | undefined {
+    this.ensureApiKeys();
+    const row = this.db.prepare('SELECT user_id, name, prefix FROM api_keys WHERE key_hash = ? AND revoked = 0').get(sha256(raw)) as { user_id: string; name: string; prefix: string } | undefined;
+    if (row) this.db.prepare('UPDATE api_keys SET last_used = ? WHERE key_hash = ?').run(Date.now(), sha256(raw));
+    return row;
+  }
+  listApiKeys(userId: string): { prefix: string; name: string; created_at: number; last_used: number | null }[] {
+    this.ensureApiKeys();
+    return this.db.prepare('SELECT prefix, name, created_at, last_used FROM api_keys WHERE user_id = ? AND revoked = 0 ORDER BY created_at DESC').all(userId) as unknown as { prefix: string; name: string; created_at: number; last_used: number | null }[];
+  }
+  revokeApiKey(userId: string, prefix: string): void {
+    this.ensureApiKeys();
+    this.db.prepare('UPDATE api_keys SET revoked = 1 WHERE user_id = ? AND prefix = ?').run(userId, prefix);
+  }
+
   close(): void { this.db.close(); }
 }

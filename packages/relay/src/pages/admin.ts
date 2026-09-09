@@ -26,10 +26,23 @@ export function adminPage(publicUrl: string, devices: DeviceView[], audit: Audit
   return layout('Admin', `<h1>Admin</h1>
 <p>MCP <code>${esc(publicUrl)}/mcp</code> · OpenAPI <code>${esc(publicUrl)}/openapi.json</code></p>
 <p>${stats.total} calls total · ${stats.last24h} in 24h · ${stats.failed} failed</p>
-<div class="row"><a href="/device/verify"><button class="primary">Pair a device</button></a><a href="/auth/clients"><button class="secondary">OAuth clients</button></a><a href="/auth/logout"><button class="secondary">Sign out</button></a></div>
+<div class="row"><a href="/device/verify"><button class="primary">Pair a device</button></a><a href="/auth/clients"><button class="secondary">OAuth clients</button></a><a href="/auth/apikeys"><button class="secondary">API keys</button></a><a href="/auth/logout"><button class="secondary">Sign out</button></a></div>
 <h1 style="margin-top:22px">Devices</h1><ul style="list-style:none;padding:0">${devRows}</ul>
 <h1 style="margin-top:22px">Recent calls</h1>
 <table style="width:100%;font-size:13px;border-collapse:collapse"><tr><th align="left">when</th><th align="left">device</th><th align="left">tool</th><th align="left">result</th><th align="left">ms</th><th align="left">error</th></tr>${auditRows}</table>`, 'wide');
+}
+
+export function apiKeysPage(keys: { prefix: string; name: string; created_at: number; last_used: number | null }[], created?: { name: string; raw: string }): string {
+  const banner = created ? `<p class="ok">API key "${esc(created.name)}" created. Copy it now — it is not shown again.</p>
+<label>API key</label><input readonly value="${esc(created.raw)}" onclick="this.select()">
+<p style="font-size:12px">Use as <code>Authorization: Bearer ${esc(created.raw.slice(0, 18))}…</code> on /api/* and /mcp. In a GPT Action choose Authentication → API Key → Auth Type: Bearer.</p>` : '';
+  const rows = keys.length ? `<ul>${keys.map((k) => `<li><strong>${esc(k.name)}</strong> <code>${esc(k.prefix)}…</code> · created ${ago(k.created_at)} · last used ${ago(k.last_used)}
+<form method="post" action="/auth/apikeys/revoke" style="display:inline"><input type="hidden" name="prefix" value="${esc(k.prefix)}"><button class="secondary" style="padding:4px 10px" onclick="return confirm('Revoke this key?')">Revoke</button></form></li>`).join('')}</ul>` : '<p>No API keys.</p>';
+  return layout('API keys', `<h1>API keys</h1>${banner}
+<p>Long-lived bearer tokens as an alternative to OAuth. Anyone holding a key can control your paired devices — treat it like a password.</p>
+<form method="post" action="/auth/apikeys"><label>Name</label><input name="name" placeholder="ChatGPT GPT" required>
+<div class="row"><button class="primary" type="submit">Create key</button></div></form>
+<h1 style="margin-top:22px">Existing</h1>${rows}<p><a href="/admin">Back</a></p>`);
 }
 
 export function clientEditPage(c: { client_id: string; name: string; redirect_uris: string[]; redirect_base?: string }): string {

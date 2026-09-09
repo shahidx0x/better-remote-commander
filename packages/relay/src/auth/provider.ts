@@ -136,6 +136,11 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
+    if (token.startsWith('sesrdp_ak_')) {
+      const key = this.deps.store.getApiKey(token);
+      if (!key) throw new InvalidTokenError('invalid or revoked API key');
+      return { token, clientId: `apikey:${key.name}`, scopes: SCOPES, expiresAt: Math.floor(Date.now() / 1000) + 3600, extra: { userId: key.user_id, apiKey: key.prefix } };
+    }
     const row = this.deps.store.getToken(token, 'access');
     if (!row) throw new InvalidTokenError('invalid or expired access token');
     return {

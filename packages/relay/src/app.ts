@@ -285,6 +285,20 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     res.redirect('/auth/clients');
   });
 
+  /* ---------- API keys ---------- */
+  app.get('/auth/apikeys', requireLogin, (req, res) => res.type('html').send(adminPages.apiKeysPage(store.listApiKeys(currentUser(req)!))));
+  app.post('/auth/apikeys', requireLogin, (req, res) => {
+    const userId = currentUser(req)!;
+    const name = String(req.body.name ?? '').trim().slice(0, 80) || 'api-key';
+    const { raw } = store.createApiKey(userId, name);
+    log('info', `api key created: ${name}`);
+    res.type('html').send(adminPages.apiKeysPage(store.listApiKeys(userId), { name, raw }));
+  });
+  app.post('/auth/apikeys/revoke', requireLogin, (req, res) => {
+    store.revokeApiKey(currentUser(req)!, String(req.body.prefix ?? ''));
+    res.redirect('/auth/apikeys');
+  });
+
   /* ---------- REST + OpenAPI (GPT Actions) ---------- */
   app.use(restRouter({ hub, store, bearer, publicUrl: cfg.publicUrl, relayVersion: cfg.relayVersion, adminUserId: admin.id }));
 
