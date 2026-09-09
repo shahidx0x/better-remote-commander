@@ -1,6 +1,6 @@
 {
     "name":  "@ses-systems/rdp-relay",
-    "version":  "0.1.0",
+    "version":  "0.3.0",
     "description":  "SES-RDP relay - self-hosted MCP + REST server that routes tool calls to paired device agents",
     "license":  "MIT",
     "type":  "module",
@@ -28,5 +28,16 @@
                             "@types/ws":  "^8.5.12",
                             "@types/express":  "^5.0.1",
                             "@types/cookie-parser":  "^1.4.8"
-                        }
+                        },
+    "publishConfig":  {
+                          "access":  "public"
+                      },
+    "repository":  {
+                       "type":  "git",
+                       "url":  "https://github.com/ses-systems/ses-rdp.git",
+                       "directory":  "packages/relay"
+                   },
+    "engines":  {
+                    "node":  "\u003e=22.13"
+                }
 }

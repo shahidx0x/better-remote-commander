@@ -1,7 +1,7 @@
 {
     "name":  "ses-rdp",
     "private":  true,
-    "version":  "0.1.0",
+    "version":  "0.3.0",
     "description":  "SES-RDP - self-hosted remote desktop agent + relay for Claude and ChatGPT (MCP / REST)",
     "license":  "MIT",
     "packageManager":  "pnpm@11.24.0",
@@ -16,7 +16,9 @@
                     "relay":  "pnpm --filter @ses-systems/rdp-relay start",
                     "dev:relay":  "pnpm --filter @ses-systems/rdp-relay build \u0026\u0026 node packages/relay/dist/cli.js",
                     "dev:agent":  "pnpm --filter @ses-systems/rdp-agent build \u0026\u0026 node packages/agent/dist/cli.js",
-                    "extract-tools":  "node scripts/extract-tools.mjs"
+                    "extract-tools":  "node scripts/extract-tools.mjs",
+                    "pack:all":  "pnpm -r --filter ./packages/* exec pnpm pack --pack-destination ../../dist-pack",
+                    "publish:all":  "pnpm -r --filter ./packages/* publish --access public"
                 },
     "devDependencies":  {
                             "@types/node":  "^24.0.0",

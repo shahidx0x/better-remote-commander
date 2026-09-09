@@ -1,31 +1,34 @@
 # SES-RDP architecture
 
 ## Components
-1. **Agent** (`agent/`) — runs on the user's machine. Reuses Desktop Commander tool core (MIT):
-   files, terminal, processes, search. Replaces Supabase channel with our transport.
-2. **Relay** (`relay/`) — self-hosted server. Two front doors, one tool dispatcher:
-   - `/mcp` — MCP Streamable HTTP + OAuth 2.0 (PKCE, dynamic client registration)
-   - `/api/*` + `/openapi.json` — REST for ChatGPT Custom GPT Actions
-   - `/device/start`, `/device/poll` — OAuth device-authorization flow (agent pairing)
-   - `/ws` — agent WebSocket hub (outbound from device, auto-reconnect)
-3. **Storage** — interface: `PostgresStore` (cloud) | `SqliteStore` (local, default)
-4. **Transport** — interface: `WebSocketTransport` (remote agents) | `LocalTransport` (in-process)
+1. **Agent** (`packages/agent`, npm `@ses-systems/rdp-agent`) — runs on the machine to control. Tool core vendored from
+   Desktop Commander (MIT): files, terminal, processes, search, edit. Our transport: outbound WebSocket, device pairing,
+   credential persistence in `$SES_RDP_HOME` (default `~/.ses-rdp`).
+2. **Relay** (`packages/relay`, npm `@ses-systems/rdp-relay`) — self-hosted server (Express + MCP SDK). Doors:
+   - `/mcp` — MCP Streamable HTTP, bearer-protected (Claude connector, ChatGPT remote MCP)
+   - `/api/*` + `/openapi.json` — REST for ChatGPT GPT Actions (Phase 4)
+   - `/.well-known/*`, `/authorize`, `/token`, `/register`, `/revoke` — OAuth 2.0 (PKCE, dynamic client registration)
+   - `/device/start|poll|verify|approve` — device pairing; `/auth/*`, `/` — browser pages
+   - `/ws` — agent socket (device token)
+3. **Shared** (`packages/shared`) — wire protocol + types used by both.
+4. **Store** — `node:sqlite` (`SES_RDP_DB`). Postgres is a possible later addition, not required.
 
 ## Flow
-Client -> relay (`/mcp` or `/api`) -> auth -> device router -> agent (WS or local) -> tool -> result back.
+Client -> relay (`/mcp` or `/api`) -> OAuth bearer -> device router -> agent (WS) -> tool -> result back. Audit row per call.
 
-## Deployment modes (same code, config only)
-| Mode | Relay | Public URL | Storage | Agent link |
-|------|-------|------------|---------|------------|
-| A cloud | VPS docker | own domain, Caddy TLS | Postgres | WSS internet |
-| B tunnel | local docker/bare | ngrok / Cloudflare Tunnel | SQLite | WS localhost/LAN |
-| C direct | local, agent in-process | ngrok / Cloudflare Tunnel | SQLite | none (function call) |
+## Deployment modes (same image, config only)
+| Profile | Relay runs | Public URL | Agent link |
+|---------|-----------|------------|------------|
+| `local` | your PC, Docker | http://localhost:PORT (dev only) | ws://localhost |
+| `tunnel` + `cloudflare` / `ngrok` | your PC, Docker | Cloudflare Tunnel hostname / static ngrok domain | ws://localhost or wss://public |
+| `cloud` | VPS, Docker + Caddy | your domain, auto TLS | wss://public |
+Agents anywhere connect outbound only; several agents per relay; `deviceId` selects the target.
 
 ## Key config
-- `PUBLIC_URL` — drives OAuth issuer, redirect URIs, OpenAPI `servers[]`
-- `TRUST_PROXY=true` — honour X-Forwarded-* behind ngrok/Cloudflare
-- `STORE=sqlite|postgres`, `TRANSPORT=ws|local`, `PORT`
-- `scripts/tunnel.sh` — start ngrok, read URL from `localhost:4040/api/tunnels`, export `PUBLIC_URL`, run relay
+- `PUBLIC_URL` — drives OAuth issuer, redirect validation, pairing URLs. Must be the exact public origin.
+- `TRUST_PROXY=true` behind Caddy/ngrok/Cloudflare. `PORT`, `HOST`, `SES_RDP_DB`, `LOG_LEVEL`
+- `SES_RDP_ADMIN_USER` / `SES_RDP_ADMIN_PASSWORD` (single-user v1), `SES_RDP_SESSION_SECRET`
+- Agent: `SES_RDP_RELAY`, `SES_RDP_NAME`, `SES_RDP_HOME`, `SES_RDP_DEBUG`; `--logout`, `--no-browser`
 
 ## Agent <-> relay protocol (WebSocket, JSON frames)
 - Agent connects `wss://PUBLIC_URL/ws` with `Authorization: Bearer <device token>`
@@ -41,10 +44,6 @@ Client -> relay (`/mcp` or `/api`) -> auth -> device router -> agent (WS or loca
 - Blocked-commands list + allowedDirectories enforced on the agent side
 - Audit log of every call (tool, args hash, device, timestamp) in store
 
-## Docker compose profiles
-- `local`  : relay (SQLite)
-- `tunnel` : relay + ngrok or cloudflared sidecar
-- `cloud`  : relay + postgres + caddy
 
 ## Phase 1 status (done)
 - shared: wire protocol v1 (hello/welcome/call/result/ping/pong/error), DEFAULTS
