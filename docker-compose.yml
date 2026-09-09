@@ -1,0 +1,73 @@
+# SES-RDP relay - Docker Compose with three profiles (same image, config only)
+#   local  : relay only, SQLite, http://localhost:${PORT}      -> docker compose --profile local up -d
+#   tunnel : relay + cloudflared or ngrok sidecar (public HTTPS from your PC)
+#            docker compose --profile tunnel --profile cloudflare up -d
+#            docker compose --profile tunnel --profile ngrok up -d
+#   cloud  : relay + Caddy (auto TLS) on a VPS                  -> docker compose --profile cloud up -d
+# Copy .env.example to .env first.
+
+x-relay: &relay
+  build: { context: ., dockerfile: packages/relay/Dockerfile }
+  image: ses-systems/rdp-relay:${RELAY_TAG:-latest}
+  restart: unless-stopped
+  environment:
+    PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in .env}
+    TRUST_PROXY: ${TRUST_PROXY:-true}
+    SES_RDP_ADMIN_USER: ${SES_RDP_ADMIN_USER:-admin}
+    SES_RDP_ADMIN_PASSWORD: ${SES_RDP_ADMIN_PASSWORD:?set SES_RDP_ADMIN_PASSWORD in .env}
+    SES_RDP_SESSION_SECRET: ${SES_RDP_SESSION_SECRET:?set SES_RDP_SESSION_SECRET in .env}
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+  volumes:
+    - relay-data:/data
+
+services:
+  # --- local / tunnel: relay published on localhost ---
+  relay:
+    <<: *relay
+    profiles: [local, tunnel]
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-3000}:3000"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: [cloudflare]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on: [relay]
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    profiles: [ngrok]
+    restart: unless-stopped
+    command: http relay:3000 --url=${NGROK_DOMAIN:-}
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    ports:
+      - "127.0.0.1:4040:4040"
+    depends_on: [relay]
+
+  # --- cloud: relay behind Caddy with automatic Let's Encrypt ---
+  relay-cloud:
+    <<: *relay
+    profiles: [cloud]
+    expose: ["3000"]
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: [cloud]
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [relay-cloud]
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:

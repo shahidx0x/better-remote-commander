@@ -76,3 +76,18 @@ Client -> relay (`/mcp` or `/api`) -> auth -> device router -> agent (WS or loca
     node packages/relay/dist/cli.js
     node packages/agent/dist/cli.js --relay http://localhost:3210 --name MyPC     # prints pairing code, opens browser
     # Claude: Settings -> Connectors -> add  <PUBLIC_URL>/mcp  -> sign in -> Allow
+
+## Phase 3 status (done)
+- images: packages/relay/Dockerfile (node:24-alpine, 263 MB, non-root, HEALTHCHECK) and packages/agent/Dockerfile (node:24-bookworm-slim + bash/git/curl, for Linux servers)
+- docker-compose.yml profiles: `local` (relay on 127.0.0.1:PORT), `tunnel` + `cloudflare` (cloudflared sidecar, TUNNEL_TOKEN) or `tunnel` + `ngrok` (static NGROK_DOMAIN), `cloud` (relay + Caddy auto-TLS on DOMAIN)
+- deploy/Caddyfile, .env.example, .dockerignore, scripts/tunnel-ngrok.{sh,ps1} for a quick random-URL dev tunnel
+- verified: local profile 14/14 e2e; device tokens persist in `relay-data` volume across `compose down/up`; Windows host agent + Linux container agent on one relay; multi-device routing (`scripts/e2e-multidevice.mjs`)
+- compose gotcha: profile-specific `${VAR:?}` breaks every profile (compose interpolates all services) -> use `${VAR:-}` defaults
+
+### Deploy cheat sheet
+    cp .env.example .env   # set PUBLIC_URL, SES_RDP_ADMIN_PASSWORD, SES_RDP_SESSION_SECRET
+    docker compose --profile local up -d                            # http://localhost:3000
+    docker compose --profile tunnel --profile cloudflare up -d      # + CLOUDFLARE_TUNNEL_TOKEN, PUBLIC_URL=https://rdp.yourdomain
+    docker compose --profile tunnel --profile ngrok up -d           # + NGROK_AUTHTOKEN, NGROK_DOMAIN, PUBLIC_URL=https://<domain>
+    docker compose --profile cloud up -d                            # VPS: DOMAIN=..., PUBLIC_URL=https://DOMAIN
+    docker run -d -v ses-rdp-agent:/home/rdp/.ses-rdp -e SES_RDP_RELAY=https://... -e SES_RDP_NAME=srv ses-systems/rdp-agent

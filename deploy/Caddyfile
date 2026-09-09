@@ -1,0 +1,16 @@
+# SES-RDP relay behind Caddy (cloud profile). DOMAIN comes from .env
+{$DOMAIN} {
+    encode gzip
+    reverse_proxy relay-cloud:3000 {
+        # WebSocket upgrades pass through automatically; keep agent sockets alive
+        transport http {
+            read_timeout 0
+            write_timeout 0
+        }
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        -Server
+    }
+}
