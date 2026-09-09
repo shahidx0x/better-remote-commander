@@ -20,12 +20,16 @@ Tool core is vendored from Desktop Commander (MIT); the relay is our own.
 - `scripts/` — `extract-tools.mjs` regenerates `core/tool-definitions.ts` from `server.ts.ref`
 - `reference-desktop-commander/` — upstream clone (gitignored, for reference only)
 
-## Quick start (Phase 1, static tokens)
+## Quick start
 ```
 pnpm install && pnpm build
-$env:PORT=3210; $env:SES_RDP_DEVICE_TOKEN='dev-device-token'; $env:SES_RDP_ADMIN_TOKEN='dev-admin-token'
+# relay
+$env:PORT=3210; $env:PUBLIC_URL='http://localhost:3210'
+$env:SES_RDP_ADMIN_PASSWORD='choose-a-password'; $env:SES_RDP_SESSION_SECRET='random-string'
 node packages/relay/dist/cli.js
-node packages/agent/dist/cli.js --relay http://localhost:3210 --token dev-device-token --name MyPC --device-id mypc
-curl -H "Authorization: Bearer dev-admin-token" http://localhost:3210/debug/devices
+# agent (on the machine to control) - prints a pairing code, opens the approval page
+node packages/agent/dist/cli.js --relay http://localhost:3210 --name MyPC
+# Claude: Settings -> Connectors -> Add custom connector -> http://<PUBLIC_URL>/mcp
+# verify everything: node scripts/e2e-oauth.mjs http://localhost:3210 admin choose-a-password
 ```
-Agent state lives in `~/.ses-rdp/` (override with `SES_RDP_HOME`). Upstream telemetry is off.
+Agent state lives in `~/.ses-rdp/` (override with `SES_RDP_HOME`); `--logout` removes the saved device token. Upstream telemetry is off.

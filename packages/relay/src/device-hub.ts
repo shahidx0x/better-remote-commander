@@ -45,7 +45,7 @@ export class DeviceHub {
   }
 
   /** Attach an authenticated socket; the agent must send `hello` as its first frame. */
-  attach(socket: WebSocket, ownerId: string): void {
+  attach(socket: WebSocket, ownerId: string, expectedDeviceId?: string): void {
     let deviceId: string | null = null;
 
     socket.on('message', (raw) => {
@@ -56,6 +56,10 @@ export class DeviceHub {
         if (msg.protocol !== SES_RDP_PROTOCOL_VERSION) {
           this.sendTo(socket, { type: 'error', code: 'PROTOCOL_MISMATCH', message: `relay speaks v${SES_RDP_PROTOCOL_VERSION}`, fatal: true });
           return socket.close(1002, 'protocol mismatch');
+        }
+        if (expectedDeviceId && msg.device.deviceId !== expectedDeviceId) {
+          this.sendTo(socket, { type: 'error', code: 'DEVICE_ID_MISMATCH', message: 'hello.deviceId does not match the paired device token', fatal: true });
+          return socket.close(4403, 'device id mismatch');
         }
         deviceId = msg.device.deviceId;
         const prev = this.devices.get(deviceId);

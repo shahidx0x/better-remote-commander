@@ -1,26 +1,32 @@
 {
-  "name": "@ses-systems/rdp-relay",
-  "version": "0.1.0",
-  "description": "SES-RDP relay - self-hosted MCP + REST server that routes tool calls to paired device agents",
-  "license": "MIT",
-  "type": "module",
-  "bin": { "ses-rdp-relay": "dist/cli.js" },
-  "main": "dist/index.js",
-  "files": ["dist"],
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/cli.js",
-    "dev": "tsc -p tsconfig.json --watch"
-  },
-  "dependencies": {
-    "@ses-systems/rdp-shared": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.9.0",
-    "fastify": "^5.2.0",
-    "@fastify/websocket": "^11.0.0",
-    "ws": "^8.18.0",
-    "zod": "^3.24.1"
-  },
-  "devDependencies": {
-    "@types/ws": "^8.5.12"
-  }
+    "name":  "@ses-systems/rdp-relay",
+    "version":  "0.1.0",
+    "description":  "SES-RDP relay - self-hosted MCP + REST server that routes tool calls to paired device agents",
+    "license":  "MIT",
+    "type":  "module",
+    "bin":  {
+                "ses-rdp-relay":  "dist/cli.js"
+            },
+    "main":  "dist/index.js",
+    "files":  [
+                  "dist"
+              ],
+    "scripts":  {
+                    "build":  "tsc -p tsconfig.json",
+                    "start":  "node dist/cli.js",
+                    "dev":  "tsc -p tsconfig.json --watch"
+                },
+    "dependencies":  {
+                         "@ses-systems/rdp-shared":  "workspace:*",
+                         "@modelcontextprotocol/sdk":  "^1.9.0",
+                         "ws":  "^8.18.0",
+                         "zod":  "^3.24.1",
+                         "express":  "^5.1.0",
+                         "cookie-parser":  "^1.4.7"
+                     },
+    "devDependencies":  {
+                            "@types/ws":  "^8.5.12",
+                            "@types/express":  "^5.0.1",
+                            "@types/cookie-parser":  "^1.4.8"
+                        }
 }
