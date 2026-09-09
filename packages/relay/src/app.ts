@@ -73,7 +73,15 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   app.set('trust proxy', cfg.trustProxy);
   app.disable('x-powered-by');
   app.use(cookieParser());
-  app.use(express.urlencoded({ extended: false }));
+  app.use(express.urlencoded({ extended: false, limit: '64kb' }));
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store');
+    if (cfg.publicUrl.startsWith('https://')) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+    next();
+  });
 
   const currentUser = (req: Request) => sessions.userId(req);
 
@@ -150,7 +158,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   app.get('/health', (_req, res) => res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl }));
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */
-  app.post('/device/start', express.json(), (req, res) => {
+  app.post('/device/start', express.json({ limit: '4kb' }), (req, res) => {
     const clientName = String((req.body as Record<string, unknown>)?.client_name ?? 'ses-rdp-agent').slice(0, 80);
     const row = store.createDeviceCode(clientName, DEVICE_CODE_TTL_MS);
     res.json({
@@ -161,7 +169,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     });
   });
 
-  app.post('/device/poll', express.json(), (req, res) => {
+  app.post('/device/poll', express.json({ limit: '4kb' }), (req, res) => {
     const { device_code, device_id, name, platform } = (req.body ?? {}) as Record<string, string | undefined>;
     const row = device_code ? store.getDeviceCode(device_code) : undefined;
     if (!row) return res.status(400).json({ error: 'invalid_grant', error_description: 'unknown device_code' });

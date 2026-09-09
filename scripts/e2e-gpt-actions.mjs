@@ -67,7 +67,7 @@ step('unknown tool -> 404', unknown.status === 404);
 const noauth = await fetch(`${base}/api/devices`);
 step('no bearer -> 401', noauth.status === 401);
 const cfgRes = await (await fetch(`${base}/api/tools/get_config`, { method: 'POST', headers: H, body: JSON.stringify({ deviceId: target }) })).json();
-const allowed = JSON.parse(cfgRes.text.slice(cfgRes.text.indexOf('{'))).allowedDirectories?.[0];
+const allowed = JSON.parse(cfgRes.text.slice(cfgRes.text.indexOf('{'))).allowedDirectories?.[0] ?? (await import('node:os')).tmpdir();
 const sep = allowed?.includes('\\') ? '\\' : '/';
 const bigPath = `${allowed}${sep}ses-rdp-big.txt`;
 await fetch(`${base}/api/tools/write_file`, { method: 'POST', headers: H, body: JSON.stringify({ deviceId: target, path: bigPath, content: Array.from({ length: 4 }, () => 'x'.repeat(50_000)).join('\n') }) });

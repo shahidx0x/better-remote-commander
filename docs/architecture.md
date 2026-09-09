@@ -119,3 +119,10 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
 - Postgres store: SQLite is sufficient for a single relay instance; add only for multi-instance
 - multi-tenant users: v1 is single admin user
 - dropping md-to-pdf/puppeteer from the agent (write_pdf downloads Chrome on first use)
+
+## Phase 6 status (hardening)
+- `pnpm test` = `test:unit` (node:test, 6 tests: password hashing, store tokens/devices/pairing/audit, login limiter, PKCE shim, device hub incl. protocol/id mismatch, timeouts, ambiguity) + `test:e2e` (`scripts/e2e-all.mjs` boots relay + agent on a scratch port/db, auto-pairs, runs oauth 14 / gpt-actions 13 / admin 8 checks, tears down)
+- `.github/workflows/ci.yml`: build + unit + e2e on ubuntu and windows, npm tarball artifacts, Docker image build + smoke
+- security headers (nosniff, frame DENY, no-referrer, no-store, HSTS on https), body limits on public endpoints (64 kb forms, 4 kb pairing JSON)
+- SECURITY.md: model, defaults, threat notes
+- rate-limit caveat: e2e-admin locks `admin` for 5 min; the runner uses a fresh relay so it is only an issue when running that script by hand twice
