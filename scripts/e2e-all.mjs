@@ -1,14 +1,15 @@
 // One-shot e2e runner: boots relay + agent on a scratch port/db, auto-pairs, runs all suites, tears down.
 // pnpm test:e2e     (needs `pnpm build` first)
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const PORT = Number(process.env.E2E_PORT ?? 3555);
 const base = `http://localhost:${PORT}`;
 const pass = 'e2e-pass-' + Math.random().toString(36).slice(2, 8);
-const scratch = mkdtempSync(path.join(tmpdir(), 'ses-rdp-e2e-'));
+// realpath: Windows runners hand out 8.3 short paths (RUNNER~1) which crash libuv's fs.watch
+const scratch = mkdtempSync(path.join(realpathSync.native(tmpdir()), 'ses-rdp-e2e-'));
 const procs = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const relayCli = path.resolve('packages/relay/dist/cli.js');

@@ -2,14 +2,16 @@
  * SES-RDP agent device pairing (OAuth device-authorization style) + credential persistence.
  * Credentials: $SES_RDP_HOME/device.json (mode 0600) -> { relayUrl, deviceId, deviceToken, name, pairedAt }
  */
-import { mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync, existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 
 export interface DeviceCredentials { relayUrl: string; deviceId: string; deviceToken: string; name: string; pairedAt: string }
 
-export const homeDir = () => process.env.SES_RDP_HOME ?? path.join(os.homedir(), '.ses-rdp');
+const longPath = (p: string): string => { try { return realpathSync.native(p); } catch { const parent = path.dirname(p); return parent === p ? p : path.join(longPath(parent), path.basename(p)); } };
+/** Agent home. Resolved to a long path: Windows 8.3 short paths crash libuv's fs.watch (used by the config watcher). */
+export const homeDir = () => longPath(process.env.SES_RDP_HOME ?? path.join(os.homedir(), '.ses-rdp'));
 const credFile = () => path.join(homeDir(), 'device.json');
 
 export function loadCredentials(): DeviceCredentials | null {
