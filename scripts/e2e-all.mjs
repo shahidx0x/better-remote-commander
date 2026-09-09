@@ -67,6 +67,7 @@ try {
   console.error('runner error:', e instanceof Error ? e.message : e);
   for (const p of procs) if (p.out) console.error(p.out.slice(-800));
 } finally {
+  if (failed) for (const p of procs) if (p.out) console.error(`\n--- ${p.spawnargs?.[1]?.split(/[\\/]/).slice(-3).join('/')} output ---\n${p.out.slice(-3000)}`);
   for (const p of procs) { try { p.kill('SIGTERM'); } catch {} }
   await sleep(500);
   for (const p of procs) { try { p.kill('SIGKILL'); } catch {} }

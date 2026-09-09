@@ -20,7 +20,7 @@ jobs:
       - run: pnpm build
       - run: pnpm test:unit
       - run: pnpm test:e2e
-        env: { E2E_PORT: '3555' }
+        env: { E2E_PORT: '3555', SES_RDP_DEBUG: '1' }
       - name: pack npm tarballs
         if: matrix.os == 'ubuntu-latest'
         run: pnpm pack:all
