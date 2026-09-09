@@ -8,7 +8,7 @@
 
 x-relay: &relay
   build: { context: ., dockerfile: packages/relay/Dockerfile }
-  image: ses-systems/rdp-relay:${RELAY_TAG:-latest}
+  image: ghcr.io/shahidx0x/better-remote-commander/relay:${RELAY_TAG:-latest}
   restart: unless-stopped
   environment:
     PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in .env}

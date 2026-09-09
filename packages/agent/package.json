@@ -63,7 +63,7 @@
                       },
     "repository":  {
                        "type":  "git",
-                       "url":  "https://github.com/ses-systems/ses-rdp.git",
+                       "url":  "https://github.com/shahidx0x/better-remote-commander.git",
                        "directory":  "packages/agent"
                    },
     "engines":  {

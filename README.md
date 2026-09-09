@@ -1,35 +1,82 @@
-# SES-RDP — Remote Desktop Agent / MCP Harness
+# Better Remote Commander
 
-Self-hosted remote desktop agent + relay that exposes files, terminal and processes of your
-machines to Claude (remote MCP connector) and ChatGPT (remote MCP / GPT Actions).
-Tool core is vendored from Desktop Commander (MIT); the relay is our own.
+Self-hosted remote control of your own computers from **Claude** and **ChatGPT**.
+Files, terminal and processes on any machine you pair — through a relay **you** host, on **your** domain.
 
-## Status
-- [x] Phase 0 — monorepo scaffold, tool core vendored, build green
-- [x] Phase 1 — agent WS transport + relay device hub, end-to-end tool calls
-- [ ] Phase 2 — `/mcp` + OAuth + device pairing + SQLite (Claude connector)
-- [ ] Phase 3 — Docker profiles: local / tunnel (ngrok, Cloudflare) / cloud (Caddy)
-- [ ] Phase 4 — ChatGPT: remote MCP + REST/OpenAPI for GPT Actions
-- [ ] Phase 5 — policy, dashboard, Postgres, service install
-
-## Layout
-- `packages/shared` — wire protocol + types
-- `packages/agent`  — device agent (`ses-rdp-agent`), `src/core` = vendored tool core
-- `packages/relay`  — relay server (`ses-rdp-relay`)
-- `docs/architecture.md` — design, deployment modes, protocol
-- `scripts/` — `extract-tools.mjs` regenerates `core/tool-definitions.ts` from `server.ts.ref`
-- `reference-desktop-commander/` — upstream clone (gitignored, for reference only)
-
-## Quick start
 ```
-pnpm install && pnpm build
-# relay
-$env:PORT=3210; $env:PUBLIC_URL='http://localhost:3210'
-$env:SES_RDP_ADMIN_PASSWORD='choose-a-password'; $env:SES_RDP_SESSION_SECRET='random-string'
-node packages/relay/dist/cli.js
-# agent (on the machine to control) - prints a pairing code, opens the approval page
-node packages/agent/dist/cli.js --relay http://localhost:3210 --name MyPC
-# Claude: Settings -> Connectors -> Add custom connector -> http://<PUBLIC_URL>/mcp
-# verify everything: node scripts/e2e-oauth.mjs http://localhost:3210 admin choose-a-password
+Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  ──outbound WebSocket──▶  agent on your machine
 ```
-Agent state lives in `~/.ses-rdp/` (override with `SES_RDP_HOME`); `--logout` removes the saved device token. Upstream telemetry is off.
+
+- **Claude**: add the relay as a custom connector (remote MCP). Works in claude.ai web, desktop and mobile.
+- **ChatGPT**: remote MCP connector, or a Custom GPT via the built-in OpenAPI spec (GPT Actions).
+- **Your infrastructure**: run the relay on a VPS, or on your PC behind a Cloudflare Tunnel / ngrok. SQLite, one container, no third-party service.
+- **Many machines**: pair Windows, macOS, Linux boxes and containers to one relay; agents only connect outbound.
+- **Control**: browser dashboard to pair, pause, rename and remove devices, manage OAuth clients and see an audit log.
+
+Tools available to the AI (24): `read_file`, `write_file`, `edit_block`, `list_directory`, `move_file`, `get_file_info`,
+`start_process`, `interact_with_process`, `read_process_output`, `list_processes`, `kill_process`, `start_search`,
+`write_pdf`, `get_config`, `set_config_value` and more — the same tool set as Desktop Commander.
+
+## Install
+
+### 1. Relay (once, on a server or your PC)
+
+**Docker (recommended)**
+```bash
+git clone https://github.com/shahidx0x/better-remote-commander.git && cd better-remote-commander
+cp .env.example .env        # set PUBLIC_URL, SES_RDP_ADMIN_PASSWORD, SES_RDP_SESSION_SECRET
+docker compose --profile cloud up -d                            # VPS with your domain (Caddy, auto-TLS)
+docker compose --profile tunnel --profile cloudflare up -d      # your PC via Cloudflare Tunnel
+docker compose --profile tunnel --profile ngrok up -d           # your PC via a static ngrok domain
+docker compose --profile local up -d                            # localhost only (testing)
+```
+Images are published to `ghcr.io/shahidx0x/better-remote-commander/relay` and `/agent`.
+
+**Without Docker**
+```bash
+npm i -g https://github.com/shahidx0x/better-remote-commander/releases/latest/download/ses-systems-rdp-relay-1.0.0.tgz
+PUBLIC_URL=https://rdp.example.com SES_RDP_ADMIN_PASSWORD=... SES_RDP_SESSION_SECRET=... ses-rdp-relay
+```
+Put it behind any HTTPS reverse proxy (Caddy, nginx, Cloudflare Tunnel) that forwards WebSockets, and set `TRUST_PROXY=true`.
+
+### 2. Agent (on every machine you want to control)
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/shahidx0x/better-remote-commander/main/install.sh | bash
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/shahidx0x/better-remote-commander/main/install.ps1 | iex
+
+ses-rdp-agent --relay https://rdp.example.com --name "My PC"
+```
+The agent prints a pairing code and opens `https://rdp.example.com/device/verify`; sign in and approve.
+Then make it start at login: `ses-rdp-agent --install-service`.
+
+Docker agent (Linux servers): `docker run -d -v ses-rdp-agent:/home/rdp/.ses-rdp -e SES_RDP_RELAY=https://rdp.example.com -e SES_RDP_NAME=srv1 ghcr.io/shahidx0x/better-remote-commander/agent`
+
+### 3. Connect your AI
+
+- **Claude**: Settings → Connectors → Add custom connector → URL `https://rdp.example.com/mcp` → Add → Connect → sign in → Allow.
+- **ChatGPT (MCP)**: Settings → Connectors → add `https://rdp.example.com/mcp`.
+- **ChatGPT (Custom GPT Action)**: open `https://rdp.example.com/auth/clients`, create a client, then in the GPT builder import `https://rdp.example.com/openapi.json`, choose OAuth, paste client ID/secret, auth URL `/authorize`, token URL `/token`, scope `mcp:tools`, and add the callback URL ChatGPT shows you to the client.
+
+Useful URLs on your relay: `/admin` (devices, audit), `/device/verify` (pairing), `/auth/clients`, `/health`.
+
+## Build from source
+```bash
+pnpm install && pnpm build && pnpm test
+node packages/relay/dist/cli.js      # relay
+node packages/agent/dist/cli.js      # agent
+```
+Requires Node 22.13+ (uses `node:sqlite`) and pnpm 11. Design notes: `docs/architecture.md`. Security notes: `SECURITY.md`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Credits
+
+The agent's tool implementation (`packages/agent/src/core`) is derived from
+[Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP) by Eduard Ruzga and contributors (MIT).
+Desktop Commander's hosted remote relay is proprietary; this project provides an open, self-hostable relay with the same
+device-agent model, plus OAuth for Claude/ChatGPT, device pairing, a dashboard and a REST/OpenAPI door. See [NOTICE](NOTICE).

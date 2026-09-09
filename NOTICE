@@ -1,0 +1,13 @@
+Better Remote Commander
+=======================
+
+Third-party code
+----------------
+packages/agent/src/core/  is derived from Desktop Commander MCP
+  https://github.com/wonderwhy-er/DesktopCommanderMCP  (MIT)
+  Copyright (c) 2024-2025 Eduard Ruzga and Desktop Commander Contributors
+  Modifications: removed Supabase/stdio/remote-device transport and telemetry defaults,
+  added SES-RDP context shim, own config directory (~/.ses-rdp), tool-definition extraction.
+
+Everything else (relay, protocol, agent transport, pairing, dashboard, REST/OpenAPI,
+Docker/CI) is original work of this project, MIT licensed.
