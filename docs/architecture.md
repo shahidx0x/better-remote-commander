@@ -45,3 +45,17 @@ Client -> relay (`/mcp` or `/api`) -> auth -> device router -> agent (WS or loca
 - `local`  : relay (SQLite)
 - `tunnel` : relay + ngrok or cloudflared sidecar
 - `cloud`  : relay + postgres + caddy
+
+## Phase 1 status (done)
+- shared: wire protocol v1 (hello/welcome/call/result/ping/pong/error), DEFAULTS
+- agent: dispatcher (24 tools, ported from upstream switch), WsClient with backoff reconnect + pong watchdog, CLI (--relay --token --name --device-id --debug)
+- relay: Fastify + @fastify/websocket, DeviceHub (call/result matching, heartbeat, stale-socket replacement), /health, /ws, /debug/devices, /debug/tools, /debug/call
+- agent uses ~/.ses-rdp (SES_RDP_HOME) - never touches Desktop Commander's ~/.claude-server-commander
+- upstream telemetry hard-off unless SES_RDP_UPSTREAM_TELEMETRY=1
+- smoke test: read_file 8 ms, start_process 579 ms via relay; agent survives relay restart
+
+### Run locally
+    $env:PORT=3210; $env:SES_RDP_DEVICE_TOKEN='dev-device-token'; $env:SES_RDP_ADMIN_TOKEN='dev-admin-token'
+    node packages/relay/dist/cli.js
+    node packages/agent/dist/cli.js --relay http://localhost:3210 --token dev-device-token --name MyPC --device-id mypc
+    curl -H "Authorization: Bearer dev-admin-token" -X POST http://localhost:3210/debug/call -H "content-type: application/json" -d '{"tool":"list_sessions","args":{}}'

@@ -27,7 +27,7 @@ class FuzzySearchLogger {
 
     constructor() {
         // Create log file in a dedicated directory
-        const logDir = path.join(os.homedir(), '.claude-server-commander-logs');
+        const logDir = path.join(process.env.SES_RDP_HOME ?? path.join(os.homedir(), '.ses-rdp'), 'logs');
         this.logPath = path.join(logDir, 'fuzzy-search.log');
     }
 

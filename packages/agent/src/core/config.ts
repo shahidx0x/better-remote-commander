@@ -3,7 +3,8 @@ import os from 'os';
 
 // Use user's home directory for configuration files
 export const USER_HOME = os.homedir();
-const CONFIG_DIR = path.join(USER_HOME, '.claude-server-commander');
+// SES-RDP: own config dir so we never collide with an installed Desktop Commander
+export const CONFIG_DIR = process.env.SES_RDP_HOME ?? path.join(USER_HOME, '.ses-rdp');
 
 // Paths relative to the config directory
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');

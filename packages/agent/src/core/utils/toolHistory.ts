@@ -63,7 +63,7 @@ class ToolHistory {
 
   constructor() {
     // Store history in same directory as config to keep everything together
-    const historyDir = path.join(os.homedir(), '.claude-server-commander');
+    const historyDir = (process.env.SES_RDP_HOME ?? path.join(os.homedir(), '.ses-rdp'));
     
     // Ensure directory exists
     if (!fs.existsSync(historyDir)) {
