@@ -1,0 +1,99 @@
+import { ChildProcess } from 'child_process';
+import { FilteredStdioServerTransport } from './custom-stdio.js';
+import type { PreviewFileType } from './ui/file-preview/shared/preview-file-types.js';
+
+declare global {
+  var mcpTransport: FilteredStdioServerTransport | undefined;
+  var disableOnboarding: boolean | undefined;
+}
+
+export interface ProcessInfo {
+  pid: number;
+  command: string;
+  cpu: string;
+  memory: string;
+}
+
+export interface TerminalSession {
+  pid: number;
+  process: ChildProcess;
+  outputLines: string[];      // Line-based buffer (persistent, capped — oldest lines evicted)
+  lastReadIndex: number;      // Track where "new" output starts for default reads
+  isBlocked: boolean;
+  startTime: Date;
+  bufferedChars: number;      // Joined length of outputLines (content + separators)
+  evictedLines: number;       // Lines dropped from the front to enforce the buffer cap
+  evictedChars: number;       // Joined length of evicted lines (keeps snapshot offsets absolute)
+}
+
+export interface CommandExecutionResult {
+  pid: number;
+  output: string;
+  isBlocked: boolean;
+  timingInfo?: TimingInfo;
+}
+
+export interface TimingInfo {
+  startTime: number;
+  endTime: number;
+  totalDurationMs: number;
+  exitReason: 'early_exit_quick_pattern' | 'early_exit_periodic_check' | 'process_exit' | 'timeout';
+  firstOutputTime?: number;
+  lastOutputTime?: number;
+  timeToFirstOutputMs?: number;
+  outputEvents?: OutputEvent[];
+}
+
+export interface OutputEvent {
+  timestamp: number;
+  deltaMs: number;
+  source: 'stdout' | 'stderr';
+  length: number;
+  snippet: string;
+  matchedPattern?: string;
+}
+
+export interface ActiveSession {
+  pid: number;
+  isBlocked: boolean;
+  runtime: number;
+}
+
+export interface CompletedSession {
+  pid: number;
+  output: string;
+  exitCode: number | null;
+  startTime: Date;
+  endTime: Date;
+}
+
+// Define the server response types
+export interface ServerResponseContent {
+  type: string;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+export interface FilePreviewStructuredContent {
+  fileName: string;
+  filePath: string;
+  fileType: PreviewFileType;
+  sourceTool?: 'read_file' | 'write_file' | 'edit_block';
+  defaultEditorName?: string;
+  defaultEditorPath?: string;
+  // For text/markdown this is the file text; for images it is the base64 image
+  // payload (single source — the preview UI renders the <img> from this).
+  content?: string;
+  mimeType?: string;
+}
+
+export interface ServerResult {
+  content: ServerResponseContent[];
+  structuredContent?: FilePreviewStructuredContent | Record<string, unknown>;
+  isError?: boolean;
+  _meta?: Record<string, unknown>;
+}
+
+// Define a helper type for tool handler functions
+export type ToolHandler<T = unknown> = (args: T) => Promise<ServerResult>;

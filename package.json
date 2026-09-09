@@ -1,0 +1,23 @@
+{
+    "name":  "ses-rdp",
+    "private":  true,
+    "version":  "0.1.0",
+    "description":  "SES-RDP - self-hosted remote desktop agent + relay for Claude and ChatGPT (MCP / REST)",
+    "license":  "MIT",
+    "packageManager":  "pnpm@11.24.0",
+    "engines":  {
+                    "node":  "\u003e=20"
+                },
+    "scripts":  {
+                    "build":  "pnpm -r --filter ./packages/* build",
+                    "clean":  "pnpm -r --filter ./packages/* exec rimraf dist",
+                    "typecheck":  "pnpm -r --filter ./packages/* exec tsc --noEmit",
+                    "agent":  "pnpm --filter @ses-systems/rdp-agent start",
+                    "relay":  "pnpm --filter @ses-systems/rdp-relay start"
+                },
+    "devDependencies":  {
+                            "@types/node":  "^24.0.0",
+                            "rimraf":  "^6.0.1",
+                            "typescript":  "^5.6.0"
+                        }
+}

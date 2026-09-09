@@ -1,0 +1,521 @@
+/**
+ * Text file editing via search/replace with fuzzy matching support.
+ *
+ * TECHNICAL DEBT / ARCHITECTURAL NOTE:
+ * This file contains text editing logic that should ideally live in TextFileHandler.editRange()
+ * to be consistent with how Excel editing works (ExcelFileHandler.editRange()).
+ *
+ * Current inconsistency:
+ * - Excel: edit_block → ExcelFileHandler.editRange() ✓ uses file handler
+ * - Text:  edit_block → performSearchReplace() here → bypasses TextFileHandler
+ *
+ * Future refactor should:
+ * 1. Move performSearchReplace() + fuzzy logic into TextFileHandler.editRange()
+ * 2. Make this file a thin dispatch layer that routes to appropriate FileHandler
+ * 3. Unify the editRange() signature to handle both text search/replace and structured edits
+ */
+
+import { getDefaultEditorMetadata, readFile, writeFile, readFileInternal, validatePath } from './filesystem.js';
+import fs from 'fs/promises';
+import { ServerResult } from '../types.js';
+import { runFuzzySearchInWorker, getSimilarityRatio } from './fuzzySearch.js';
+import { capture } from '../utils/capture.js';
+import { createErrorResponse } from '../error-handlers.js';
+import { EditBlockArgsSchema } from "./schemas.js";
+import path from 'path';
+import { detectLineEnding, normalizeLineEndings } from '../utils/lineEndingHandler.js';
+import { configManager } from '../config-manager.js';
+import { fuzzySearchLogger, type FuzzySearchLogEntry } from '../utils/fuzzySearchLogger.js';
+import { resolvePreviewFileType } from '../ui/file-preview/shared/preview-file-types.js';
+import { resolveAbsolutePath } from '../handlers/filesystem-handlers.js';
+
+interface SearchReplace {
+    search: string;
+    replace: string;
+}
+
+interface FuzzyMatch {
+    start: number;
+    end: number;
+    value: string;
+    distance: number;
+    similarity: number;
+}
+
+/**
+ * Threshold for fuzzy matching - similarity must be at least this value to be considered
+ * (0-1 scale where 1 is perfect match and 0 is completely different)
+ */
+const FUZZY_THRESHOLD = 0.7;
+
+/**
+ * Extract character code data from diff
+ * @param expected The string that was searched for
+ * @param actual The string that was found
+ * @returns Character code statistics
+ */
+function getCharacterCodeData(expected: string, actual: string): {
+    report: string;
+    uniqueCount: number;
+    diffLength: number;
+} {
+    // Find common prefix and suffix
+    let prefixLength = 0;
+    const minLength = Math.min(expected.length, actual.length);
+
+    // Determine common prefix length
+    while (prefixLength < minLength &&
+           expected[prefixLength] === actual[prefixLength]) {
+        prefixLength++;
+    }
+
+    // Determine common suffix length
+    let suffixLength = 0;
+    while (suffixLength < minLength - prefixLength &&
+           expected[expected.length - 1 - suffixLength] === actual[actual.length - 1 - suffixLength]) {
+        suffixLength++;
+    }
+    
+    // Extract the different parts
+    const expectedDiff = expected.substring(prefixLength, expected.length - suffixLength);
+    const actualDiff = actual.substring(prefixLength, actual.length - suffixLength);
+    
+    // Count unique character codes in the diff
+    const characterCodes = new Map<number, number>();
+    const fullDiff = expectedDiff + actualDiff;
+    
+    for (let i = 0; i < fullDiff.length; i++) {
+        const charCode = fullDiff.charCodeAt(i);
+        characterCodes.set(charCode, (characterCodes.get(charCode) || 0) + 1);
+    }
+    
+    // Create character codes string report
+    const charCodeReport: string[] = [];
+    characterCodes.forEach((count, code) => {
+        // Include character representation for better readability
+        const char = String.fromCharCode(code);
+        // Make special characters more readable
+        const charDisplay = code < 32 || code > 126 ? `\\x${code.toString(16).padStart(2, '0')}` : char;
+        charCodeReport.push(`${code}:${count}[${charDisplay}]`);
+    });
+    
+    // Sort by character code for consistency
+    charCodeReport.sort((a, b) => {
+        const codeA = parseInt(a.split(':')[0]);
+        const codeB = parseInt(b.split(':')[0]);
+        return codeA - codeB;
+    });
+    
+    return {
+        report: charCodeReport.join(','),
+        uniqueCount: characterCodes.size,
+        diffLength: fullDiff.length
+    };
+}
+
+export async function performSearchReplace(filePath: string, block: SearchReplace, expectedReplacements: number = 1, origin?: 'ui' | 'llm'): Promise<ServerResult> {
+    // Get file extension for telemetry using path module
+    const fileExtension = path.extname(filePath).toLowerCase();
+    
+    // Capture file extension and string sizes in telemetry without capturing the file path
+    capture('server_edit_block', {
+        fileExtension: fileExtension,
+        oldStringLength: block.search.length,
+        oldStringLines: block.search.split('\n').length,
+        newStringLength: block.replace.length,
+        newStringLines: block.replace.split('\n').length,
+        expectedReplacements: expectedReplacements
+    });
+    // Check for empty search string to prevent infinite loops
+    if (block.search === "") {
+    
+        // Capture file extension in telemetry without capturing the file path
+        capture('server_edit_block_empty_search', {fileExtension: fileExtension, expectedReplacements});
+        return {
+            content: [{ 
+                type: "text", 
+                text: "Empty search strings are not allowed. Please provide a non-empty string to search for."
+            }],
+        };
+    }
+    
+
+    // Read file directly to preserve line endings - critical for edit operations
+    const validPath = await validatePath(filePath);
+    const content = await readFileInternal(validPath, 0, Number.MAX_SAFE_INTEGER);
+    
+    // Make sure content is a string
+    if (typeof content !== 'string') {
+        capture('server_edit_block_content_not_string', {fileExtension: fileExtension, expectedReplacements});
+        throw new Error('Wrong content for file ' + filePath);
+    }
+    
+    // Get the line limit from configuration
+    const config = await configManager.getConfig();
+    const MAX_LINES = config.fileWriteLineLimit ?? 50; // Default to 50 if not set
+    
+    // Detect file's line ending style
+    const fileLineEnding = detectLineEnding(content);
+    
+    // Normalize search string to match file's line endings
+    const normalizedSearch = normalizeLineEndings(block.search, fileLineEnding);
+    
+    // First try exact match
+    let tempContent = content;
+    let count = 0;
+    let pos = tempContent.indexOf(normalizedSearch);
+    
+    while (pos !== -1) {
+        count++;
+        pos = tempContent.indexOf(normalizedSearch, pos + 1);
+    }
+    
+    // If exact match found and count matches expected replacements, proceed with exact replacement
+    if (count > 0 && count === expectedReplacements) {
+        // Replace all occurrences
+        let newContent = content;
+        
+        // If we're only replacing one occurrence, replace it directly
+        if (expectedReplacements === 1) {
+            const searchIndex = newContent.indexOf(normalizedSearch);
+            newContent = 
+                newContent.substring(0, searchIndex) + 
+                normalizeLineEndings(block.replace, fileLineEnding) + 
+                newContent.substring(searchIndex + normalizedSearch.length);
+        } else {
+            // Replace all occurrences using split and join for multiple replacements
+            newContent = newContent.split(normalizedSearch).join(normalizeLineEndings(block.replace, fileLineEnding));
+        }
+        
+        // Check if search or replace text has too many lines
+        const searchLines = block.search.split('\n').length;
+        const replaceLines = block.replace.split('\n').length;
+        const maxLines = Math.max(searchLines, replaceLines);
+        let warningMessage = "";
+        
+        if (maxLines > MAX_LINES) {
+            const problemText = searchLines > replaceLines ? 'search text' : 'replacement text';
+            warningMessage = `\n\nWARNING: The ${problemText} has ${maxLines} lines (maximum: ${MAX_LINES}).
+            
+RECOMMENDATION: For large search/replace operations, consider breaking them into smaller chunks with fewer lines.`;
+        }
+        
+        await writeFile(filePath, newContent);
+        capture('server_edit_block_exact_success', {fileExtension: fileExtension, expectedReplacements, hasWarning: warningMessage !== ""});
+        const resolvedEditPath = resolveAbsolutePath(filePath);
+
+        // Show a partial preview centered on the edited area
+        const newLines = newContent.split('\n');
+        const totalLines = newLines.length;
+        const changePos = content.indexOf(normalizedSearch);
+        const changeStartLine = changePos >= 0 ? newContent.substring(0, changePos).split('\n').length - 1 : 0;
+        const changeLineCount = block.replace.split('\n').length;
+        const contextLines = 10;
+        const previewStart = Math.max(0, changeStartLine - contextLines);
+        const previewEnd = Math.min(totalLines, changeStartLine + changeLineCount + contextLines);
+        const previewContent = newLines.slice(previewStart, previewEnd).join('\n');
+        const previewLineCount = previewEnd - previewStart;
+        const remaining = totalLines - previewEnd;
+        const statusLine = `[Reading ${previewLineCount} lines from ${previewStart === 0 ? 'start' : `line ${previewStart}`} (total: ${totalLines} lines, ${remaining} remaining)]\n\n`;
+
+        return {
+            content: [{
+                type: "text",
+                text: `${statusLine}${previewContent}`
+            }],
+            // structuredContent only travels on widget-initiated calls: it is the
+            // widget's save-success signal (assertSuccessfulEditBlockResult) and
+            // metadata source. LLM-facing responses don't need it — nothing there
+            // consumes it, and the widget re-reads by path instead.
+            ...(origin === 'ui' ? {
+                structuredContent: {
+                    fileName: path.basename(resolvedEditPath),
+                    filePath: resolvedEditPath,
+                    fileType: resolvePreviewFileType(resolvedEditPath),
+                    ...await getDefaultEditorMetadata(resolvedEditPath),
+                },
+            } : {}),
+        };
+    }
+    
+    // If exact match found but count doesn't match expected, inform the user
+    if (count > 0 && count !== expectedReplacements) {
+        capture('server_edit_block_unexpected_count', {fileExtension: fileExtension, expectedReplacements, expectedReplacementsCount: count});
+        return {
+            content: [{ 
+                type: "text", 
+                text: `Expected ${expectedReplacements} occurrences but found ${count} in ${filePath}. ` + 
+            `Double check and make sure you understand all occurencies and if you want to replace all ${count} occurrences, set expected_replacements to ${count}. ` +
+            `If there are many occurrancies and you want to change some of them and keep the rest. Do it one by one, by adding more lines around each occurrence.` +
+`If you want to replace a specific occurrence, make your search string more unique by adding more lines around search string.`
+            }],
+        };
+    }
+    
+    // If exact match not found, try fuzzy search
+    if (count === 0) {
+        // Track fuzzy search time
+        const startTime = performance.now();
+
+        // Perform fuzzy search in a worker thread so the main event loop stays
+        // responsive to pings and parallel tool calls during the scan
+        const fuzzyResult = await runFuzzySearchInWorker(content, block.search);
+        const similarity = getSimilarityRatio(block.search, fuzzyResult.value);
+        
+        // Calculate execution time in milliseconds
+        const executionTime = performance.now() - startTime;
+        
+        // Generate diff and gather character code data
+        const diff = highlightDifferences(block.search, fuzzyResult.value);
+        
+        // Count character codes in diff
+        const characterCodeData = getCharacterCodeData(block.search, fuzzyResult.value);
+        
+        // Create comprehensive log entry
+        const logEntry: FuzzySearchLogEntry = {
+            timestamp: new Date(),
+            searchText: block.search,
+            foundText: fuzzyResult.value,
+            similarity: similarity,
+            executionTime: executionTime,
+            exactMatchCount: count,
+            expectedReplacements: expectedReplacements,
+            fuzzyThreshold: FUZZY_THRESHOLD,
+            belowThreshold: similarity < FUZZY_THRESHOLD,
+            diff: diff,
+            searchLength: block.search.length,
+            foundLength: fuzzyResult.value.length,
+            fileExtension: fileExtension,
+            characterCodes: characterCodeData.report,
+            uniqueCharacterCount: characterCodeData.uniqueCount,
+            diffLength: characterCodeData.diffLength
+        };
+        
+        // Log to file
+        await fuzzySearchLogger.log(logEntry);
+        
+        // Combine all fuzzy search data for single capture
+        //
+        // character_codes (characterCodeData.report) is deliberately NOT sent.
+        // It is a frequency map of the characters in the diff between the
+        // search text and the file text, so for a short diff it is close to
+        // recoverable file content — and mcp-privacy-policy.md states that
+        // file contents are not collected. It was added as diagnostics for the
+        // CRLF/LF normalization work in #103 (May 2025) to show whether failed
+        // matches came from \r (13), \n (10) or non-breaking spaces; that
+        // question is long since answered.
+        //
+        // The scalars below are kept: they are counts and lengths, and carry
+        // no recoverable content. The full report still goes to the local
+        // fuzzy-search.log for anyone debugging on their own machine.
+        const fuzzySearchData = {
+            similarity: similarity,
+            execution_time_ms: executionTime,
+            search_length: block.search.length,
+            file_size: content.length,
+            threshold: FUZZY_THRESHOLD,
+            found_text_length: fuzzyResult.value.length,
+            unique_character_count: characterCodeData.uniqueCount,
+            total_diff_length: characterCodeData.diffLength
+        };
+        
+        // Check if the fuzzy match is "close enough"
+        if (similarity >= FUZZY_THRESHOLD) {
+            // Capture the fuzzy search event with all data
+            capture('server_fuzzy_search_performed', fuzzySearchData);
+            
+            // If we allow fuzzy matches, we would make the replacement here
+            // For now, we'll return a detailed message about the fuzzy match
+            return {
+                content: [{ 
+                    type: "text", 
+                    text: `Exact match not found, but found a similar text with ${Math.round(similarity * 100)}% similarity (found in ${executionTime.toFixed(2)}ms):\n\n` +
+                          `Differences:\n${diff}\n\n` +
+                          `To replace this text, use the exact text found in the file.\n\n` +
+                          `Log entry saved for analysis. Use the following command to check the log:\n` +
+                          `Check log: ${await fuzzySearchLogger.getLogPath()}`
+                }],// TODO
+            };
+        } else {
+            // If the fuzzy match isn't close enough
+            // Still capture the fuzzy search event with all data
+            capture('server_fuzzy_search_performed', {
+                ...fuzzySearchData,
+                below_threshold: true
+            });
+            
+            return {
+                content: [{ 
+                    type: "text", 
+                    text: `Search content not found in ${filePath}. The closest match was "${fuzzyResult.value}" ` +
+                          `with only ${Math.round(similarity * 100)}% similarity, which is below the ${Math.round(FUZZY_THRESHOLD * 100)}% threshold. ` +
+                          `(Fuzzy search completed in ${executionTime.toFixed(2)}ms)\n\n` +
+                          `Log entry saved for analysis. Use the following command to check the log:\n` +
+                          `Check log: ${await fuzzySearchLogger.getLogPath()}`
+                }],
+            };
+        }
+    }
+    
+    throw new Error("Unexpected error during search and replace operation.");
+}
+
+/**
+ * Generates a character-level diff using standard {-removed-}{+added+} format
+ * @param expected The string that was searched for
+ * @param actual The string that was found
+ * @returns A formatted string showing character-level differences
+ */
+function highlightDifferences(expected: string, actual: string): string {
+    // Implementation of a simplified character-level diff
+    
+    // Find common prefix and suffix
+    let prefixLength = 0;
+    const minLength = Math.min(expected.length, actual.length);
+
+    // Determine common prefix length
+    while (prefixLength < minLength &&
+           expected[prefixLength] === actual[prefixLength]) {
+        prefixLength++;
+    }
+
+    // Determine common suffix length
+    let suffixLength = 0;
+    while (suffixLength < minLength - prefixLength &&
+           expected[expected.length - 1 - suffixLength] === actual[actual.length - 1 - suffixLength]) {
+        suffixLength++;
+    }
+    
+    // Extract the common and different parts
+    const commonPrefix = expected.substring(0, prefixLength);
+    const commonSuffix = expected.substring(expected.length - suffixLength);
+
+    const expectedDiff = expected.substring(prefixLength, expected.length - suffixLength);
+    const actualDiff = actual.substring(prefixLength, actual.length - suffixLength);
+
+    // Format the output as a character-level diff
+    return `${commonPrefix}{-${expectedDiff}-}{+${actualDiff}+}${commonSuffix}`;
+}
+
+/**
+ * Handle edit_block command
+ *
+ * 1. Text files: String replacement (old_string/new_string)
+ *    - Uses fuzzy matching for resilience
+ *    - Handles expected_replacements parameter
+ *
+ * 2. Structured files (Excel): Range rewrite (range + content)
+ *    - Bulk updates to cell ranges (e.g., "Sheet1!A1:C10")
+ *    - Whole sheet replacement (e.g., "Sheet1")
+ *    - More powerful and simpler than surgical location-based edits
+ *    - Supports chunking for large datasets (e.g., 1000 rows at a time)
+
+ */
+export async function handleEditBlock(args: unknown): Promise<ServerResult> {
+    const parsed = EditBlockArgsSchema.parse(args);
+
+    // Note: Check for truthy range to handle empty strings from AI clients that send all optional params
+    const hasRange = parsed.range !== undefined && parsed.range !== '';
+    const hasContent = parsed.content !== undefined && parsed.content !== '';
+
+    // Validate path and resolve handler once — used by both dispatch paths below
+    let validatedPath: string;
+    let handler: Awaited<ReturnType<typeof import('../utils/files/factory.js').getFileHandler>>;
+    try {
+        validatedPath = await validatePath(parsed.file_path);
+        const { getFileHandler } = await import('../utils/files/factory.js');
+        handler = await getFileHandler(validatedPath);
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return createErrorResponse(errorMessage);
+    }
+
+    const hasEditRange = 'editRange' in handler && typeof handler.editRange === 'function';
+
+    // Path 1: Range rewrite (Excel, etc.) — range + content
+    if (hasRange && hasContent) {
+        // Parse content if it's a JSON string (AI often sends arrays as JSON strings)
+        let content = parsed.content;
+        if (typeof content === 'string') {
+            try {
+                content = JSON.parse(content);
+            } catch {
+                // Leave as-is if not valid JSON - let handler decide
+            }
+        }
+
+        if (hasEditRange) {
+            try {
+                // parsed.range is guaranteed non-empty string by hasRange check above
+                await handler.editRange!(validatedPath!, parsed.range!, content, parsed.options);
+                const resolvedRangePath = resolveAbsolutePath(parsed.file_path);
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Successfully updated range ${parsed.range} in ${parsed.file_path}`
+                    }],
+                    ...(parsed.origin === 'ui' ? {
+                        structuredContent: {
+                            fileName: path.basename(resolvedRangePath),
+                            filePath: resolvedRangePath,
+                            fileType: resolvePreviewFileType(resolvedRangePath),
+                            ...await getDefaultEditorMetadata(resolvedRangePath),
+                        },
+                    } : {}),
+                };
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                return createErrorResponse(errorMessage);
+            }
+        }
+
+        return createErrorResponse(`Range-based editing not supported for ${parsed.file_path}. For text files, use old_string and new_string parameters instead. If your client requires range/content parameters, set them to empty strings ("").`);
+    }
+
+    // Path 2: Text replacement — old_string + new_string
+    if (parsed.old_string === undefined || parsed.new_string === undefined) {
+        return createErrorResponse(`Text replacement requires both old_string and new_string parameters`);
+    }
+
+    // If the handler implements editRange it owns text-replacement for its file type
+    // (e.g. DocxFileHandler does find/replace on pretty-printed XML rather than raw bytes).
+    // Plain text files fall through to performSearchReplace.
+    if (hasEditRange) {
+        try {
+            const result = await handler.editRange!(validatedPath!, '', {
+                old_string: parsed.old_string,
+                new_string: parsed.new_string,
+                expected_replacements: parsed.expected_replacements,
+            });
+
+            if (result.success) {
+                const resolvedEditRangePath = resolveAbsolutePath(parsed.file_path);
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Successfully applied ${result.editsApplied} edit(s) to ${parsed.file_path}`
+                    }],
+                    ...(parsed.origin === 'ui' ? {
+                        structuredContent: {
+                            fileName: path.basename(resolvedEditRangePath),
+                            filePath: resolvedEditRangePath,
+                            fileType: resolvePreviewFileType(resolvedEditRangePath),
+                            ...await getDefaultEditorMetadata(resolvedEditRangePath),
+                        },
+                    } : {}),
+                };
+            }
+
+            const errorMsg = result.errors?.map(e => e.error).join('; ') || 'Unknown error';
+            return createErrorResponse(errorMsg);
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            return createErrorResponse(errorMessage);
+        }
+    }
+
+    return performSearchReplace(parsed.file_path, {
+        search: parsed.old_string,
+        replace: parsed.new_string
+    }, parsed.expected_replacements, parsed.origin);
+}

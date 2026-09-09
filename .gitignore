@@ -1,0 +1,5 @@
+reference-desktop-commander/
+node_modules/
+dist/
+.env
+*.log
