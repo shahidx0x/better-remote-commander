@@ -1,6 +1,6 @@
 {
     "name":  "brc-relay",
-    "version":  "2.0.0",
+    "version":  "2.0.1",
     "description":  "BRC relay - self-hosted MCP + REST server that routes tool calls to paired device agents",
     "license":  "MIT",
     "type":  "module",
@@ -39,5 +39,17 @@
                    },
     "engines":  {
                     "node":  "\u003e=22.13"
-                }
+                },
+    "homepage":  "https://github.com/shahidx0x/better-remote-commander#readme",
+    "keywords":  [
+                     "mcp",
+                     "claude",
+                     "chatgpt",
+                     "remote-desktop",
+                     "remote-control",
+                     "terminal",
+                     "agent",
+                     "self-hosted",
+                     "desktop-commander"
+                 ]
 }

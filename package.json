@@ -1,7 +1,7 @@
 {
     "name":  "brc",
     "private":  true,
-    "version":  "2.0.0",
+    "version":  "2.0.1",
     "description":  "Better Remote Commander (BRC) - self-hosted remote desktop agent + relay for Claude and ChatGPT (MCP / REST)",
     "license":  "MIT",
     "packageManager":  "pnpm@11.24.0",

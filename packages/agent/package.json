@@ -1,6 +1,6 @@
 {
     "name":  "brc-agent",
-    "version":  "2.0.0",
+    "version":  "2.0.1",
     "description":  "Better Remote Commander (BRC) device agent - runs on the machine to be controlled, connects outbound to an BRC relay",
     "license":  "MIT",
     "type":  "module",
@@ -68,5 +68,17 @@
                    },
     "engines":  {
                     "node":  "\u003e=22.13"
-                }
+                },
+    "homepage":  "https://github.com/shahidx0x/better-remote-commander#readme",
+    "keywords":  [
+                     "mcp",
+                     "claude",
+                     "chatgpt",
+                     "remote-desktop",
+                     "remote-control",
+                     "terminal",
+                     "agent",
+                     "self-hosted",
+                     "desktop-commander"
+                 ]
 }

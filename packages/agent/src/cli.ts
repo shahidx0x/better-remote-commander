@@ -15,7 +15,7 @@ import { callTool, listTools } from './dispatcher.js';
 import { VERSION as CORE_VERSION } from './core/version.js';
 import { setCurrentClient } from './context.js';
 
-const AGENT_VERSION = '2.0.0';
+const AGENT_VERSION = '2.0.1';
 
 function arg(name: string, env?: string, def?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
