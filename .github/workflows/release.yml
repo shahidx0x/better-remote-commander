@@ -24,7 +24,9 @@ jobs:
       - run: pnpm test:unit
       - name: publish to npm
         run: pnpm -r --filter "./packages/*" publish --access public --no-git-checks
-        env: { NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}, NPM_CONFIG_PROVENANCE: 'true' }
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
       - run: node scripts/pack-release.mjs ${{ github.repository }} ${{ github.ref_name }}
       - name: bundle install scripts
         run: |
