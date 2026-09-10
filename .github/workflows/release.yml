@@ -6,6 +6,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 env:
   IMAGE_BASE: ghcr.io/${{ github.repository }}
@@ -21,6 +22,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test:unit
+      - name: publish to npm
+        run: pnpm -r --filter "./packages/*" publish --access public --no-git-checks
+        env: { NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}, NPM_CONFIG_PROVENANCE: 'true' }
       - run: node scripts/pack-release.mjs ${{ github.repository }} ${{ github.ref_name }}
       - name: bundle install scripts
         run: |
@@ -74,10 +78,10 @@ jobs:
           {
             echo "## Install"
             echo '```'
-            echo "# agent (machine to control)"
-            echo "npm i -g https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/$(ls dist-pack | grep rdp-agent)"
-            echo "# relay (server)"
-            echo "npm i -g https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/$(ls dist-pack | grep rdp-relay)"
+            echo "npm i -g brc-agent        # agent (machine to control)"
+            echo "npm i -g brc-relay        # relay (server)"
+            
+            
             echo "# or docker"
             echo "docker pull ${IMAGE_BASE}/relay:${GITHUB_REF_NAME#v}"
             echo '```'

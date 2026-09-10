@@ -33,20 +33,16 @@ docker compose --profile local up -d                            # localhost only
 Images are published to `ghcr.io/shahidx0x/better-remote-commander/relay` and `/agent`.
 
 **Without Docker**
-```bash
-npm i -g https://github.com/shahidx0x/better-remote-commander/releases/latest/download/brc-relay-2.0.0.tgz
+```ash
+npm i -g brc-relay
 PUBLIC_URL=https://rdp.example.com BRC_ADMIN_PASSWORD=... BRC_SESSION_SECRET=... brc-relay
 ```
 Put it behind any HTTPS reverse proxy (Caddy, nginx, Cloudflare Tunnel) that forwards WebSockets, and set `TRUST_PROXY=true`.
 
 ### 2. Agent (on every machine you want to control)
 
-```bash
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/shahidx0x/better-remote-commander/main/install.sh | bash
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/shahidx0x/better-remote-commander/main/install.ps1 | iex
-
+```ash
+npm i -g brc-agent          # any OS with Node 22.13+
 brc-agent --relay https://rdp.example.com --name "My PC"
 ```
 The agent prints a pairing code and opens `https://rdp.example.com/device/verify`; sign in and approve.
