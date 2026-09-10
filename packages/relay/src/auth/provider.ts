@@ -1,5 +1,5 @@
 /**
- * SES-RDP OAuth 2.0 provider for @modelcontextprotocol/sdk's mcpAuthRouter.
+ * Better Remote Commander (BRC) OAuth 2.0 provider for @modelcontextprotocol/sdk's mcpAuthRouter.
  * Authorization code + PKCE (S256), dynamic client registration, refresh tokens, revocation.
  * User login is a cookie session set by /auth/login (see sessions.ts); authorize() renders consent.
  */
@@ -136,7 +136,7 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    if (token.startsWith('sesrdp_ak_')) {
+    if (token.startsWith('brc_ak_') || token.startsWith('sesrdp_ak_')) {
       const key = this.deps.store.getApiKey(token);
       if (!key) throw new InvalidTokenError('invalid or revoked API key');
       return { token, clientId: `apikey:${key.name}`, scopes: SCOPES, expiresAt: Math.floor(Date.now() / 1000) + 3600, extra: { userId: key.user_id, apiKey: key.prefix } };
@@ -157,8 +157,8 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   }
 
   private mint(clientId: string, userId: string, scopes: string[], resource: string | null): OAuthTokens {
-    const access = `sesrdp_at_${randomToken(32)}`;
-    const refresh = `sesrdp_rt_${randomToken(32)}`;
+    const access = `brc_at_${randomToken(32)}`;
+    const refresh = `brc_rt_${randomToken(32)}`;
     const now = Date.now();
     this.deps.store.insertToken({ token_hash: sha256(access), kind: 'access', client_id: clientId, user_id: userId, scopes: scopes.join(' '), resource, expires_at: now + ACCESS_TTL_MS, created_at: now, revoked: 0 });
     this.deps.store.insertToken({ token_hash: sha256(refresh), kind: 'refresh', client_id: clientId, user_id: userId, scopes: scopes.join(' '), resource, expires_at: now + REFRESH_TTL_MS, created_at: now, revoked: 0 });

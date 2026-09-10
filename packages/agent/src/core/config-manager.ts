@@ -186,7 +186,7 @@ class ConfigManager {
         return userShell;
       })(),
       allowedDirectories: [],
-      telemetryEnabled: false, // SES-RDP: off by default
+      telemetryEnabled: false, // Better Remote Commander (BRC): off by default
       fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
       fileReadLineLimit: 1000,  // Default line limit for file read operations (changed from character-based)
       pendingWelcomeOnboarding: true, // New install flag - triggers A/B test for welcome page

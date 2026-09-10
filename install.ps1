@@ -9,6 +9,6 @@ $tag = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest").
 $ver = $tag.TrimStart('v')
 $base = "https://github.com/$repo/releases/download/$tag"
 Write-Host "Installing agent $tag"
-npm install -g "$base/ses-systems-rdp-agent-$ver.tgz"
-if ($Relay) { Write-Host "Installing relay $tag"; npm install -g "$base/ses-systems-rdp-relay-$ver.tgz" }
-Write-Host "`nDone. Next:  ses-rdp-agent --relay https://your-relay.example.com"
+npm install -g "$base/brc-shared-$ver.tgz" "$base/brc-agent-$ver.tgz"
+if ($Relay) { Write-Host "Installing relay $tag"; npm install -g "$base/brc-relay-$ver.tgz" }
+Write-Host "`nDone. Next:  brc-agent --relay https://your-relay.example.com"

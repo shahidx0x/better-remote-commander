@@ -1,4 +1,4 @@
-# SES-RDP relay - Docker Compose with three profiles (same image, config only)
+# BRC relay - Docker Compose with three profiles (same image, config only)
 #   local  : relay only, SQLite, http://localhost:${PORT}      -> docker compose --profile local up -d
 #   tunnel : relay + cloudflared or ngrok sidecar (public HTTPS from your PC)
 #            docker compose --profile tunnel --profile cloudflare up -d
@@ -13,9 +13,9 @@ x-relay: &relay
   environment:
     PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in .env}
     TRUST_PROXY: ${TRUST_PROXY:-true}
-    SES_RDP_ADMIN_USER: ${SES_RDP_ADMIN_USER:-admin}
-    SES_RDP_ADMIN_PASSWORD: ${SES_RDP_ADMIN_PASSWORD:?set SES_RDP_ADMIN_PASSWORD in .env}
-    SES_RDP_SESSION_SECRET: ${SES_RDP_SESSION_SECRET:?set SES_RDP_SESSION_SECRET in .env}
+    BRC_ADMIN_USER: ${BRC_ADMIN_USER:-admin}
+    BRC_ADMIN_PASSWORD: ${BRC_ADMIN_PASSWORD:?set BRC_ADMIN_PASSWORD in .env}
+    BRC_SESSION_SECRET: ${BRC_SESSION_SECRET:?set BRC_SESSION_SECRET in .env}
     LOG_LEVEL: ${LOG_LEVEL:-info}
   volumes:
     - relay-data:/data

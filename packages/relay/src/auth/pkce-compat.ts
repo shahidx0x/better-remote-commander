@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
 import type { SqliteStore } from '../store/sqlite.js';
 
-const verifierFor = (clientId: string) => `nopkce-${createHash('sha256').update(`ses-rdp:${clientId}`).digest('base64url')}`;
+const verifierFor = (clientId: string) => `nopkce-${createHash('sha256').update(`brc:${clientId}`).digest('base64url')}`;
 const challengeFor = (clientId: string) => createHash('sha256').update(verifierFor(clientId)).digest('base64url');
 
 export function pkceCompat(store: SqliteStore) {

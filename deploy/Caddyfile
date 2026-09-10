@@ -1,4 +1,4 @@
-# SES-RDP relay behind Caddy (cloud profile). DOMAIN comes from .env
+# BRC relay behind Caddy (cloud profile). DOMAIN comes from .env
 {$DOMAIN} {
     encode gzip
     reverse_proxy relay-cloud:3000 {

@@ -1,5 +1,5 @@
 /**
- * SES-RDP agent tool dispatcher: name -> handler, ported from upstream server.ts CallTool switch.
+ * BRC agent tool dispatcher: name -> handler, ported from upstream server.ts CallTool switch.
  * Returns MCP-shaped results; errors become { isError: true } text blocks (never throws).
  */
 import * as handlers from './core/handlers/index.js';
@@ -7,7 +7,7 @@ import { getConfig, setConfigValue } from './core/tools/config.js';
 import { getUsageStats } from './core/tools/usage.js';
 import { buildToolDefinitions, EXCLUDED_TOOLS, type ToolDefinition } from './core/tool-definitions.js';
 import { usageTracker } from './core/utils/usageTracker.js';
-import type { ToolResult } from '@ses-systems/rdp-shared';
+import type { ToolResult } from 'brc-shared';
 
 type Args = Record<string, unknown>;
 type Handler = (args: Args) => Promise<unknown>;

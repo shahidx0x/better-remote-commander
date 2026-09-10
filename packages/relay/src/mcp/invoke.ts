@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto';
 import type { DeviceHub } from '../device-hub.js';
 import type { SqliteStore } from '../store/sqlite.js';
-import type { ToolResult } from '@ses-systems/rdp-shared';
+import type { ToolResult } from 'brc-shared';
 
 export interface InvokeContext { userId: string; clientId: string }
 export type InvokeOutcome =
@@ -30,7 +30,7 @@ export async function invokeTool(
   const deviceId = requested ?? hub.resolveDefault(ctx.userId);
   if (!deviceId) {
     const n = hub.list(ctx.userId).length;
-    return { ok: false, status: n === 0 ? 503 : 409, message: n === 0 ? 'No device is online. Start ses-rdp-agent on the target machine.' : `${n} devices are online; pass deviceId (see list_devices).` };
+    return { ok: false, status: n === 0 ? 503 : 409, message: n === 0 ? 'No device is online. Start brc-agent on the target machine.' : `${n} devices are online; pass deviceId (see list_devices).` };
   }
   const dev = hub.get(deviceId);
   if (!dev || dev.ownerId !== ctx.userId) return { ok: false, status: 404, message: `Device ${deviceId} is not online or not yours.` };

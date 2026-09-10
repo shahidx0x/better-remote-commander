@@ -10,10 +10,10 @@ TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n '
 VER="${TAG#v}"
 BASE="https://github.com/$REPO/releases/download/$TAG"
 echo "Installing agent $TAG"
-npm install -g "$BASE/ses-systems-rdp-agent-$VER.tgz"
+npm install -g "$BASE/brc-shared-$VER.tgz" "$BASE/brc-agent-$VER.tgz"
 if [ "${1:-}" = "--relay" ]; then
   echo "Installing relay $TAG"
-  npm install -g "$BASE/ses-systems-rdp-relay-$VER.tgz"
+  npm install -g "$BASE/brc-relay-$VER.tgz"
 fi
 echo
-echo "Done. Next:  ses-rdp-agent --relay https://your-relay.example.com"
+echo "Done. Next:  brc-agent --relay https://your-relay.example.com"

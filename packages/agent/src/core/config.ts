@@ -4,9 +4,9 @@ import os from 'os';
 
 // Use user's home directory for configuration files
 export const USER_HOME = os.homedir();
-// SES-RDP: own config dir so we never collide with an installed Desktop Commander
+// Better Remote Commander (BRC): own config dir so we never collide with an installed Desktop Commander
 const longPath = (p: string): string => { try { return fs.realpathSync.native(p); } catch { const parent = path.dirname(p); return parent === p ? p : path.join(longPath(parent), path.basename(p)); } };
-export const CONFIG_DIR = longPath(process.env.SES_RDP_HOME ?? path.join(USER_HOME, '.ses-rdp'));
+export const CONFIG_DIR = longPath(process.env.BRC_HOME ?? path.join(USER_HOME, '.brc'));
 
 // Paths relative to the config directory
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');

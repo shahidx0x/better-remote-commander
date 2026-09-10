@@ -9,7 +9,7 @@ const PORT = Number(process.env.E2E_PORT ?? 3555);
 const base = `http://localhost:${PORT}`;
 const pass = 'e2e-pass-' + Math.random().toString(36).slice(2, 8);
 // realpath: Windows runners hand out 8.3 short paths (RUNNER~1) which crash libuv's fs.watch
-const scratch = mkdtempSync(path.join(realpathSync.native(tmpdir()), 'ses-rdp-e2e-'));
+const scratch = mkdtempSync(path.join(realpathSync.native(tmpdir()), 'brc-e2e-'));
 const procs = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const relayCli = path.resolve('packages/relay/dist/cli.js');
@@ -42,10 +42,10 @@ function runScript(script, ...args) {
 
 let failed = 0;
 try {
-  start('relay', [relayCli], { PORT: String(PORT), PUBLIC_URL: base, SES_RDP_ADMIN_PASSWORD: pass, SES_RDP_SESSION_SECRET: 'e2e', SES_RDP_DB: path.join(scratch, 'relay.sqlite'), LOG_LEVEL: 'warn' });
+  start('relay', [relayCli], { PORT: String(PORT), PUBLIC_URL: base, BRC_ADMIN_PASSWORD: pass, BRC_SESSION_SECRET: 'e2e', BRC_DB: path.join(scratch, 'relay.sqlite'), LOG_LEVEL: 'warn' });
   await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay');
 
-  const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { SES_RDP_HOME: path.join(scratch, 'agent-home') });
+  const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { BRC_HOME: path.join(scratch, 'agent-home') });
   const code = await waitFor(() => agent.out.match(/code: ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1], 20_000, 'pairing code');
 
   let r = await fetch(`${base}/auth/login`, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ username: 'admin', password: pass, returnTo: '/' }) });

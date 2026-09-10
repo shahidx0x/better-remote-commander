@@ -26,7 +26,7 @@ importers:
       '@opendocsg/pdf2md':
         specifier: ^0.2.2
         version: 0.2.9
-      '@ses-systems/rdp-shared':
+      'brc-shared':
         specifier: workspace:*
         version: link:../shared
       '@tiptap/core':
@@ -141,7 +141,7 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.9.0
         version: 1.30.0(supports-color@7.2.0)(zod@3.25.76)
-      '@ses-systems/rdp-shared':
+      'brc-shared':
         specifier: workspace:*
         version: link:../shared
       cookie-parser:

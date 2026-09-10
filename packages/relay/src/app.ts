@@ -1,5 +1,5 @@
 /**
- * SES-RDP relay HTTP server (Express; MCP SDK's auth router is Express-native).
+ * BRC relay HTTP server (Express; MCP SDK's auth router is Express-native).
  * Routes:
  *   GET  /                      home / device list (cookie session)
  *   GET  /health
@@ -48,11 +48,11 @@ export function loadConfig(): RelayConfig {
     host: env.HOST ?? '0.0.0.0',
     publicUrl: (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/$/, ''),
     trustProxy: env.TRUST_PROXY === 'true' || env.TRUST_PROXY === '1',
-    dbFile: env.SES_RDP_DB ?? 'data/relay.sqlite',
-    sessionSecret: env.SES_RDP_SESSION_SECRET ?? '',
-    adminUser: env.SES_RDP_ADMIN_USER ?? 'admin',
-    adminPassword: env.SES_RDP_ADMIN_PASSWORD ?? '',
-    relayVersion: '1.0.1',
+    dbFile: env.BRC_DB ?? 'data/relay.sqlite',
+    sessionSecret: env.BRC_SESSION_SECRET ?? '',
+    adminUser: env.BRC_ADMIN_USER ?? 'admin',
+    adminPassword: env.BRC_ADMIN_PASSWORD ?? '',
+    relayVersion: '2.0.0',
   };
 }
 
@@ -101,7 +101,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     baseUrl: publicUrl,
     resourceServerUrl: new URL('/mcp', publicUrl),
     scopesSupported: SCOPES,
-    resourceName: 'SES-RDP',
+    resourceName: 'Better Remote Commander (BRC)',
     clientRegistrationOptions: { clientSecretExpirySeconds: undefined },
   }));
 
@@ -159,7 +159,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */
   app.post('/device/start', express.json({ limit: '4kb' }), (req, res) => {
-    const clientName = String((req.body as Record<string, unknown>)?.client_name ?? 'ses-rdp-agent').slice(0, 80);
+    const clientName = String((req.body as Record<string, unknown>)?.client_name ?? 'brc-agent').slice(0, 80);
     const row = store.createDeviceCode(clientName, DEVICE_CODE_TTL_MS);
     res.json({
       device_code: row.device_code, user_code: row.user_code,

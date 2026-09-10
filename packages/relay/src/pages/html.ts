@@ -4,7 +4,7 @@ export const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
 
 export function layout(title: string, body: string, width: 'narrow' | 'wide' = 'narrow'): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(title)} · SES-RDP</title>
+<title>${esc(title)} · Better Remote Commander (BRC)</title>
 <style>
 :root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;margin:0;background:#f5f5f4;color:#1c1c1a;display:flex;min-height:100vh;align-items:center;justify-content:center}
 @media(prefers-color-scheme:dark){body{background:#151513;color:#e8e6df}.card{background:#1f1f1c!important;border-color:#33332f!important}input{background:#151513;color:#e8e6df;border-color:#44443f!important}}
@@ -15,11 +15,11 @@ input.code{font:22px/1 ui-monospace,monospace;letter-spacing:.2em;text-align:cen
 .row{display:flex;gap:10px;margin-top:18px}button{flex:1;padding:10px 14px;border-radius:8px;border:1px solid transparent;font:inherit;cursor:pointer}
 .primary{background:#2a6df4;color:#fff}.secondary{background:transparent;border-color:#c9c7bf;color:inherit}.err{color:#c0392b}.ok{color:#1f8a4c}
 ul{padding-left:18px}code{font-family:ui-monospace,monospace;font-size:13px}
-</style></head><body><div class="card"><div class="brand">SES-RDP</div>${body}</div></body></html>`;
+</style></head><body><div class="card"><div class="brand">Better Remote Commander (BRC)</div>${body}</div></body></html>`;
 }
 
 export function loginPage(returnTo: string, error?: string): string {
-  return layout('Sign in', `<h1>Sign in</h1><p>Sign in to your SES-RDP relay.</p>
+  return layout('Sign in', `<h1>Sign in</h1><p>Sign in to your BRC relay.</p>
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 <form method="post" action="/auth/login"><input type="hidden" name="returnTo" value="${esc(returnTo)}">
 <label>Username</label><input name="username" autocomplete="username" required autofocus>
@@ -36,7 +36,7 @@ export function consentPage(pendingId: string, clientName: string, redirectUri: 
 }
 
 export function deviceVerifyPage(prefill: string, error?: string): string {
-  return layout('Pair device', `<h1>Pair a device</h1><p>Enter the code shown by <code>ses-rdp-agent</code>.</p>
+  return layout('Pair device', `<h1>Pair a device</h1><p>Enter the code shown by <code>brc-agent</code>.</p>
 ${error ? `<p class="err">${esc(error)}</p>` : ''}
 <form method="post" action="/device/verify"><label>Pairing code</label>
 <input class="code" name="user_code" value="${esc(prefill)}" placeholder="XXXX-XXXX" maxlength="9" required autofocus>
@@ -59,7 +59,7 @@ export function homePage(publicUrl: string, loggedIn: boolean, devices: { device
   const list = devices.length
     ? `<ul>${devices.map((d) => `<li><code>${esc(d.name)}</code> ${esc(d.platform ?? '')} — ${d.online ? '<span class="ok">online</span>' : 'offline'}${d.paused ? ' (paused)' : ''}</li>`).join('')}</ul>`
     : '<p>No devices paired yet.</p>';
-  return layout('Relay', `<h1>SES-RDP relay</h1>
+  return layout('Relay', `<h1>BRC relay</h1>
 <p>MCP: <code>${esc(publicUrl)}/mcp</code><br>OpenAPI: <code>${esc(publicUrl)}/openapi.json</code></p>
 ${loggedIn ? `<p>Devices:</p>${list}<div class="row"><a href="/admin"><button class="primary">Admin</button></a><a href="/device/verify"><button class="secondary">Pair a device</button></a><a href="/auth/clients"><button class="secondary">OAuth clients</button></a><a href="/auth/logout"><button class="secondary">Sign out</button></a></div>`
   : `<div class="row"><a href="/auth/login?returnTo=/"><button class="primary">Sign in</button></a></div>`}`);

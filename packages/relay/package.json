@@ -1,11 +1,11 @@
 {
-    "name":  "@ses-systems/rdp-relay",
-    "version":  "1.0.1",
-    "description":  "SES-RDP relay - self-hosted MCP + REST server that routes tool calls to paired device agents",
+    "name":  "brc-relay",
+    "version":  "2.0.0",
+    "description":  "BRC relay - self-hosted MCP + REST server that routes tool calls to paired device agents",
     "license":  "MIT",
     "type":  "module",
     "bin":  {
-                "ses-rdp-relay":  "dist/cli.js"
+                "brc-relay":  "dist/cli.js"
             },
     "main":  "dist/index.js",
     "files":  [
@@ -17,7 +17,7 @@
                     "dev":  "tsc -p tsconfig.json --watch"
                 },
     "dependencies":  {
-                         "@ses-systems/rdp-shared":  "workspace:*",
+                         "brc-shared":  "workspace:*",
                          "@modelcontextprotocol/sdk":  "^1.9.0",
                          "ws":  "^8.18.0",
                          "zod":  "^3.24.1",

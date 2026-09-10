@@ -1,8 +1,8 @@
 /**
- * SES-RDP: replaces the module-level client state that upstream kept in server.ts.
+ * Better Remote Commander (BRC): replaces the module-level client state that upstream kept in server.ts.
  * The agent transport sets these per tool call so telemetry/config code keeps working.
  */
-export let currentClient: { name: string; version: string } = { name: 'ses-rdp-agent', version: '0.0.0' };
+export let currentClient: { name: string; version: string } = { name: 'brc-agent', version: '0.0.0' };
 export let currentCallIsRemote = true;
 export let currentRemoteClient: { name?: string; version?: string } | null = null;
 

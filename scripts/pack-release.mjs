@@ -1,5 +1,5 @@
 // Release packer: pnpm pack all packages, then rewrite agent/relay's dependency on
-// @ses-systems/rdp-shared to the shared tarball URL of this GitHub release so
+// brc-shared to the shared tarball URL of this GitHub release so
 // `npm i -g <agent.tgz url>` works without an npm registry.
 //   node scripts/pack-release.mjs <owner/repo> <tag>
 import { execSync } from 'node:child_process';
@@ -13,18 +13,18 @@ rmSync(out, { recursive: true, force: true }); mkdirSync(out);
 execSync('pnpm -r --filter "./packages/*" exec pnpm pack --pack-destination ../../dist-pack', { stdio: 'inherit' });
 
 const files = readdirSync(out).filter((f) => f.endsWith('.tgz'));
-const shared = files.find((f) => f.includes('rdp-shared'));
+const shared = files.find((f) => f.startsWith('brc-shared-'));
 const sharedUrl = `https://github.com/${repo}/releases/download/${tag}/${shared}`;
 
-for (const f of files.filter((x) => !x.includes('rdp-shared'))) {
+for (const f of files.filter((x) => !x.startsWith('brc-shared-'))) {
   const work = path.join(out, 'work'); rmSync(work, { recursive: true, force: true }); mkdirSync(work);
   execSync(`tar -xzf "${path.join(out, f)}" -C "${work}"`);
   const pj = path.join(work, 'package', 'package.json');
   const pkg = JSON.parse(readFileSync(pj, 'utf8'));
-  if (pkg.dependencies?.['@ses-systems/rdp-shared']) pkg.dependencies['@ses-systems/rdp-shared'] = sharedUrl;
+  if (pkg.dependencies?.['brc-shared']) pkg.dependencies['brc-shared'] = sharedUrl;
   writeFileSync(pj, JSON.stringify(pkg, null, 2));
   rmSync(path.join(out, f));
   execSync(`tar -czf "${path.join(out, f)}" -C "${work}" package`);
   rmSync(work, { recursive: true, force: true });
-  console.log(`${f}: rdp-shared -> ${sharedUrl}`);
+  console.log(`${f}: brc-shared -> ${sharedUrl}`);
 }

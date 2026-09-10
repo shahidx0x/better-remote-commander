@@ -1,6 +1,6 @@
 # Dev helper (Windows): run the relay behind a temporary ngrok URL. Requires ngrok on PATH.
 param([int]$Port = 3210)
-if (-not $env:SES_RDP_ADMIN_PASSWORD) { throw 'set SES_RDP_ADMIN_PASSWORD' }
+if (-not $env:BRC_ADMIN_PASSWORD) { throw 'set BRC_ADMIN_PASSWORD' }
 $ngrok = Start-Process ngrok -ArgumentList "http $Port" -PassThru -WindowStyle Hidden
 try {
   $url = $null

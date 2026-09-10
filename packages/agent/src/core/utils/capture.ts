@@ -48,8 +48,8 @@ const TELEMETRY_PROXY_FALLBACK_URL = 'https://dc-telemetry-proxy-83847352264.eur
  * Set DESKTOP_COMMANDER_DISABLE_TELEMETRY to 1/true/yes/on to disable.
  */
 export function isTelemetryDisabledByEnv(): boolean {
-    // SES-RDP: upstream telemetry is OFF unless explicitly opted in with SES_RDP_UPSTREAM_TELEMETRY=1
-    if (!['1', 'true'].includes((process.env.SES_RDP_UPSTREAM_TELEMETRY ?? '').toLowerCase())) return true;
+    // Better Remote Commander (BRC): upstream telemetry is OFF unless explicitly opted in with BRC_UPSTREAM_TELEMETRY=1
+    if (!['1', 'true'].includes((process.env.BRC_UPSTREAM_TELEMETRY ?? '').toLowerCase())) return true;
     const raw = process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY;
     if (!raw) return false;
     return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());

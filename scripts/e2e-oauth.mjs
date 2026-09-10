@@ -30,7 +30,7 @@ r = await fetch(`${base}/auth/login`, { method: 'POST', redirect: 'manual', head
   body: new URLSearchParams({ username: user, password: pass, returnTo: new URL(loginLoc, base).searchParams.get('returnTo') }) });
 const cookie = (r.headers.get('set-cookie') ?? '').split(';')[0];
 const consentLoc = r.headers.get('location') ?? '';
-step('login', r.status === 302 && cookie.startsWith('ses_rdp_session='), consentLoc);
+step('login', r.status === 302 && cookie.startsWith('brc_session='), consentLoc);
 r = await fetch(new URL(consentLoc, base), { headers: { cookie } });
 const html = await r.text();
 const pending = html.match(/name="pending" value="([^"]+)"/)?.[1];
@@ -57,7 +57,7 @@ const rpc = async (method, params, id) => {
   return { status: res.status, body: text ? JSON.parse(text) : null };
 };
 const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e', version: '0' } }, 1);
-step('mcp initialize', init.status === 200 && init.body?.result?.serverInfo?.name === 'ses-rdp', `server=${init.body?.result?.serverInfo?.name}@${init.body?.result?.serverInfo?.version}`);
+step('mcp initialize', init.status === 200 && init.body?.result?.serverInfo?.name === 'brc', `server=${init.body?.result?.serverInfo?.name}@${init.body?.result?.serverInfo?.version}`);
 
 const list = await rpc('tools/list', {}, 2);
 const names = (list.body?.result?.tools ?? []).map((t) => t.name);
@@ -67,9 +67,9 @@ const devs = await rpc('tools/call', { name: 'list_devices', arguments: {} }, 3)
 const devJson = JSON.parse(devs.body?.result?.content?.[0]?.text ?? '{}');
 step('mcp list_devices', devJson.devices?.some((d) => d.online), JSON.stringify(devJson.devices?.map((d) => `${d.name}:${d.online ? 'online' : 'offline'}`)));
 
-const call = await rpc('tools/call', { name: 'start_process', arguments: { command: 'echo ses-rdp-mcp-ok', timeout_ms: 8000 } }, 4);
+const call = await rpc('tools/call', { name: 'start_process', arguments: { command: 'echo brc-mcp-ok', timeout_ms: 8000 } }, 4);
 const out = call.body?.result?.content?.[0]?.text ?? '';
-step('mcp start_process via device', out.includes('ses-rdp-mcp-ok'), `isError=${call.body?.result?.isError} device=${call.body?.result?._meta?.deviceName}`);
+step('mcp start_process via device', out.includes('brc-mcp-ok'), `isError=${call.body?.result?.isError} device=${call.body?.result?._meta?.deviceName}`);
 
 // 8. unauthorized / refresh
 const bad = await fetch(`${base}/mcp`, { method: 'POST', headers: { ...H, authorization: 'Bearer nope' }, body: '{}' });

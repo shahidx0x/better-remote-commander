@@ -1,7 +1,7 @@
 {
-    "name":  "@ses-systems/rdp-shared",
-    "version":  "1.0.1",
-    "description":  "SES-RDP shared protocol types and tool schemas",
+    "name":  "brc-shared",
+    "version":  "2.0.0",
+    "description":  "Better Remote Commander (BRC) shared protocol types and tool schemas",
     "license":  "MIT",
     "type":  "module",
     "main":  "dist/index.js",

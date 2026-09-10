@@ -1,5 +1,5 @@
 /**
- * SES-RDP: stub for upstream's stdio transport type.
+ * Better Remote Commander (BRC): stub for upstream's stdio transport type.
  * The agent never speaks stdio; this only satisfies the `global.mcpTransport` type
  * referenced by upstream logger/types code. Always undefined at runtime.
  */

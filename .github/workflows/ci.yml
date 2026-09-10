@@ -20,7 +20,7 @@ jobs:
       - run: pnpm build
       - run: pnpm test:unit
       - run: pnpm test:e2e
-        env: { E2E_PORT: '3555', SES_RDP_DEBUG: '1' }
+        env: { E2E_PORT: '3555', BRC_DEBUG: '1' }
       - name: pack npm tarballs
         if: matrix.os == 'ubuntu-latest'
         run: pnpm pack:all
@@ -34,10 +34,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - run: docker build -f packages/relay/Dockerfile -t ses-systems/rdp-relay:ci .
-      - run: docker build -f packages/agent/Dockerfile -t ses-systems/rdp-agent:ci .
+      - run: docker build -f packages/relay/Dockerfile -t brc/relay:ci .
+      - run: docker build -f packages/agent/Dockerfile -t brc/agent:ci .
       - name: smoke relay image
         run: |
-          docker run -d --name relay -p 3000:3000 -e PUBLIC_URL=http://localhost:3000 -e SES_RDP_ADMIN_PASSWORD=ci -e SES_RDP_SESSION_SECRET=ci ses-systems/rdp-relay:ci
+          docker run -d --name relay -p 3000:3000 -e PUBLIC_URL=http://localhost:3000 -e BRC_ADMIN_PASSWORD=ci -e BRC_SESSION_SECRET=ci brc/relay:ci
           for i in $(seq 1 20); do curl -fs http://localhost:3000/health && break; sleep 1; done
           curl -fs http://localhost:3000/.well-known/oauth-authorization-server | grep -q authorization_endpoint

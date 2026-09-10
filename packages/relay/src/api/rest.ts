@@ -67,7 +67,7 @@ export function buildOpenApi(publicUrl: string, tools: { name: string; descripti
   }
   return {
     openapi: '3.1.0',
-    info: { title: 'SES-RDP', version: relayVersion, description: 'Files, terminal and processes on your paired devices via the SES-RDP relay.' },
+    info: { title: 'Better Remote Commander (BRC)', version: relayVersion, description: 'Files, terminal and processes on your paired devices via the BRC relay.' },
     servers: [{ url: publicUrl }],
     paths,
     components: { schemas: { ToolResult: RESULT_SCHEMA, Devices: DEVICES_SCHEMA }, securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', description: 'API key from /auth/apikeys' }, oauth2: { type: 'oauth2', flows: { authorizationCode: { authorizationUrl: `${publicUrl}/authorize`, tokenUrl: `${publicUrl}/token`, refreshUrl: `${publicUrl}/token`, scopes: { 'mcp:tools': 'Run tools on paired devices' } } } } } },

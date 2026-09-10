@@ -1,5 +1,5 @@
 /**
- * SES-RDP relay store on node:sqlite (Node >= 22.13, no native build).
+ * BRC relay store on node:sqlite (Node >= 22.13, no native build).
  * Tables: users, oauth_clients, auth_codes, tokens, devices, device_codes, audit.
  */
 import { DatabaseSync } from 'node:sqlite';
@@ -123,7 +123,7 @@ export class SqliteStore {
   }
   /** Creates (or re-keys) a device and returns the raw token once. */
   issueDeviceToken(deviceId: string, userId: string, name: string, platform: string | null): string {
-    const raw = `sesrdp_dev_${randomToken(32)}`;
+    const raw = `brc_dev_${randomToken(32)}`;
     const existing = this.getDevice(deviceId);
     if (existing) {
       this.db.prepare('UPDATE devices SET token_hash = ?, name = ?, platform = ?, user_id = ? WHERE device_id = ?').run(sha256(raw), name, platform, userId, deviceId);
@@ -234,7 +234,7 @@ export class SqliteStore {
   }
   createApiKey(userId: string, name: string): { raw: string; prefix: string } {
     this.ensureApiKeys();
-    const raw = `sesrdp_ak_${randomToken(32)}`;
+    const raw = `brc_ak_${randomToken(32)}`;
     const prefix = raw.slice(0, 18);
     this.db.prepare('INSERT INTO api_keys (key_hash, user_id, name, prefix, created_at) VALUES (?,?,?,?,?)').run(sha256(raw), userId, name, prefix, Date.now());
     return { raw, prefix };

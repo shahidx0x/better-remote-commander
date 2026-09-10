@@ -1,11 +1,11 @@
 /**
  * Minimal signed-cookie sessions for the relay's browser pages (login, consent, device verify, admin).
- * Cookie: ses_rdp_session=<userId>.<exp>.<hmac>
+ * Cookie: brc_session=<userId>.<exp>.<hmac>
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
 
-const COOKIE = 'ses_rdp_session';
+const COOKIE = 'brc_session';
 const TTL_MS = 12 * 3_600_000;
 
 export class Sessions {

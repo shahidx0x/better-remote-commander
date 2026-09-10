@@ -1,13 +1,13 @@
 /**
- * SES-RDP relay device hub: holds live agent sockets, matches call/result by id,
+ * BRC relay device hub: holds live agent sockets, matches call/result by id,
  * runs heartbeat, and exposes the routing API used by MCP/REST layers.
  */
 import type WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import {
-  DEFAULTS, SES_RDP_PROTOCOL_VERSION, parseMessage,
+  DEFAULTS, BRC_PROTOCOL_VERSION, parseMessage,
   type AgentMessage, type RelayMessage, type DeviceInfo, type ToolDefinition, type ToolResult,
-} from '@ses-systems/rdp-shared';
+} from 'brc-shared';
 
 export interface ConnectedDevice {
   info: DeviceInfo;
@@ -55,8 +55,8 @@ export class DeviceHub {
       if (!msg) return;
 
       if (msg.type === 'hello') {
-        if (msg.protocol !== SES_RDP_PROTOCOL_VERSION) {
-          this.sendTo(socket, { type: 'error', code: 'PROTOCOL_MISMATCH', message: `relay speaks v${SES_RDP_PROTOCOL_VERSION}`, fatal: true });
+        if (msg.protocol !== BRC_PROTOCOL_VERSION) {
+          this.sendTo(socket, { type: 'error', code: 'PROTOCOL_MISMATCH', message: `relay speaks v${BRC_PROTOCOL_VERSION}`, fatal: true });
           return socket.close(1002, 'protocol mismatch');
         }
         if (expectedDeviceId && msg.device.deviceId !== expectedDeviceId) {
@@ -70,7 +70,7 @@ export class DeviceHub {
           prev.socket.terminate();
         }
         this.devices.set(deviceId, { info: msg.device, tools: msg.tools, ownerId, connectedAt: Date.now(), lastSeen: Date.now(), socket });
-        this.sendTo(socket, { type: 'welcome', protocol: SES_RDP_PROTOCOL_VERSION, relayVersion: this.relayVersion, serverTime: Date.now() });
+        this.sendTo(socket, { type: 'welcome', protocol: BRC_PROTOCOL_VERSION, relayVersion: this.relayVersion, serverTime: Date.now() });
         this.log('info', `device online: ${msg.device.name} [${deviceId}] ${msg.device.platform} tools=${msg.tools.length}`);
         try { this.onHello?.(msg.device, msg.tools); } catch (e) { this.log('warn', `onHello failed: ${e instanceof Error ? e.message : String(e)}`); }
         return;

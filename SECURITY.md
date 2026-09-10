@@ -7,7 +7,7 @@
 - Per-call audit log: tool name, args hash, device, client, result, latency. Arguments and outputs are never stored.
 
 ## Defaults you should keep
-- `SES_RDP_ADMIN_PASSWORD` strong; `SES_RDP_SESSION_SECRET` random (32+ bytes)
+- `BRC_ADMIN_PASSWORD` strong; `BRC_SESSION_SECRET` random (32+ bytes)
 - `PUBLIC_URL` must be `https://` in any real deployment (HSTS + secure cookies switch on automatically)
 - Login: 5 failures per IP+user -> 5 min lock. Consent is required per OAuth client.
 - Agent: `--allow-dir` to restrict file access; pause a device from `/admin` when you do not need it

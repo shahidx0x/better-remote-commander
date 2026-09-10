@@ -1,8 +1,8 @@
 /**
- * SES-RDP agent <-> relay wire protocol (WebSocket, one JSON object per frame).
+ * BRC agent <-> relay wire protocol (WebSocket, one JSON object per frame).
  * Agent connects outbound to `wss://<relay>/ws` with `Authorization: Bearer <device token>`.
  */
-export const SES_RDP_PROTOCOL_VERSION = 1;
+export const BRC_PROTOCOL_VERSION = 1;
 
 export interface ToolDefinition {
   name: string;

@@ -24,7 +24,7 @@ Tools available to the AI (24): `read_file`, `write_file`, `edit_block`, `list_d
 **Docker (recommended)**
 ```bash
 git clone https://github.com/shahidx0x/better-remote-commander.git && cd better-remote-commander
-cp .env.example .env        # set PUBLIC_URL, SES_RDP_ADMIN_PASSWORD, SES_RDP_SESSION_SECRET
+cp .env.example .env        # set PUBLIC_URL, BRC_ADMIN_PASSWORD, BRC_SESSION_SECRET
 docker compose --profile cloud up -d                            # VPS with your domain (Caddy, auto-TLS)
 docker compose --profile tunnel --profile cloudflare up -d      # your PC via Cloudflare Tunnel
 docker compose --profile tunnel --profile ngrok up -d           # your PC via a static ngrok domain
@@ -34,8 +34,8 @@ Images are published to `ghcr.io/shahidx0x/better-remote-commander/relay` and `/
 
 **Without Docker**
 ```bash
-npm i -g https://github.com/shahidx0x/better-remote-commander/releases/latest/download/ses-systems-rdp-relay-1.0.1.tgz
-PUBLIC_URL=https://rdp.example.com SES_RDP_ADMIN_PASSWORD=... SES_RDP_SESSION_SECRET=... ses-rdp-relay
+npm i -g https://github.com/shahidx0x/better-remote-commander/releases/latest/download/brc-relay-2.0.0.tgz
+PUBLIC_URL=https://rdp.example.com BRC_ADMIN_PASSWORD=... BRC_SESSION_SECRET=... brc-relay
 ```
 Put it behind any HTTPS reverse proxy (Caddy, nginx, Cloudflare Tunnel) that forwards WebSockets, and set `TRUST_PROXY=true`.
 
@@ -47,12 +47,12 @@ curl -fsSL https://raw.githubusercontent.com/shahidx0x/better-remote-commander/m
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/shahidx0x/better-remote-commander/main/install.ps1 | iex
 
-ses-rdp-agent --relay https://rdp.example.com --name "My PC"
+brc-agent --relay https://rdp.example.com --name "My PC"
 ```
 The agent prints a pairing code and opens `https://rdp.example.com/device/verify`; sign in and approve.
-Then make it start at login: `ses-rdp-agent --install-service`.
+Then make it start at login: `brc-agent --install-service`.
 
-Docker agent (Linux servers): `docker run -d -v ses-rdp-agent:/home/rdp/.ses-rdp -e SES_RDP_RELAY=https://rdp.example.com -e SES_RDP_NAME=srv1 ghcr.io/shahidx0x/better-remote-commander/agent`
+Docker agent (Linux servers): `docker run -d -v brc-agent:/home/rdp/.brc -e BRC_RELAY=https://rdp.example.com -e BRC_NAME=srv1 ghcr.io/shahidx0x/better-remote-commander/agent`
 
 ### 3. Connect your AI
 

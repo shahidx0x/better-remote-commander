@@ -1,11 +1,11 @@
 {
-    "name":  "@ses-systems/rdp-agent",
-    "version":  "1.0.1",
-    "description":  "SES-RDP device agent - runs on the machine to be controlled, connects outbound to an SES-RDP relay",
+    "name":  "brc-agent",
+    "version":  "2.0.0",
+    "description":  "Better Remote Commander (BRC) device agent - runs on the machine to be controlled, connects outbound to an BRC relay",
     "license":  "MIT",
     "type":  "module",
     "bin":  {
-                "ses-rdp-agent":  "dist/cli.js"
+                "brc-agent":  "dist/cli.js"
             },
     "main":  "dist/index.js",
     "files":  [
@@ -17,7 +17,7 @@
                     "dev":  "tsc -p tsconfig.json --watch"
                 },
     "dependencies":  {
-                         "@ses-systems/rdp-shared":  "workspace:*",
+                         "brc-shared":  "workspace:*",
                          "@modelcontextprotocol/sdk":  "^1.9.0",
                          "@opendocsg/pdf2md":  "^0.2.2",
                          "@tiptap/core":  "^3.22.3",

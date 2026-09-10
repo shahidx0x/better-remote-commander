@@ -1,13 +1,13 @@
 /**
- * SES-RDP agent transport: outbound WebSocket to the relay with auth, hello, heartbeat,
+ * BRC agent transport: outbound WebSocket to the relay with auth, hello, heartbeat,
  * exponential-backoff reconnect, unauthorized handling and call dispatch.
  */
 import WebSocket from 'ws';
 import os from 'node:os';
 import {
-  DEFAULTS, SES_RDP_PROTOCOL_VERSION, parseMessage,
+  DEFAULTS, BRC_PROTOCOL_VERSION, parseMessage,
   type AgentMessage, type RelayMessage, type CallMessage, type DeviceInfo, type ToolDefinition,
-} from '@ses-systems/rdp-shared';
+} from 'brc-shared';
 import { setCurrentRemoteClient, setCurrentCallIsRemote } from '../context.js';
 
 export interface WsClientOptions {
@@ -59,7 +59,7 @@ export class WsClient {
     if (this.stopped) return;
     this.log('info', `Connecting to ${this.wsUrl}`);
     const ws = new WebSocket(this.wsUrl, {
-      headers: { Authorization: `Bearer ${this.opts.token}`, 'X-SES-RDP-Protocol': String(SES_RDP_PROTOCOL_VERSION) },
+      headers: { Authorization: `Bearer ${this.opts.token}`, 'X-BRC-Protocol': String(BRC_PROTOCOL_VERSION) },
       handshakeTimeout: 15_000,
     });
     this.ws = ws;
@@ -67,7 +67,7 @@ export class WsClient {
     ws.on('open', () => {
       this.backoff = DEFAULTS.reconnectMinMs;
       this.unauthorizedCount = 0;
-      this.send({ type: 'hello', protocol: SES_RDP_PROTOCOL_VERSION, device: this.deviceInfo(), tools: this.opts.tools });
+      this.send({ type: 'hello', protocol: BRC_PROTOCOL_VERSION, device: this.deviceInfo(), tools: this.opts.tools });
       this.armPongTimer();
       this.log('info', 'Connected, hello sent');
     });

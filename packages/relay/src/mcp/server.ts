@@ -39,7 +39,7 @@ export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
 }
 
 export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string): Server {
-  const server = new Server({ name: 'ses-rdp', version: relayVersion }, { capabilities: { tools: {} } });
+  const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { online, tools } = liveTools(hub, store, ctx.userId);

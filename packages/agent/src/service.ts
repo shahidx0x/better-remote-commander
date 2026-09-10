@@ -11,9 +11,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-const NAME = 'ses-rdp-agent';
+const NAME = 'brc-agent';
 const cliPath = () => fileURLToPath(new URL('./cli.js', import.meta.url));
-const home = () => process.env.SES_RDP_HOME ?? path.join(os.homedir(), '.ses-rdp');
+const home = () => process.env.BRC_HOME ?? path.join(os.homedir(), '.brc');
 const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'pipe' }).toString();
 
 export function installService(extraArgs: string[]): string {
@@ -36,7 +36,7 @@ export function installService(extraArgs: string[]): string {
     const dir = path.join(os.homedir(), '.config', 'systemd', 'user');
     mkdirSync(dir, { recursive: true });
     const unit = path.join(dir, `${NAME}.service`);
-    writeFileSync(unit, `[Unit]\nDescription=SES-RDP device agent\nAfter=network-online.target\n\n[Service]\nExecStart=${node} ${args.join(' ')}\nRestart=always\nRestartSec=5\nEnvironment=SES_RDP_HOME=${home()}\n\n[Install]\nWantedBy=default.target\n`);
+    writeFileSync(unit, `[Unit]\nDescription=Better Remote Commander (BRC) device agent\nAfter=network-online.target\n\n[Service]\nExecStart=${node} ${args.join(' ')}\nRestart=always\nRestartSec=5\nEnvironment=BRC_HOME=${home()}\n\n[Install]\nWantedBy=default.target\n`);
     run('systemctl', ['--user', 'daemon-reload']);
     run('systemctl', ['--user', 'enable', '--now', `${NAME}.service`]);
     return `Installed systemd user unit ${unit}.\nTo keep it running when logged out: sudo loginctl enable-linger ${os.userInfo().username}\nLogs: journalctl --user -u ${NAME} -f`;
@@ -44,9 +44,9 @@ export function installService(extraArgs: string[]): string {
   if (process.platform === 'darwin') {
     const dir = path.join(os.homedir(), 'Library', 'LaunchAgents');
     mkdirSync(dir, { recursive: true });
-    const plist = path.join(dir, `com.ses-systems.${NAME}.plist`);
+    const plist = path.join(dir, `dev.brc.${NAME}.plist`);
     const xmlArgs = [node, ...args].map((a) => `    <string>${a}</string>`).join('\n');
-    writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n  <key>Label</key><string>com.ses-systems.${NAME}</string>\n  <key>ProgramArguments</key><array>\n${xmlArgs}\n  </array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>StandardOutPath</key><string>${logFile}</string>\n  <key>StandardErrorPath</key><string>${logFile}</string>\n  <key>EnvironmentVariables</key><dict><key>SES_RDP_HOME</key><string>${home()}</string></dict>\n</dict></plist>\n`);
+    writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n  <key>Label</key><string>dev.brc.${NAME}</string>\n  <key>ProgramArguments</key><array>\n${xmlArgs}\n  </array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>StandardOutPath</key><string>${logFile}</string>\n  <key>StandardErrorPath</key><string>${logFile}</string>\n  <key>EnvironmentVariables</key><dict><key>BRC_HOME</key><string>${home()}</string></dict>\n</dict></plist>\n`);
     try { run('launchctl', ['unload', plist]); } catch { /* not loaded */ }
     run('launchctl', ['load', '-w', plist]);
     return `Installed LaunchAgent ${plist}. Log: ${logFile}`;
@@ -69,7 +69,7 @@ export function uninstallService(): string {
     return `Removed systemd user unit ${NAME}.service.`;
   }
   if (process.platform === 'darwin') {
-    const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `com.ses-systems.${NAME}.plist`);
+    const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `dev.brc.${NAME}.plist`);
     try { run('launchctl', ['unload', plist]); } catch { /* not loaded */ }
     if (existsSync(plist)) unlinkSync(plist);
     return `Removed LaunchAgent ${plist}.`;

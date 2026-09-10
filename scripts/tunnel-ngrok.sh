@@ -3,7 +3,7 @@
 # For a stable URL use NGROK_DOMAIN in .env with the compose `ngrok` profile instead.
 set -euo pipefail
 PORT="${PORT:-3210}"
-: "${SES_RDP_ADMIN_PASSWORD:?set SES_RDP_ADMIN_PASSWORD}"
+: "${BRC_ADMIN_PASSWORD:?set BRC_ADMIN_PASSWORD}"
 ngrok http "$PORT" --log=stdout >/tmp/ngrok.log &
 NGROK_PID=$!
 trap 'kill $NGROK_PID 2>/dev/null || true' EXIT

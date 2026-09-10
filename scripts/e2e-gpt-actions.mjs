@@ -16,7 +16,9 @@ const secret = html.match(/Client secret<\/label><input readonly value="([^"]+)"
 step('create static client', !!clientId && !!secret, `client_id=${clientId}`);
 
 // OpenAPI spec (public)
-const spec = await (await fetch(`${base}/openapi.json`)).json();
+const spec = await (await fetch(`${base}/openapi.json?auth=oauth`)).json();
+const bearerSpec = await (await fetch(`${base}/openapi.json`)).json();
+step('openapi.json default is bearer-only', Object.keys(bearerSpec.components?.securitySchemes ?? {}).join() === 'bearerAuth');
 const ops = Object.values(spec.paths ?? {}).flatMap((p) => Object.values(p)).length;
 const flow = spec.components?.securitySchemes?.oauth2?.flows?.authorizationCode;
 step('openapi.json', spec.openapi === '3.1.0' && ops > 0 && ops <= 30 && !!flow?.tokenUrl, `${ops} operations, tokenUrl=${flow?.tokenUrl}`);
@@ -69,7 +71,7 @@ step('no bearer -> 401', noauth.status === 401);
 const cfgRes = await (await fetch(`${base}/api/tools/get_config`, { method: 'POST', headers: H, body: JSON.stringify({ deviceId: target }) })).json();
 const allowed = JSON.parse(cfgRes.text.slice(cfgRes.text.indexOf('{'))).allowedDirectories?.[0] ?? (await import('node:os')).tmpdir();
 const sep = allowed?.includes('\\') ? '\\' : '/';
-const bigPath = `${allowed}${sep}ses-rdp-big.txt`;
+const bigPath = `${allowed}${sep}brc-big.txt`;
 await fetch(`${base}/api/tools/write_file`, { method: 'POST', headers: H, body: JSON.stringify({ deviceId: target, path: bigPath, content: Array.from({ length: 4 }, () => 'x'.repeat(50_000)).join('\n') }) });
 const big = await (await fetch(`${base}/api/tools/read_file`, { method: 'POST', headers: H, body: JSON.stringify({ deviceId: target, path: bigPath }) })).json();
 step('oversized output clipped for GPT', Buffer.byteLength(big.text ?? '') < 100_000 && /truncated by relay/.test(big.text ?? ''), `${Buffer.byteLength(big.text ?? '')} bytes ${JSON.stringify((big.text ?? big.error ?? '').slice(0, 100))}`);
