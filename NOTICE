@@ -9,5 +9,5 @@ packages/agent/src/core/  is derived from Desktop Commander MCP
   Modifications: removed Supabase/stdio/remote-device transport and telemetry defaults,
   added Better Remote Commander (BRC) context shim, own config directory (~/.brc), tool-definition extraction.
 
-Everything else (relay, protocol, agent transport, pairing, dashboard, REST/OpenAPI,
+Everything else (relay, protocol, agent transport, pairing, dashboard,
 Docker/CI) is original work of this project, MIT licensed.

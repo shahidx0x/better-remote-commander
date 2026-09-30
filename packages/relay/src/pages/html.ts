@@ -6,15 +6,10 @@ export function layout(title: string, body: string, width: 'narrow' | 'wide' = '
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)} · Better Remote Commander (BRC)</title>
 <style>
-:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;margin:0;background:#f5f5f4;color:#1c1c1a;display:flex;min-height:100vh;align-items:center;justify-content:center}
-@media(prefers-color-scheme:dark){body{background:#151513;color:#e8e6df}.card{background:#1f1f1c!important;border-color:#33332f!important}input{background:#151513;color:#e8e6df;border-color:#44443f!important}}
-.card{background:#fff;border:1px solid #e2e0d8;border-radius:12px;padding:28px 32px;width:min(${width === 'wide' ? '900px' : '420px'},92vw)}
-h1{font-size:20px;font-weight:500;margin:0 0 4px}p{margin:8px 0;color:#6b6a64}.brand{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#8a8983;margin-bottom:14px}
-label{display:block;font-size:13px;margin:12px 0 4px}input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d3d1c8;border-radius:8px;font:inherit}
-input.code{font:22px/1 ui-monospace,monospace;letter-spacing:.2em;text-align:center;text-transform:uppercase}
-.row{display:flex;gap:10px;margin-top:18px}button{flex:1;padding:10px 14px;border-radius:8px;border:1px solid transparent;font:inherit;cursor:pointer}
-.primary{background:#2a6df4;color:#fff}.secondary{background:transparent;border-color:#c9c7bf;color:inherit}.err{color:#c0392b}.ok{color:#1f8a4c}
-ul{padding-left:18px}code{font-family:ui-monospace,monospace;font-size:13px}
+:root{color-scheme:light dark;--bg:#f3f5f7;--panel:#fff;--panel2:#f8fafc;--text:#121826;--muted:#687386;--line:#e4e8ef;--brand:#2563eb;--brand2:#1d4ed8;--ok:#15803d;--err:#dc2626;--shadow:0 18px 50px rgba(15,23,42,.08)}*{box-sizing:border-box}body{font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:radial-gradient(circle at top left,#eef4ff 0,transparent 32%),var(--bg);color:var(--text);display:flex;min-height:100vh;align-items:flex-start;justify-content:center;padding:38px 18px}a{color:var(--brand);text-decoration:none}a:hover{text-decoration:underline}
+@media(prefers-color-scheme:dark){:root{--bg:#0b1020;--panel:#111827;--panel2:#172033;--text:#eef2ff;--muted:#9aa6ba;--line:#263247;--brand:#60a5fa;--brand2:#3b82f6;--shadow:0 18px 50px rgba(0,0,0,.32)}body{background:radial-gradient(circle at top left,#16223d 0,transparent 34%),var(--bg)}input,textarea{background:#0d1424;color:var(--text)}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:28px 30px;width:min(${width === 'wide' ? '1120px' : '480px'},96vw);box-shadow:var(--shadow)}h1{font-size:22px;line-height:1.2;font-weight:700;margin:0 0 6px;letter-spacing:-.02em}h2{font-size:15px;margin:0 0 10px}p{margin:8px 0;color:var(--muted)}.brand{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--brand);margin-bottom:16px}.muted{color:var(--muted)}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+label{display:block;font-size:12px;font-weight:600;margin:13px 0 5px;color:var(--muted)}input,textarea{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font:inherit;outline:none}input:focus,textarea:focus{border-color:var(--brand);box-shadow:0 0 0 3px color-mix(in srgb,var(--brand) 14%,transparent)}input.code{font:22px/1 ui-monospace,monospace;letter-spacing:.2em;text-align:center;text-transform:uppercase}.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.row>a{display:flex}button{padding:9px 13px;border-radius:10px;border:1px solid transparent;font:600 13px/1.2 inherit;cursor:pointer;transition:.15s ease}button:hover{transform:translateY(-1px)}.primary{background:var(--brand);color:#fff}.primary:hover{background:var(--brand2)}.secondary{background:var(--panel2);border-color:var(--line);color:inherit}.danger{color:var(--err)}.err{color:var(--err)}.ok{color:var(--ok)}.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:3px 8px;background:var(--panel2);font-size:12px}.dot{width:7px;height:7px;border-radius:50%;background:currentColor}ul{padding-left:18px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 5px}table{width:100%;border-collapse:separate;border-spacing:0}th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.panel{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.stat strong{display:block;font-size:24px;letter-spacing:-.03em}.section{margin-top:24px}.section-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.device-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.device{padding:15px;border:1px solid var(--line);border-radius:14px;background:var(--panel2)}.device-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}.actions button{padding:7px 10px}@media(max-width:760px){body{padding:16px 10px}.card{padding:20px}.grid,.device-grid{grid-template-columns:1fr}.table-wrap{overflow:auto}.section-head{align-items:flex-start;flex-direction:column}}
 </style></head><body><div class="card"><div class="brand">Better Remote Commander (BRC)</div>${body}</div></body></html>`;
 }
 
@@ -60,26 +55,17 @@ export function homePage(publicUrl: string, loggedIn: boolean, devices: { device
     ? `<ul>${devices.map((d) => `<li><code>${esc(d.name)}</code> ${esc(d.platform ?? '')} — ${d.online ? '<span class="ok">online</span>' : 'offline'}${d.paused ? ' (paused)' : ''}</li>`).join('')}</ul>`
     : '<p>No devices paired yet.</p>';
   return layout('Relay', `<h1>BRC relay</h1>
-<p>MCP: <code>${esc(publicUrl)}/mcp</code><br>OpenAPI: <code>${esc(publicUrl)}/openapi.json</code></p>
+<p>MCP: <code>${esc(publicUrl)}/mcp</code></p>
 ${loggedIn ? `<p>Devices:</p>${list}<div class="row"><a href="/admin"><button class="primary">Admin</button></a><a href="/device/verify"><button class="secondary">Pair a device</button></a><a href="/auth/clients"><button class="secondary">OAuth clients</button></a><a href="/auth/logout"><button class="secondary">Sign out</button></a></div>`
   : `<div class="row"><a href="/auth/login?returnTo=/"><button class="primary">Sign in</button></a></div>`}`);
 }
 
-export function clientsPage(clients: { client_id: string; name: string; redirect_uris: string[]; hasSecret: boolean; created_at: number }[], created?: { client_id: string; client_secret: string }): string {
+export function clientsPage(clients: { client_id: string; name: string; redirect_uris: string[]; hasSecret: boolean; created_at: number }[]): string {
   const rows = clients.length
-    ? `<ul>${clients.map((c) => `<li><strong>${esc(c.name)}</strong><br><code>${esc(c.client_id)}</code>${c.hasSecret ? ' · secret' : ' · public (PKCE)'}<br><small>${c.redirect_uris.map(esc).join('<br>')}</small>
-<a href="/auth/clients/edit?client_id=${esc(c.client_id)}"><button type="button" class="secondary" style="padding:4px 10px;margin-top:6px">Edit</button></a>
-<form method="post" action="/auth/clients/delete" style="display:inline"><input type="hidden" name="client_id" value="${esc(c.client_id)}"><button class="secondary" style="padding:4px 10px;margin-top:6px" onclick="return confirm('Delete client and revoke its tokens?')">Delete</button></form></li>`).join('')}</ul>`
-    : '<p>No OAuth clients yet. Claude registers itself automatically; ChatGPT GPT Actions need one created here.</p>';
-  const banner = created ? `<p class="ok">Client created. Copy the secret now — it is not shown again.</p>
-<label>Client ID</label><input readonly value="${esc(created.client_id)}" onclick="this.select()"><label>Client secret</label><input readonly value="${esc(created.client_secret)}" onclick="this.select()">` : '';
-  return layout('OAuth clients', `<h1>OAuth clients</h1>${banner}
-<p>For a ChatGPT GPT Action: create a client, paste ID + secret into the Action's OAuth settings, then come back and add the callback URL ChatGPT shows you.</p>
-<form method="post" action="/auth/clients"><label>Name</label><input name="name" placeholder="ChatGPT GPT Action" required>
-<label>Redirect URI(s), one per line</label><textarea name="redirect_uris" rows="2" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #d3d1c8;border-radius:8px;font:inherit" placeholder="https://chat.openai.com/aip/g-XXXX/oauth/callback"></textarea>
-<label>After-consent redirect base (optional)</label><input name="redirect_base" placeholder="https://chatgpt.example.com">
-<p style="font-size:12px">If set, the browser is sent to this host (same path, code and state) instead of the client's own callback host.</p>
-<div class="row"><button class="primary" type="submit">Create client</button></div></form>
-<h1 style="margin-top:22px">Existing</h1>${rows}
-<p><a href="/">Back</a></p>`);
+    ? `<ul>${clients.map((c) => `<li><strong>${esc(c.name)}</strong><br><code>${esc(c.client_id)}</code>${c.hasSecret ? ' · confidential' : ' · public (PKCE)'}<br><small>${c.redirect_uris.map(esc).join('<br>')}</small>
+<form method="post" action="/auth/clients/delete" style="display:inline"><input type="hidden" name="client_id" value="${esc(c.client_id)}"><button class="secondary danger" style="padding:4px 10px;margin-top:6px" onclick="return confirm('Delete client and revoke its tokens?')">Delete</button></form></li>`).join('')}</ul>`
+    : '<p>No OAuth clients yet. ChatGPT and Claude register automatically when you connect the MCP endpoint.</p>';
+  return layout('OAuth clients', `<h1>OAuth clients</h1>
+<p>These clients are created automatically through OAuth Dynamic Client Registration. No custom callback URL is required here.</p>
+${rows}<p><a href="/admin">Back</a></p>`);
 }

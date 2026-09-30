@@ -1,5 +1,5 @@
 /**
- * Single tool-invocation path shared by /mcp and /api: device resolution, pause check, audit.
+ * Tool-invocation path for /mcp: device resolution, pause check, and audit.
  */
 import { createHash } from 'node:crypto';
 import type { DeviceHub } from '../device-hub.js';

@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { SqliteStore, verifyPassword, hashPassword } from '../dist/store/sqlite.js';
 import { LoginLimiter } from '../dist/auth/rate-limit.js';
-import { pkceCompat } from '../dist/auth/pkce-compat.js';
 import { DeviceHub } from '../dist/device-hub.js';
 
 test('password hashing round-trips and rejects wrong password', () => {
@@ -62,27 +61,6 @@ test('login limiter locks after N failures and clears on success', () => {
   assert.equal(l.locked('other'), 0);
   l.ok('k');
   assert.equal(l.locked('k'), 0);
-});
-
-test('pkce-compat: synthesizes PKCE only for confidential clients', () => {
-  const s = new SqliteStore(':memory:');
-  s.insertClient({ client_id: 'conf', client_secret: 'sec', metadata: '{}', created_at: 0 });
-  s.insertClient({ client_id: 'pub', client_secret: null, metadata: '{}', created_at: 0 });
-  const mw = pkceCompat(s);
-  const call = (req) => new Promise((r) => mw(req, {}, () => r(req)));
-
-  const c = { path: '/authorize', method: 'GET', originalUrl: '/authorize?client_id=conf&response_type=code', url: '/authorize?client_id=conf&response_type=code' };
-  call(c); assert.match(c.url, /code_challenge=.+&code_challenge_method=S256/);
-  const p = { path: '/authorize', method: 'GET', originalUrl: '/authorize?client_id=pub', url: '/authorize?client_id=pub' };
-  call(p); assert.ok(!p.url.includes('code_challenge'), 'public client untouched');
-
-  const tok = { path: '/token', method: 'POST', body: { grant_type: 'authorization_code', client_id: 'conf', client_secret: 'sec' } };
-  call(tok); assert.ok(tok.body.code_verifier?.startsWith('nopkce-'));
-  const chal = new URL('http://x' + c.url).searchParams.get('code_challenge');
-  assert.equal(createHash('sha256').update(tok.body.code_verifier).digest('base64url'), chal, 'verifier matches challenge');
-  const noSecret = { path: '/token', method: 'POST', body: { grant_type: 'authorization_code', client_id: 'conf' } };
-  call(noSecret); assert.equal(noSecret.body.code_verifier, undefined, 'no secret -> no shim');
-  s.close();
 });
 
 // Fake ws socket: EventEmitter with send/close/terminate and OPEN state

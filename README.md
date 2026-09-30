@@ -8,7 +8,7 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 ```
 
 - **Claude**: add the relay as a custom connector (remote MCP). Works in claude.ai web, desktop and mobile.
-- **ChatGPT**: remote MCP connector, or a Custom GPT via the built-in OpenAPI spec (GPT Actions).
+- **ChatGPT**: add the relay as a remote MCP connector.
 - **Your infrastructure**: run the relay on a VPS, or on your PC behind a Cloudflare Tunnel / ngrok. SQLite, one container, no third-party service.
 - **Many machines**: pair Windows, macOS, Linux boxes and containers to one relay; agents only connect outbound.
 - **Control**: browser dashboard to pair, pause, rename and remove devices, manage OAuth clients and see an audit log.
@@ -54,7 +54,6 @@ Docker agent (Linux servers): `docker run -d -v brc-agent:/home/rdp/.brc -e BRC_
 
 - **Claude**: Settings → Connectors → Add custom connector → URL `https://rdp.example.com/mcp` → Add → Connect → sign in → Allow.
 - **ChatGPT (MCP)**: Settings → Connectors → add `https://rdp.example.com/mcp`.
-- **ChatGPT (Custom GPT Action)**: open `https://rdp.example.com/auth/clients`, create a client, then in the GPT builder import `https://rdp.example.com/openapi.json`, choose OAuth, paste client ID/secret, auth URL `/authorize`, token URL `/token`, scope `mcp:tools`, and add the callback URL ChatGPT shows you to the client.
 
 Useful URLs on your relay: `/admin` (devices, audit), `/device/verify` (pairing), `/auth/clients`, `/health`.
 
@@ -75,4 +74,4 @@ MIT — see [LICENSE](LICENSE).
 The agent's tool implementation (`packages/agent/src/core`) is derived from
 [Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP) by Eduard Ruzga and contributors (MIT).
 Desktop Commander's hosted remote relay is proprietary; this project provides an open, self-hostable relay with the same
-device-agent model, plus OAuth for Claude/ChatGPT, device pairing, a dashboard and a REST/OpenAPI door. See [NOTICE](NOTICE).
+device-agent model, plus OAuth for Claude/ChatGPT, device pairing, and a browser dashboard. See [NOTICE](NOTICE).

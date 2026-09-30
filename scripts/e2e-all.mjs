@@ -56,7 +56,7 @@ try {
   console.log(`relay + agent up on ${base} (pairing code ${code})\n`);
 
   // rate-limit test must run last: it locks the admin login for 5 minutes.
-  for (const s of ['scripts/e2e-oauth.mjs', 'scripts/e2e-gpt-actions.mjs', 'scripts/e2e-admin.mjs']) {
+  for (const s of ['scripts/e2e-oauth.mjs', 'scripts/e2e-admin.mjs']) {
     console.log(`== ${s}`);
     const out = await runScript(s, base, 'admin', pass);
     process.stdout.write(out.split('\n').filter((l) => /^(PASS|FAIL)/.test(l)).map((l) => '  ' + l.slice(0, 110)).join('\n') + '\n');

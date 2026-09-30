@@ -1,4 +1,4 @@
-// Phase 5 checks: admin dashboard, pause/resume/rename, client edit, login rate limit.
+// Admin checks: dashboard, pause/resume/rename, DCR client management, login rate limit.
 // node scripts/e2e-admin.mjs http://localhost:3000 admin pass
 const [base, user, pass] = process.argv.slice(2);
 const form = (o) => new URLSearchParams(o);
@@ -12,11 +12,11 @@ step('login', r.status === 302 && r.headers.get('location') === '/admin');
 r = await fetch(`${base}/admin`, { headers: { cookie } });
 let html = await r.text();
 const deviceId = html.match(/name="device_id" value="([^"]+)"/)?.[1];
-step('admin page', r.status === 200 && !!deviceId && /Recent calls/.test(html), `device=${deviceId}`);
+step('admin page', r.status === 200 && !!deviceId && /Recent MCP calls/.test(html), `device=${deviceId}`);
 
 r = await post('/admin/device', { device_id: deviceId, action: 'pause' }, cookie);
 html = await (await fetch(`${base}/admin`, { headers: { cookie } })).text();
-step('pause device', r.status === 302 && /paused/.test(html));
+step('pause device', r.status === 302 && /paused/i.test(html));
 
 const meta = await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json();
 const reg = await (await fetch(`${base}/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'admin-test', redirect_uris: ['https://x/cb'], token_endpoint_auth_method: 'none' }) })).json();
@@ -27,22 +27,27 @@ const pending = (await r.text()).match(/name="pending" value="([^"]+)"/)[1];
 r = await post('/auth/consent', { pending, decision: 'allow' }, cookie);
 const code = new URL(r.headers.get('location')).searchParams.get('code');
 const tok = await (await fetch(`${base}/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form({ grant_type: 'authorization_code', code, code_verifier: v, client_id: reg.client_id, redirect_uri: 'https://x/cb' }) })).json();
-const H = { authorization: `Bearer ${tok.access_token}`, 'content-type': 'application/json' };
-let call = await fetch(`${base}/api/tools/list_sessions`, { method: 'POST', headers: H, body: JSON.stringify({ deviceId }) });
-step('paused device refuses calls (423)', call.status === 423, `status ${call.status}`);
+const H = { authorization: `Bearer ${tok.access_token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+const rpc = async (id) => {
+  const res = await fetch(`${base}/mcp`, { method: 'POST', headers: H, body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'list_sessions', arguments: { deviceId } } }) });
+  const text = await res.text();
+  const m = text.match(/^data: (.+)$/m);
+  return { status: res.status, body: m ? JSON.parse(m[1]) : JSON.parse(text) };
+};
+let call = await rpc(1);
+step('paused device refuses MCP calls', call.status === 200 && call.body?.result?.isError === true && /paused/i.test(call.body?.result?.content?.[0]?.text ?? ''), `status ${call.status}`);
 
 r = await post('/admin/device', { device_id: deviceId, action: 'resume' }, cookie);
-call = await fetch(`${base}/api/tools/list_sessions`, { method: 'POST', headers: H, body: JSON.stringify({ deviceId }) });
-step('resume device -> calls work', call.status === 200, `status ${call.status}`);
+call = await rpc(2);
+step('resume device -> MCP calls work', call.status === 200 && call.body?.result?.isError !== true, `status ${call.status}`);
 
 r = await post('/admin/device', { device_id: deviceId, action: 'rename', name: 'Eraydin-PC (renamed)' }, cookie);
 html = await (await fetch(`${base}/admin`, { headers: { cookie } })).text();
 step('rename device', /Eraydin-PC \(renamed\)/.test(html));
 await post('/admin/device', { device_id: deviceId, action: 'rename', name: 'Eraydin-PC' }, cookie);
 
-r = await post('/auth/clients/edit', { client_id: reg.client_id, name: 'admin-test-edited', redirect_uris: 'https://x/cb\nhttps://y/cb' }, cookie);
 html = await (await fetch(`${base}/auth/clients`, { headers: { cookie } })).text();
-step('edit client', r.status === 302 && /admin-test-edited/.test(html) && /https:\/\/y\/cb/.test(html));
+step('DCR client appears in admin', /admin-test/.test(html) && /https:\/\/x\/cb/.test(html));
 await post('/auth/clients/delete', { client_id: reg.client_id }, cookie);
 
 let last;

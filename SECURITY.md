@@ -14,7 +14,7 @@
 
 ## Threat notes
 - A compromised AI client session = shell on paused-off devices only. Revoke: `/admin` -> Delete device (closes the socket, invalidates the token) or `/auth/clients` -> Delete client (revokes its tokens).
-- The PKCE shim (`auth/pkce-compat.ts`) applies only to confidential clients that authenticate with a secret at `/token`; public clients must use S256 PKCE.
+- OAuth clients use S256 PKCE. ChatGPT and Claude register clients dynamically through the relay's OAuth metadata.
 - Quick tunnels (`trycloudflare.com`, random ngrok URLs) are for testing: the hostname changes on restart and OAuth clients registered against it become invalid.
 
 ## Reporting

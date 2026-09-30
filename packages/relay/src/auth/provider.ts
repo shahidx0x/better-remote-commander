@@ -16,23 +16,6 @@ const AUTH_CODE_TTL_MS = 10 * 60_000;
 const ACCESS_TTL_MS = 60 * 60_000;
 const REFRESH_TTL_MS = 30 * 86_400_000;
 
-/** Per-client option (metadata key `x_redirect_base`): after consent, send the browser to this origin
- *  instead of the client's requested redirect_uri host. Path, `code` and `state` are preserved.
- *  The requested redirect_uri is still validated against the registered list. */
-export const REDIRECT_BASE_KEY = 'x_redirect_base';
-export function applyRedirectOverride(client: OAuthClientInformationFull, url: URL): string {
-  const base = (client as Record<string, unknown>)[REDIRECT_BASE_KEY];
-  if (typeof base !== 'string' || !/^https?:\/\//.test(base)) return url.toString();
-  try {
-    const b = new URL(base);
-    const out = new URL(url.toString());
-    out.protocol = b.protocol; out.host = b.host;
-    const prefix = b.pathname.replace(/\/$/, '');
-    if (prefix) out.pathname = prefix + out.pathname;
-    return out.toString();
-  } catch { return url.toString(); }
-}
-
 export class RelayClientsStore implements OAuthRegisteredClientsStore {
   constructor(private readonly store: SqliteStore) {}
 
@@ -61,6 +44,8 @@ export interface ProviderDeps {
   renderLogin: (res: Response, returnTo: string) => void;
   /** Render consent page; form posts back to /auth/consent with the pending id. */
   renderConsent: (res: Response, pendingId: string, client: OAuthClientInformationFull, scopes: string[]) => void;
+  /** Canonical OAuth issuer. Returned in every authorization response (RFC 9207). */
+  issuer: string;
 }
 
 /** Authorization request parked between login/consent and code issuance (in memory; short-lived). */
@@ -100,7 +85,8 @@ export class RelayOAuthProvider implements OAuthServerProvider {
     const url = new URL(p.params.redirectUri);
     url.searchParams.set('code', code);
     if (p.params.state) url.searchParams.set('state', p.params.state);
-    return applyRedirectOverride(p.client, url);
+    url.searchParams.set('iss', this.deps.issuer);
+    return url.toString();
   }
 
   denyCode(pendingId: string): string | null {
@@ -110,7 +96,8 @@ export class RelayOAuthProvider implements OAuthServerProvider {
     const url = new URL(p.params.redirectUri);
     url.searchParams.set('error', 'access_denied');
     if (p.params.state) url.searchParams.set('state', p.params.state);
-    return applyRedirectOverride(p.client, url);
+    url.searchParams.set('iss', this.deps.issuer);
+    return url.toString();
   }
 
   async challengeForAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
@@ -123,16 +110,20 @@ export class RelayOAuthProvider implements OAuthServerProvider {
     const row = this.deps.store.takeAuthCode(authorizationCode);
     if (!row || row.client_id !== client.client_id) throw new InvalidGrantError('invalid authorization code');
     if (redirectUri && redirectUri !== row.redirect_uri) throw new InvalidGrantError('redirect_uri mismatch');
-    return this.mint(client.client_id, row.user_id, row.scopes.split(' '), resource?.toString() ?? row.resource);
+    const requestedResource = resource?.toString() ?? null;
+    if (row.resource && requestedResource && requestedResource !== row.resource) throw new InvalidGrantError('resource mismatch');
+    return this.mint(client.client_id, row.user_id, row.scopes.split(' '), requestedResource ?? row.resource);
   }
 
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
     const row = this.deps.store.getToken(refreshToken, 'refresh');
     if (!row || row.client_id !== client.client_id) throw new InvalidGrantError('invalid refresh token');
+    const requestedResource = resource?.toString() ?? null;
+    if (row.resource && requestedResource && requestedResource !== row.resource) throw new InvalidGrantError('resource mismatch');
     this.deps.store.revokeToken(refreshToken);
     const granted = row.scopes.split(' ');
     const wanted = scopes?.length ? scopes.filter((s) => granted.includes(s)) : granted;
-    return this.mint(client.client_id, row.user_id, wanted, resource?.toString() ?? row.resource);
+    return this.mint(client.client_id, row.user_id, wanted, requestedResource ?? row.resource);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {

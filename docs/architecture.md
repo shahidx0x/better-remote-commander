@@ -6,15 +6,14 @@
    credential persistence in `$BRC_HOME` (default `~/.brc`).
 2. **Relay** (`packages/relay`, npm `brc-relay`) — self-hosted server (Express + MCP SDK). Doors:
    - `/mcp` — MCP Streamable HTTP, bearer-protected (Claude connector, ChatGPT remote MCP)
-   - `/api/*` + `/openapi.json` — REST for ChatGPT GPT Actions (Phase 4)
-   - `/.well-known/*`, `/authorize`, `/token`, `/register`, `/revoke` — OAuth 2.0 (PKCE, dynamic client registration)
+   - `/.well-known/*`, `/authorize`, `/token`, `/register`, `/revoke` — OAuth 2.0/2.1-compatible flow (S256 PKCE, dynamic client registration)
    - `/device/start|poll|verify|approve` — device pairing; `/auth/*`, `/` — browser pages
    - `/ws` — agent socket (device token)
 3. **Shared** (`packages/shared`) — wire protocol + types used by both.
 4. **Store** — `node:sqlite` (`BRC_DB`). Postgres is a possible later addition, not required.
 
 ## Flow
-Client -> relay (`/mcp` or `/api`) -> OAuth bearer -> device router -> agent (WS) -> tool -> result back. Audit row per call.
+Client -> relay (`/mcp`) -> OAuth bearer -> device router -> agent (WS) -> tool -> result back. Audit row per call.
 
 ## Deployment modes (same image, config only)
 | Profile | Relay runs | Public URL | Agent link |
@@ -92,24 +91,17 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
     docker run -d -v brc-agent:/home/rdp/.brc -e BRC_RELAY=https://... -e BRC_NAME=srv brc/agent
 
 ## Phase 4 status (done)
-- shared invocation path `mcp/invoke.ts` (device resolution, pause check, audit) used by both /mcp and /api
-- REST for GPT Actions: GET /api/devices, GET /api/tools, POST /api/tools/{tool} (body = args + optional deviceId); 40 s call cap, text clipped at 90 KB with a note; images omitted
-- GET /openapi.json (public): OpenAPI 3.1 built from cached tool definitions (`device_tools` table filled on every agent hello, so the spec is stable even with devices offline); <= 30 operations; oauth2 authorizationCode security scheme
-- OAuth client management page /auth/clients: create confidential clients (client_secret_post) with redirect URIs, delete = revoke
-- `auth/pkce-compat.ts`: ChatGPT GPT Actions do not send PKCE; for confidential clients only, a deterministic PKCE pair is synthesized so the SDK's mandatory check passes (secret still required at /token). Public clients always need real PKCE
-- ChatGPT remote MCP (Developer mode / connectors): uses the same /mcp + DCR as Claude, nothing extra needed. Deep-research connectors would additionally want `search`/`fetch` tools - not implemented
-- e2e: `node scripts/e2e-gpt-actions.mjs <url> <user> <pass>` 13/13; `e2e-oauth.mjs` 14/14 (tests now shell-agnostic: fresh agents on Windows default to cmd.exe)
-
-### Connect a Custom GPT
-1. Relay must be public (Phase 3). Sign in at PUBLIC_URL -> OAuth clients -> create "ChatGPT" (redirect can be empty for now) -> copy ID + secret
-2. GPT builder -> Actions -> Import from URL: PUBLIC_URL/openapi.json
-3. Authentication: OAuth; Client ID/Secret from step 1; Auth URL PUBLIC_URL/authorize; Token URL PUBLIC_URL/token; Scope mcp:tools; Token exchange: Default (POST)
-4. ChatGPT shows the callback URL (https://chat.openai.com/aip/g-.../oauth/callback) -> edit the client on /auth/clients and add it (delete + recreate in v1)
+- ChatGPT remote MCP and Claude use the same `/mcp` endpoint and OAuth Dynamic Client Registration flow.
+- OAuth metadata is published at both protected-resource discovery paths and advertises S256 PKCE, authorization-code + refresh-token grants, and DCR.
+- Authorization responses include RFC 9207 `iss`; access and refresh-token exchanges preserve and validate the requested MCP `resource`.
+- `/auth/clients` is an inspection/revocation page for automatically registered clients; there is no manual callback URL or redirect override.
+- `mcp/invoke.ts` handles device resolution, pause checks, and audit for MCP tool calls.
+- e2e: `node scripts/e2e-oauth.mjs <url> <user> <pass>` validates discovery, DCR, PKCE, consent, token refresh, and MCP calls.
 
 ## Phase 5 status (done) - v1.0
 - /admin dashboard: devices (rename / pause / resume / delete = revoke token + disconnect), call stats, last 100 audit rows
-- pause enforced on /mcp and /api (HTTP 423); delete closes the live socket with 4401
-- OAuth client edit page (/auth/clients/edit): name + redirect URIs (needed once ChatGPT reveals its callback URL)
+- pause enforced on MCP tool calls; delete closes the live socket with 4401
+- OAuth clients are created through DCR and can be reviewed/revoked from `/auth/clients`
 - login rate limit: 5 failures per IP+username -> 5 min lock (429)
 - agent `--install-service` / `--uninstall-service`: Windows Task Scheduler (ONLOGON, hidden via .cmd + wscript, log ~/.brc/agent.log), Linux systemd --user unit, macOS LaunchAgent. Pair first, then install
 - agent `--allow-dir <path>` (repeatable) persists allowedDirectories; upstream default is the home directory, blocked-commands list unchanged
@@ -121,7 +113,7 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
 - dropping md-to-pdf/puppeteer from the agent (write_pdf downloads Chrome on first use)
 
 ## Phase 6 status (hardening)
-- `pnpm test` = `test:unit` (node:test, 6 tests: password hashing, store tokens/devices/pairing/audit, login limiter, PKCE shim, device hub incl. protocol/id mismatch, timeouts, ambiguity) + `test:e2e` (`scripts/e2e-all.mjs` boots relay + agent on a scratch port/db, auto-pairs, runs oauth 14 / gpt-actions 13 / admin 8 checks, tears down)
+- `pnpm test` = `test:unit` (node:test: password hashing, store tokens/devices/pairing/audit, login limiter, device hub protocol/id mismatch, timeouts, ambiguity) + `test:e2e` (`scripts/e2e-all.mjs` boots relay + agent on a scratch port/db, auto-pairs, then runs OAuth/MCP and admin checks)
 - `.github/workflows/ci.yml`: build + unit + e2e on ubuntu and windows, npm tarball artifacts, Docker image build + smoke
 - security headers (nosniff, frame DENY, no-referrer, no-store, HSTS on https), body limits on public endpoints (64 kb forms, 4 kb pairing JSON)
 - SECURITY.md: model, defaults, threat notes
