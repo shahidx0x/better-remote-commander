@@ -136,6 +136,23 @@ export const MoveFileArgsSchema = z.object({
   destination: z.string(),
 });
 
+export const PrepareFileTransferArgsSchema = z.object({
+  ttlSeconds: z.number().int().min(60).max(7200).optional().default(3600),
+});
+
+export const SendFileTransferArgsSchema = z.object({
+  sourcePath: z.string(),
+  recipientPublicKey: z.string().min(16),
+  expireSeconds: z.number().int().min(60).max(7200).optional().default(3600),
+});
+
+export const ReceiveFileTransferArgsSchema = z.object({
+  receiveId: z.string().min(16),
+  transferToken: z.string().min(32),
+  destinationPath: z.string(),
+  overwrite: z.boolean().optional().default(false),
+});
+
 export const GetFileInfoArgsSchema = z.object({
   path: z.string(),
 });
@@ -256,6 +273,9 @@ export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   create_directory: CreateDirectoryArgsSchema,
   list_directory: ListDirectoryArgsSchema,
   move_file: MoveFileArgsSchema,
+  prepare_file_transfer: PrepareFileTransferArgsSchema,
+  send_file_transfer: SendFileTransferArgsSchema,
+  receive_file_transfer: ReceiveFileTransferArgsSchema,
   start_search: StartSearchArgsSchema,
   get_more_search_results: GetMoreSearchResultsArgsSchema,
   stop_search: StopSearchArgsSchema,

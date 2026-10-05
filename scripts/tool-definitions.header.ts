@@ -10,6 +10,7 @@ import {
   ForceTerminateArgsSchema, ListSessionsArgsSchema, KillProcessArgsSchema,
   ReadFileArgsSchema, ReadMultipleFilesArgsSchema, WriteFileArgsSchema,
   CreateDirectoryArgsSchema, ListDirectoryArgsSchema, MoveFileArgsSchema,
+  PrepareFileTransferArgsSchema, SendFileTransferArgsSchema, ReceiveFileTransferArgsSchema,
   GetFileInfoArgsSchema, GetConfigArgsSchema, SetConfigValueArgsSchema,
   ListProcessesArgsSchema, EditBlockArgsSchema, GetUsageStatsArgsSchema,
   GiveFeedbackArgsSchema, StartSearchArgsSchema, GetMoreSearchResultsArgsSchema,

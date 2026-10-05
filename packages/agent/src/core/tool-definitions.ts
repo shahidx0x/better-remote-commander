@@ -10,6 +10,7 @@ import {
   ForceTerminateArgsSchema, ListSessionsArgsSchema, KillProcessArgsSchema,
   ReadFileArgsSchema, ReadMultipleFilesArgsSchema, WriteFileArgsSchema,
   CreateDirectoryArgsSchema, ListDirectoryArgsSchema, MoveFileArgsSchema,
+  PrepareFileTransferArgsSchema, SendFileTransferArgsSchema, ReceiveFileTransferArgsSchema,
   GetFileInfoArgsSchema, GetConfigArgsSchema, SetConfigValueArgsSchema,
   ListProcessesArgsSchema, EditBlockArgsSchema, GetUsageStatsArgsSchema,
   GiveFeedbackArgsSchema, StartSearchArgsSchema, GetMoreSearchResultsArgsSchema,
@@ -352,6 +353,73 @@ export function buildToolDefinitions(): ToolDefinition[] {
             readOnlyHint: false,
             destructiveHint: true,
             openWorldHint: false,
+        },
+    },
+    {
+        name: "prepare_file_transfer",
+        description: `
+                Prepare this device to receive an end-to-end encrypted file from another BRC device.
+
+                CROSS-DEVICE WORKFLOW:
+                1. Run prepare_file_transfer on the destination device.
+                2. Pass recipientPublicKey to send_file_transfer on the source device.
+                3. Pass the returned transferToken plus this receiveId to receive_file_transfer on this destination.
+
+                The private X25519 receive key stays only in this agent's memory and expires automatically.
+                The LLM/relay never receives the raw AES file-encryption key.
+
+                ${CMD_PREFIX_DESCRIPTION}`,
+        inputSchema: zodToJsonSchema(PrepareFileTransferArgsSchema),
+        annotations: {
+            title: "Prepare Encrypted File Receive",
+            readOnlyHint: false,
+            destructiveHint: false,
+            openWorldHint: false,
+        },
+    },
+    {
+        name: "send_file_transfer",
+        description: `
+                Encrypt a local file and upload only ciphertext to temporary storage for another BRC device.
+
+                SECURITY:
+                - Maximum plaintext size: 99 MB.
+                - Uses AES-256-GCM for the file.
+                - The AES key is wrapped for the destination's ephemeral X25519 public key.
+                - tmpfiles.org receives only a randomly named encrypted blob.
+                - The source file is never modified.
+                - The returned transferToken contains the download URL and wrapped key material, never the raw AES key.
+
+                Run prepare_file_transfer on the destination first and pass its recipientPublicKey here.
+
+                ${PATH_GUIDANCE}
+                ${CMD_PREFIX_DESCRIPTION}`,
+        inputSchema: zodToJsonSchema(SendFileTransferArgsSchema),
+        annotations: {
+            title: "Send Encrypted File Transfer",
+            readOnlyHint: false,
+            destructiveHint: false,
+            openWorldHint: true,
+        },
+    },
+    {
+        name: "receive_file_transfer",
+        description: `
+                Download, authenticate, decrypt, and save a BRC encrypted file transfer on this device.
+
+                Requires receiveId from prepare_file_transfer on this same device and transferToken from
+                send_file_transfer on the source device. Data is downloaded only from tmpfiles.org.
+                AES-GCM authentication, expected size, and SHA-256 are verified before the destination
+                file is committed. Existing files are not replaced unless overwrite=true.
+
+                ${PATH_GUIDANCE}
+                ${CMD_PREFIX_DESCRIPTION}`,
+        inputSchema: zodToJsonSchema(ReceiveFileTransferArgsSchema),
+        annotations: {
+            title: "Receive Encrypted File Transfer",
+            readOnlyHint: false,
+            destructiveHint: true,
+            openWorldHint: true,
         },
     },
     {
