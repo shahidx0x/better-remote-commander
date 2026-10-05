@@ -11,6 +11,7 @@ import android.os.Environment
 import android.os.PowerManager
 import android.provider.Settings
 import io.github.shahidx0x.brc.android.accessibility.BrcAccessibilityService
+import io.github.shahidx0x.brc.android.files.FileTransferManager
 import io.github.shahidx0x.brc.android.protocol.BrcProtocol
 import io.github.shahidx0x.brc.android.storage.AgentPreferences
 import java.io.File
@@ -44,6 +45,7 @@ class CapabilityManager(private val context: Context) {
             "writeSettings" to Settings.System.canWrite(context),
             "batteryUnrestricted" to batteryUnrestricted(),
             "allFilesAccess" to allFilesAccess(),
+            "encryptedFileTransfer" to FileTransferManager.cryptoAvailable(),
             "camera" to has(Manifest.permission.CAMERA),
             "microphone" to has(Manifest.permission.RECORD_AUDIO),
             "location" to has(Manifest.permission.ACCESS_FINE_LOCATION),
