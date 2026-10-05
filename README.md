@@ -50,6 +50,14 @@ Then make it start at login: `brc-agent --install-service`.
 
 Docker agent (Linux servers): `docker run -d -v brc-agent:/home/rdp/.brc -e BRC_RELAY=https://rdp.example.com -e BRC_NAME=srv1 ghcr.io/shahidx0x/better-remote-commander/agent`
 
+### Android agent
+
+The native Android agent lives in `apps/android-agent` and supports pairing with the same BRC relay, a persistent foreground connection, Android UI automation, screenshots, apps/settings, files, notifications, clipboard/media, contacts, phone/SMS, location, automation jobs, and optional Device Owner/Shizuku/root integrations.
+
+GitHub Actions workflow `.github/workflows/android.yml` builds and tests the Android release on changes to the Android app, on pull requests, and by manual dispatch. Successful runs upload `app-release-unsigned.apk` as an artifact named `brc-android-release-<commit SHA>` for 30 days.
+
+The CI release APK is intentionally **unsigned**. Production deployments must sign it with the deployment owner's Android signing key; signing keys and passwords must never be committed to the repository.
+
 ### 3. Connect your AI
 
 - **Claude**: Settings → Connectors → Add custom connector → URL `https://rdp.example.com/mcp` → Add → Connect → sign in → Allow.
@@ -63,7 +71,17 @@ pnpm install && pnpm build && pnpm test
 node packages/relay/dist/cli.js      # relay
 node packages/agent/dist/cli.js      # agent
 ```
-Requires Node 22.13+ (uses `node:sqlite`) and pnpm 11. Design notes: `docs/architecture.md`. Security notes: `SECURITY.md`.
+
+Android release build:
+
+```bash
+cd apps/android-agent
+./gradlew clean testDebugUnitTest assembleRelease
+```
+
+The Android release APK is written to `apps/android-agent/app/build/outputs/apk/release/app-release-unsigned.apk`. Requires JDK 21 and Android SDK/API 36.
+
+The desktop packages require Node 22.13+ (uses `node:sqlite`) and pnpm 11. Design notes: `docs/architecture.md`. Security notes: `SECURITY.md`.
 
 ## License
 

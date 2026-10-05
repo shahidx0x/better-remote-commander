@@ -58,10 +58,25 @@ Debug APK:
 Release APK:
 
 `app/build/outputs/apk/release/app-release-unsigned.apk`
-The release artifact is intentionally unsigned in source control. Sign it with
-the deployment owner's Android signing key using Android Studio or the Android
-SDK signing tools before distribution. Never commit a production signing key
-or password to this repository.
+
+### GitHub Actions release build
+
+The repository includes `.github/workflows/android.yml`. It runs for Android
+changes pushed to `main` or `feat/android-agent`, for pull requests that
+change the Android app/workflow, and from manual `workflow_dispatch`.
+
+The job installs JDK 21 and Android SDK/API 36, runs
+`testDebugUnitTest assembleRelease`, verifies the release APK, prints its
+SHA-256 checksum, and uploads it as:
+
+`brc-android-release-<commit SHA>`
+
+The workflow artifact is retained for 30 days.
+
+The release artifact is intentionally unsigned in source control and CI. Sign
+it with the deployment owner's Android signing key using Android Studio or the
+Android SDK signing tools before distribution. Never commit a production
+signing key or password to this repository.
 
 ## Recommended owner setup
 
