@@ -4,8 +4,11 @@ import android.content.Context
 import io.github.shahidx0x.brc.android.accessibility.AccessibilityToolProvider
 import io.github.shahidx0x.brc.android.accessibility.ScreenshotToolProvider
 import io.github.shahidx0x.brc.android.apps.AppToolProvider
+import io.github.shahidx0x.brc.android.clipboard.ClipboardToolProvider
 import io.github.shahidx0x.brc.android.files.FileToolProvider
 import io.github.shahidx0x.brc.android.files.FileTransferToolProvider
+import io.github.shahidx0x.brc.android.media.MediaToolProvider
+import io.github.shahidx0x.brc.android.notifications.NotificationToolProvider
 import io.github.shahidx0x.brc.android.settings.SettingsToolProvider
 
 object AndroidToolCatalog {
@@ -20,4 +23,7 @@ object AndroidToolCatalog {
             .also { ScreenshotToolProvider.register(it) }
             .also { AppToolProvider.register(context.applicationContext, it) }
             .also { SettingsToolProvider.register(context.applicationContext, it) }
+            .also { NotificationToolProvider.register(it) }
+            .also { ClipboardToolProvider.register(context.applicationContext, it) }
+            .also { MediaToolProvider.register(context.applicationContext, it) }
 }
