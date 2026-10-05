@@ -13,8 +13,9 @@ import android.provider.Settings
 import io.github.shahidx0x.brc.android.accessibility.BrcAccessibilityService
 import io.github.shahidx0x.brc.android.files.FileTransferManager
 import io.github.shahidx0x.brc.android.protocol.BrcProtocol
+import io.github.shahidx0x.brc.android.privilege.ShellExecutor
+import io.github.shahidx0x.brc.android.privilege.ShizukuBridge
 import io.github.shahidx0x.brc.android.storage.AgentPreferences
-import java.io.File
 
 data class CapabilitySnapshot(
     val platform: String,
@@ -60,8 +61,9 @@ class CapabilityManager(private val context: Context) {
             "defaultSmsRole" to defaultSmsRole(),
             "bluetooth" to bluetoothPermission(),
             "deviceOwner" to deviceOwner(),
-            "shizuku" to shizukuAvailable(),
-            "root" to rootAvailable(),
+            "shizuku" to ShizukuBridge.binderAvailable(),
+            "shizukuPermission" to ShizukuBridge.permissionGranted(),
+            "root" to ShellExecutor.rootInstalled(),
         ),
     )
 
@@ -114,14 +116,4 @@ class CapabilityManager(private val context: Context) {
         (context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager)
             .isDeviceOwnerApp(context.packageName)
 
-    private fun shizukuAvailable(): Boolean =
-        runCatching { Class.forName("rikka.shizuku.Shizuku") }.isSuccess
-
-    private fun rootAvailable(): Boolean =
-        listOf(
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/sbin/su",
-            "/data/adb/magisk",
-        ).any { File(it).exists() }
 }

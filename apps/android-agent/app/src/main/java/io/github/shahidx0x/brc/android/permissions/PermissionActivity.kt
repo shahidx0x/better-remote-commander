@@ -2,6 +2,8 @@ package io.github.shahidx0x.brc.android.permissions
 
 import android.Manifest
 import android.app.Activity
+import android.app.admin.DevicePolicyManager
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.widget.Button
@@ -9,6 +11,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import io.github.shahidx0x.brc.android.core.CapabilityManager
+import io.github.shahidx0x.brc.android.privilege.DeviceOwnerManager
+import io.github.shahidx0x.brc.android.privilege.ShizukuBridge
 
 class PermissionActivity : Activity() {
     private lateinit var summary: TextView
@@ -60,6 +64,23 @@ class PermissionActivity : Activity() {
         }
         addButton(container, "Battery optimization") {
             PermissionNavigator.open(this, "battery")
+        }
+        addButton(container, "Request Shizuku permission") {
+            runCatching {
+                ShizukuBridge.requestPermission(7001)
+            }.onFailure {
+                summary.text = "Shizuku: " + (it.message ?: "unavailable")
+            }
+        }
+        addButton(container, "Activate device admin") {
+            val manager = DeviceOwnerManager(this)
+            startActivity(
+                Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                    .putExtra(
+                        DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+                        manager.admin,
+                    ),
+            )
         }
         addButton(container, "App permission details") {
             PermissionNavigator.open(this, "app")

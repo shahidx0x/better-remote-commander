@@ -11,6 +11,7 @@ import io.github.shahidx0x.brc.android.files.FileTransferToolProvider
 import io.github.shahidx0x.brc.android.location.LocationToolProvider
 import io.github.shahidx0x.brc.android.media.MediaToolProvider
 import io.github.shahidx0x.brc.android.notifications.NotificationToolProvider
+import io.github.shahidx0x.brc.android.privilege.PrivilegeToolProvider
 import io.github.shahidx0x.brc.android.settings.SettingsToolProvider
 import io.github.shahidx0x.brc.android.telephony.TelephonyToolProvider
 
@@ -32,4 +33,5 @@ object AndroidToolCatalog {
             .also { ContactToolProvider.register(context.applicationContext, it) }
             .also { TelephonyToolProvider.register(context.applicationContext, it) }
             .also { LocationToolProvider.register(context.applicationContext, it) }
+            .also { PrivilegeToolProvider.register(context.applicationContext, it) }
 }
