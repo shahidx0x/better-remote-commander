@@ -4,6 +4,7 @@ import android.content.Context
 import io.github.shahidx0x.brc.android.accessibility.AccessibilityToolProvider
 import io.github.shahidx0x.brc.android.accessibility.ScreenshotToolProvider
 import io.github.shahidx0x.brc.android.apps.AppToolProvider
+import io.github.shahidx0x.brc.android.automation.AutomationToolProvider
 import io.github.shahidx0x.brc.android.clipboard.ClipboardToolProvider
 import io.github.shahidx0x.brc.android.contacts.ContactToolProvider
 import io.github.shahidx0x.brc.android.files.FileToolProvider
@@ -34,4 +35,5 @@ object AndroidToolCatalog {
             .also { TelephonyToolProvider.register(context.applicationContext, it) }
             .also { LocationToolProvider.register(context.applicationContext, it) }
             .also { PrivilegeToolProvider.register(context.applicationContext, it) }
+            .also { AutomationToolProvider.register(it) }
 }
