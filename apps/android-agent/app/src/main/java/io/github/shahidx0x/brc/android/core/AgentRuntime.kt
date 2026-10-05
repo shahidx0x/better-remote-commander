@@ -8,6 +8,7 @@ import io.github.shahidx0x.brc.android.protocol.ResultMessage
 import io.github.shahidx0x.brc.android.storage.AgentPreferences
 import io.github.shahidx0x.brc.android.storage.DeviceCredentials
 import io.github.shahidx0x.brc.android.storage.SecureCredentialStore
+import io.github.shahidx0x.brc.android.tools.CapabilityTool
 import io.github.shahidx0x.brc.android.tools.PingTool
 import io.github.shahidx0x.brc.android.tools.ToolDispatcher
 import io.github.shahidx0x.brc.android.tools.ToolRegistry
@@ -17,10 +18,11 @@ class AgentRuntime(context: Context) {
     val preferences = AgentPreferences(appContext)
     val credentials = SecureCredentialStore(appContext)
     val identity = DeviceIdentityStore(appContext)
-    val capabilities = CapabilityManager()
+    val capabilities = CapabilityManager(appContext)
 
     val registry: ToolRegistry = ToolRegistry()
         .register(PingTool())
+        .register(CapabilityTool(appContext))
 
     private val dispatcher = ToolDispatcher(registry)
 

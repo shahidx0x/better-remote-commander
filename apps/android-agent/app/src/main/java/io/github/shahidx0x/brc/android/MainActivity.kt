@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import io.github.shahidx0x.brc.android.core.AgentRuntime
+import io.github.shahidx0x.brc.android.permissions.PermissionActivity
 import io.github.shahidx0x.brc.android.protocol.CallMessage
 import io.github.shahidx0x.brc.android.service.BrcAgentService
 import io.github.shahidx0x.brc.android.transport.PairingChallenge
@@ -102,6 +103,15 @@ class MainActivity : Activity() {
             setOnClickListener {
                 BrcAgentService.stop(this@MainActivity)
                 status.postDelayed(::refreshStatus, 300)
+            }
+        })
+
+        container.addView(Button(this).apply {
+            text = "Permissions & Capabilities"
+            setOnClickListener {
+                startActivity(
+                    Intent(this@MainActivity, PermissionActivity::class.java),
+                )
             }
         })
 
