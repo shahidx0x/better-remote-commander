@@ -182,17 +182,33 @@ class MainActivity : Activity() {
         val selfCheck = runtime.dispatch(
             CallMessage(id = "ui-self-check", tool = "android_ping"),
         )
+        val capabilities = runtime.capabilities.snapshot().capabilities
         status.text = buildString {
-            appendLine("Stage 2 — Pairing + Relay")
+            appendLine("Version: ${versionName()}")
             appendLine("Connection: ${runtime.preferences.connectionStatus}")
             appendLine("Paired: ${credentials != null}")
             appendLine("Enabled: ${runtime.preferences.agentEnabled}")
             appendLine("Device ID: ${runtime.identity.getOrCreateDeviceId()}")
             appendLine("Android API: ${Build.VERSION.SDK_INT}")
-            appendLine("Tools: ${runtime.registry.definitions().joinToString { it.name }}")
+            appendLine("Tools available: ${runtime.registry.definitions().size}")
+            appendLine("Accessibility: ${capabilities["accessibility"] == true}")
+            appendLine("Device Owner: ${capabilities["deviceOwner"] == true}")
+            appendLine("Shizuku: ${capabilities["shizuku"] == true}")
+            appendLine("Root: ${capabilities["root"] == true}")
             append("Self-check: ${if (selfCheck.error == null) "PASS" else "FAIL"}")
         }
     }
+
+    @Suppress("DEPRECATION")
+    private fun versionName(): String =
+        if (Build.VERSION.SDK_INT >= 33) {
+            packageManager.getPackageInfo(
+                packageName,
+                PackageManager.PackageInfoFlags.of(0),
+            ).versionName ?: "unknown"
+        } else {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
+        }
 
     private fun requestNotificationPermission() {
         if (

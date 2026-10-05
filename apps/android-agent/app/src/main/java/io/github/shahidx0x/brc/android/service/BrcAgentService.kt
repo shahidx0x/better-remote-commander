@@ -12,6 +12,7 @@ import android.net.Network
 import android.os.IBinder
 import android.os.PowerManager
 import io.github.shahidx0x.brc.android.MainActivity
+import io.github.shahidx0x.brc.android.audit.AuditLog
 import io.github.shahidx0x.brc.android.core.AgentRuntime
 import io.github.shahidx0x.brc.android.protocol.CallMessage
 import io.github.shahidx0x.brc.android.protocol.ResultMessage
@@ -19,12 +20,15 @@ import io.github.shahidx0x.brc.android.transport.RelayWebSocketClient
 
 class BrcAgentService : Service(), RelayWebSocketClient.Listener {
     private lateinit var runtime: AgentRuntime
+    private lateinit var audit: AuditLog
     private var relay: RelayWebSocketClient? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onCreate() {
         super.onCreate()
         runtime = AgentRuntime(this)
+        audit = AuditLog(this)
+        audit.append("service_created")
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, notification("Starting"))
         registerNetworkCallback()
@@ -46,6 +50,7 @@ class BrcAgentService : Service(), RelayWebSocketClient.Listener {
     }
 
     override fun onDestroy() {
+        if (::audit.isInitialized) audit.append("service_destroyed")
         relay?.stop()
         relay = null
         networkCallback?.let {
@@ -67,6 +72,7 @@ class BrcAgentService : Service(), RelayWebSocketClient.Listener {
     }
 
     override fun onUnauthorized() {
+        audit.append("relay_unauthorized")
         runtime.credentials.clear()
         runtime.preferences.agentEnabled = false
     }
@@ -89,6 +95,15 @@ class BrcAgentService : Service(), RelayWebSocketClient.Listener {
     }
 
     private fun executeToolCall(call: CallMessage): ResultMessage {
+        audit.append(
+            "remote_call",
+            mapOf(
+                "requestId" to call.id,
+                "tool" to call.tool,
+                "clientName" to call.client?.name,
+                "clientVersion" to call.client?.version,
+            ),
+        )
         val power = getSystemService(POWER_SERVICE) as PowerManager
         val wakeLock = power.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
@@ -97,7 +112,17 @@ class BrcAgentService : Service(), RelayWebSocketClient.Listener {
         val requested = call.timeoutMs ?: 120_000L
         wakeLock.acquire(requested.coerceIn(5_000L, 180_000L))
         return try {
-            runtime.dispatch(call)
+            runtime.dispatch(call).also { result ->
+                audit.append(
+                    "remote_result",
+                    mapOf(
+                        "requestId" to call.id,
+                        "tool" to call.tool,
+                        "success" to (result.error == null),
+                        "errorCode" to result.error?.code,
+                    ),
+                )
+            }
         } finally {
             if (wakeLock.isHeld) wakeLock.release()
         }

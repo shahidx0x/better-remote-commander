@@ -4,15 +4,19 @@ import android.content.Context
 import io.github.shahidx0x.brc.android.accessibility.AccessibilityToolProvider
 import io.github.shahidx0x.brc.android.accessibility.ScreenshotToolProvider
 import io.github.shahidx0x.brc.android.apps.AppToolProvider
+import io.github.shahidx0x.brc.android.audit.AuditToolProvider
 import io.github.shahidx0x.brc.android.automation.AutomationToolProvider
+import io.github.shahidx0x.brc.android.capture.CaptureToolProvider
 import io.github.shahidx0x.brc.android.clipboard.ClipboardToolProvider
 import io.github.shahidx0x.brc.android.contacts.ContactToolProvider
 import io.github.shahidx0x.brc.android.files.FileToolProvider
 import io.github.shahidx0x.brc.android.files.FileTransferToolProvider
+import io.github.shahidx0x.brc.android.install.PackageInstallToolProvider
 import io.github.shahidx0x.brc.android.location.LocationToolProvider
 import io.github.shahidx0x.brc.android.media.MediaToolProvider
 import io.github.shahidx0x.brc.android.notifications.NotificationToolProvider
 import io.github.shahidx0x.brc.android.privilege.PrivilegeToolProvider
+import io.github.shahidx0x.brc.android.projection.ProjectionToolProvider
 import io.github.shahidx0x.brc.android.settings.SettingsToolProvider
 import io.github.shahidx0x.brc.android.telephony.TelephonyToolProvider
 
@@ -35,5 +39,9 @@ object AndroidToolCatalog {
             .also { TelephonyToolProvider.register(context.applicationContext, it) }
             .also { LocationToolProvider.register(context.applicationContext, it) }
             .also { PrivilegeToolProvider.register(context.applicationContext, it) }
+            .also { CaptureToolProvider.register(context.applicationContext, it) }
+            .also { ProjectionToolProvider.register(context.applicationContext, it) }
+            .also { PackageInstallToolProvider.register(context.applicationContext, it) }
+            .also { AuditToolProvider.register(context.applicationContext, it) }
             .also { AutomationToolProvider.register(it) }
 }

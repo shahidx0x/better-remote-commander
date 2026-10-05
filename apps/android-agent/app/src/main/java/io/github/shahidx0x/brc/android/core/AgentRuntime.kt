@@ -25,7 +25,7 @@ class AgentRuntime(context: Context) {
 
     fun hello(credentials: DeviceCredentials): HelloMessage = HelloMessage(
         protocol = BrcProtocol.VERSION,
-        device = DeviceInfoProvider(identity).snapshot().copy(
+        device = DeviceInfoProvider(appContext, identity).snapshot().copy(
             deviceId = credentials.deviceId,
             name = credentials.name,
         ),
