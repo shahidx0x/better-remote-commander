@@ -1,6 +1,7 @@
 package io.github.shahidx0x.brc.android.tools
 
 import android.content.Context
+import io.github.shahidx0x.brc.android.accessibility.AccessibilityToolProvider
 import io.github.shahidx0x.brc.android.files.FileToolProvider
 import io.github.shahidx0x.brc.android.files.FileTransferToolProvider
 
@@ -12,4 +13,5 @@ object AndroidToolCatalog {
             .also { DeviceToolProvider.register(context.applicationContext, it) }
             .also { FileToolProvider.register(context.applicationContext, it) }
             .also { FileTransferToolProvider.register(context.applicationContext, it) }
+            .also { AccessibilityToolProvider.register(it) }
 }
