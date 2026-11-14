@@ -25,7 +25,7 @@ const STANDARD_PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC'
  *                      present (preserves any extra extensions, order-stable).
  * - Otherwise       -> leave the inherited value untouched.
  */
-function getRepairedPathExt(): string {
+export function getRepairedPathExt(): string {
   const current = process.env.PATHEXT;
   if (!current) return STANDARD_PATHEXT;
   const exts = current.split(';').map(e => e.trim().toUpperCase()).filter(Boolean);
@@ -73,7 +73,7 @@ export interface PaginatedOutputResult {
 /**
  * Configuration for spawning a shell with appropriate flags
  */
-interface ShellSpawnConfig {
+export interface ShellSpawnConfig {
   executable: string;
   args: string[];
   useShellOption: string | boolean;
@@ -86,7 +86,7 @@ interface ShellSpawnConfig {
  * Get the appropriate spawn configuration for a given shell
  * This handles login shell flags for different shell types
  */
-function getShellSpawnArgs(shellPath: string, command: string): ShellSpawnConfig {
+export function getShellSpawnArgs(shellPath: string, command: string): ShellSpawnConfig {
   const shellName = path.basename(shellPath).toLowerCase();
   
   // Unix shells with login flag support

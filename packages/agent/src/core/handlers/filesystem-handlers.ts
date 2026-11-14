@@ -241,7 +241,7 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
  */
 export async function handleReadMultipleFiles(args: unknown): Promise<ServerResult> {
     const parsed = ReadMultipleFilesArgsSchema.parse(args);
-    const fileResults = await readMultipleFiles(parsed.paths);
+    const fileResults = await readMultipleFiles([...parsed.paths, ...parsed.files]);
 
     // Create a text summary of all files
     const textSummary = fileResults.map(result => {

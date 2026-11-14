@@ -13,4 +13,5 @@ export { getFileHandler, isExcelFile, isImageFile } from './factory.js';
 export { TextFileHandler } from './text.js';
 export { ImageFileHandler } from './image.js';
 export { BinaryFileHandler } from './binary.js';
-export { ExcelFileHandler } from './excel.js';
+// ExcelFileHandler / PdfFileHandler / DocxFileHandler are intentionally NOT
+// re-exported: they are loaded lazily by factory.ts (heavy dependencies).

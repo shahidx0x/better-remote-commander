@@ -23,6 +23,15 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
   `/auth/clients` manages OAuth clients and `/auth/apikeys` manages API keys.
 - **Audit log** of every tool call, and per-device pause switch.
 - **Encrypted file transfer** between devices (see below).
+- **One-shot commands** (`run_command`): run a command and get exit code, stdout and stderr in a single call,
+  with timeout and process-tree kill.
+- **Multi-edit**: `edit_block` applies several find/replace edits to a file in one call, all-or-nothing.
+- **Blocking search**: `start_search` with `wait: true` returns all results in one call (grep-style).
+- **Ranged multi-file reads**: `read_multiple_files` accepts per-file line ranges.
+- **Safe delete** (`delete_file`) and **git helpers** (`git_status`, `git_diff`, `git_log`).
+- **Fast agent**: heavy document libraries (Excel, PDF, DOCX) load on demand, system info is cached,
+  telemetry work is skipped when disabled and usage stats are saved in batches. Startup is ~3x faster with
+  ~70% less memory, and per-call overhead dropped from ~160 ms to a few ms.
 - **OS service install** (`--install-service`) so the agent starts at login.
 - **Security**: login rate limiting, signed session cookies, security headers, blocked-command list and
   `allowedDirectories` on the agent. See `SECURITY.md`.
@@ -33,20 +42,40 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 
 ## Tools available to the AI
 
-The relay adds `list_devices`. The agent provides 28 tools, derived from Desktop Commander plus BRC additions.
+The relay adds `list_devices`. The agent provides 32 tools, derived from Desktop Commander plus BRC additions.
 
 | Category | Tools |
 | --- | --- |
 | Devices | `list_devices` |
 | Config | `get_config`, `set_config_value` |
-| Files | `read_file`, `read_multiple_files`, `write_file`, `create_directory`, `list_directory`, `move_file`, `get_file_info` |
-| Editing | `edit_block` (surgical text replace), `write_pdf` |
-| Search | `start_search`, `get_more_search_results`, `stop_search`, `list_searches` |
+| Files | `read_file`, `read_multiple_files`, `write_file`, `create_directory`, `list_directory`, `move_file`, `delete_file`, `get_file_info` |
+| Editing | `edit_block` (single or multi-edit), `write_pdf` |
+| Search | `start_search` (streaming or `wait=true` blocking), `get_more_search_results`, `stop_search`, `list_searches` |
+| Commands | `run_command` (one-shot: exit code + stdout/stderr) |
 | Processes | `start_process`, `read_process_output`, `interact_with_process`, `force_terminate`, `list_sessions`, `list_processes`, `kill_process` |
+| Git | `git_status`, `git_diff`, `git_log` |
 | File transfer | `prepare_file_transfer`, `send_file_transfer`, `receive_file_transfer` |
-| Diagnostics | `get_usage_stats`, `get_recent_tool_calls`, `get_prompts`, `give_feedback_to_desktop_commander` |
+| Diagnostics | `get_usage_stats`, `get_recent_tool_calls` |
 
 Note: `write_pdf` downloads Chrome on first use.
+
+### Fewer round trips
+
+These cut the number of calls the AI needs for common work (each call crosses the relay):
+
+- **`run_command`**: run a non-interactive command and get exit code, stdout and stderr in one call.
+  stdin is closed so prompts fail fast; on timeout (default 60s, max 110s) the process tree is killed;
+  output is capped, keeping the beginning and end. Use `start_process` only for REPLs and servers.
+- **`edit_block` multi-edit**: pass `edits: [{old_string, new_string, expected_replacements?}, ...]`.
+  Edits apply in order; for text files it is all-or-nothing (nothing is written if any edit fails).
+- **`start_search` with `wait: true`**: blocks until done and returns grep-style results
+  (stops at `maxResults`, default 200, or `timeout_ms`, default 30s).
+- **`read_multiple_files` ranges**: `files: [{path, offset, length}]` alongside `paths`.
+- **`delete_file`**: deletes a file or directory (`recursive: true` for non-empty). Refuses filesystem
+  roots, the home directory and allowed roots.
+- **`git_status` / `git_diff` / `git_log`**: compact git output with size caps.
+
+All path arguments respect `allowedDirectories`, and commands respect `blockedCommands`.
 
 ### Encrypted file transfer
 

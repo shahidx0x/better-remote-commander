@@ -18,9 +18,6 @@ import {
   GetRecentToolCallsArgsSchema, WritePdfArgsSchema,
 } from './tools/schemas.js';
 
-const SYSTEM_INFO = getSystemInfo();
-const OS_GUIDANCE = getOSSpecificGuidance(SYSTEM_INFO);
-const PATH_GUIDANCE = `IMPORTANT: ${getPathGuidance(SYSTEM_INFO)} Relative paths may fail as they depend on the current working directory. Tilde paths (~/...) might not work in all contexts. Unless the user explicitly asks for relative paths, use absolute paths.`;
 const CMD_PREFIX_DESCRIPTION = `This command can be referenced as "BRC: ..." or "use Better Remote Commander (BRC) to ..." in your instructions.`;
 
 export interface ToolDefinition {
@@ -34,6 +31,10 @@ export interface ToolDefinition {
 export const EXCLUDED_TOOLS = new Set(['give_feedback_to_desktop_commander', 'get_prompts', 'track_ui_event']);
 
 export function buildToolDefinitions(): ToolDefinition[] {
+  // Computed lazily (not at module load): getSystemInfo() spawns processes.
+  const SYSTEM_INFO = getSystemInfo();
+  const OS_GUIDANCE = getOSSpecificGuidance(SYSTEM_INFO);
+  const PATH_GUIDANCE = `IMPORTANT: ${getPathGuidance(SYSTEM_INFO)} Relative paths may fail as they depend on the current working directory. Tilde paths (~/...) might not work in all contexts. Unless the user explicitly asks for relative paths, use absolute paths.`;
   const allTools: ToolDefinition[] = [
     // Configuration tools
     {
@@ -155,6 +156,11 @@ export function buildToolDefinitions(): ToolDefinition[] {
         name: "read_multiple_files",
         description: `
                 Read the contents of multiple files simultaneously.
+
+                Two ways to list files (can be combined):
+                - paths: ["/a.ts", "/b.ts"] → read each file from the start (default line limit)
+                - files: [{path: "/a.ts", offset: 120, length: 40}, {path: "/b.log", offset: -50}]
+                  → per-file line ranges, same offset/length semantics as read_file
                 
                 Each file's content is returned with its path as a reference.
                 Handles text files normally and renders images as viewable content.
@@ -426,6 +432,11 @@ export function buildToolDefinitions(): ToolDefinition[] {
         name: "start_search",
         description: `
                 Start a streaming search that can return results progressively.
+
+                BLOCKING MODE (recommended for most searches): set wait=true to get ALL results in this
+                single call, grep-style ("file" header, then "line: text", context lines as "line- text").
+                The search stops at maxResults matches (default 200) or timeout_ms (default 30000, max 110000).
+                No get_more_search_results/stop_search calls are needed in this mode.
                 
                 SEARCH STRATEGY GUIDE:
                 Choose the right search type based on what the user is looking for:
@@ -645,8 +656,11 @@ export function buildToolDefinitions(): ToolDefinition[] {
                 amount of context necessary (typically 1-3 lines) before and after the change point,
                 with exact whitespace and indentation.
 
-                When editing multiple sections, make separate edit_block calls for each distinct change
-                rather than one large replacement.
+                MULTI-EDIT (preferred for several changes in one file):
+                Pass edits: [{old_string, new_string, expected_replacements?}, ...] instead of
+                old_string/new_string. Edits apply in order (each sees the result of the previous one)
+                in ONE call. For text files it is all-or-nothing: if any edit fails to match, nothing
+                is written and the failing edit is reported.
 
                 When a close but non-exact match is found, a character-level diff is shown in the format:
                 common_prefix{-removed-}{+added+}common_suffix to help you identify what's different.

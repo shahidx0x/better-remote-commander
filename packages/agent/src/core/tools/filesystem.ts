@@ -10,7 +10,9 @@ import { configManager } from '../config-manager.js';
 import { getFileHandler, TextFileHandler } from '../utils/files/index.js';
 import type { ReadOptions, FileResult, PdfPageItem } from '../utils/files/base.js';
 import { isPdfFile } from "./mime-types.js";
-import { parsePdfToMarkdown, editPdf, PdfOperations, PdfMetadata, parseMarkdownToPdf } from './pdf/index.js';
+import type { PdfOperations, PdfMetadata } from './pdf/index.js';
+// BRC: the PDF stack (md-to-pdf/puppeteer, pdf-lib, unpdf) is heavy; load it on demand.
+const loadPdf = () => import('./pdf/index.js');
 import { isBinaryFile } from 'isbinaryfile';
 
 // CONSTANTS SECTION - Consolidate all timeouts and thresholds
@@ -383,6 +385,7 @@ export async function readFileFromUrl(url: string): Promise<FileResult> {
         // NEW: Add PDF handling before image check
         if (isPdf) {
             // Use URL directly - pdfreader handles URL downloads internally
+            const { parsePdfToMarkdown } = await loadPdf();
             const pdfResult = await parsePdfToMarkdown(url);
 
             return {
@@ -670,12 +673,31 @@ export interface MultiFileResult {
     payload?: FileResultPayloads;
 }
 
-export async function readMultipleFiles(paths: string[]): Promise<MultiFileResult[]> {
-    return Promise.all(
-        paths.map(async (filePath: string) => {
+export type MultiFileEntry = string | { path: string; offset?: number; length?: number };
+
+/** Run async tasks with bounded concurrency, preserving input order. */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+    const out: R[] = new Array(items.length);
+    let next = 0;
+    const worker = async () => {
+        while (next < items.length) {
+            const i = next++;
+            out[i] = await fn(items[i]);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+    return out;
+}
+
+export async function readMultipleFiles(entries: MultiFileEntry[]): Promise<MultiFileResult[]> {
+    return mapWithConcurrency(entries, 8, async (entry: MultiFileEntry) => {
+            const filePath = typeof entry === 'string' ? entry : entry.path;
+            const range = typeof entry === 'string' ? undefined : entry;
             try {
                 const validPath = await validatePath(filePath);
-                const fileResult = await readFile(validPath);
+                const fileResult = await readFile(validPath, range && (range.offset !== undefined || range.length !== undefined)
+                    ? { offset: range.offset ?? 0, length: range.length ?? await getDefaultReadLength() }
+                    : undefined);
                 // Handle content conversion properly for images vs text
                 let content: string;
                 if (typeof fileResult.content === 'string') {
@@ -708,8 +730,7 @@ export async function readMultipleFiles(paths: string[]): Promise<MultiFileResul
                     error: errorMessage
                 };
             }
-        }),
-    );
+    });
 }
 
 export async function createDirectory(dirPath: string): Promise<void> {
@@ -1020,6 +1041,7 @@ export async function writePdf(
             mode: 'create'
         });
 
+        const { parseMarkdownToPdf } = await loadPdf();
         const pdfBuffer = await parseMarkdownToPdf(content, options);
         // Use outputPath if provided, otherwise overwrite input file
         const targetPath = outputPath ? await validatePath(outputPath) : validPath;
@@ -1050,6 +1072,7 @@ export async function writePdf(
         });
 
         // Perform the PDF editing
+        const { editPdf } = await loadPdf();
         const modifiedPdfBuffer = await editPdf(validPath, operations);
 
         // Write the modified PDF to the output path

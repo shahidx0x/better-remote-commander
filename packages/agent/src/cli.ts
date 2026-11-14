@@ -109,6 +109,16 @@ const start = (c: DeviceCredentials) => {
 };
 start(creds);
 
-const shutdown = (sig: string) => { console.log(`\n${sig} received, stopping agent`); client.stop(); setTimeout(() => process.exit(0), 200); };
+const shutdown = (sig: string) => {
+  console.log(`\n${sig} received, stopping agent`);
+  client.stop();
+  // Persist debounced background config writes (usage stats), bounded wait.
+  const exit = () => process.exit(0);
+  const timer = setTimeout(exit, 1500);
+  import('./core/config-manager.js')
+    .then(({ configManager }) => configManager.flush())
+    .catch(() => {})
+    .finally(() => { clearTimeout(timer); setTimeout(exit, 50); });
+};
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));

@@ -497,7 +497,18 @@ function detectPythonInfo(): SystemInfo['pythonInfo'] {
 /**
  * Get comprehensive system information for tool prompts
  */
+let cachedSystemInfo: SystemInfo | null = null;
+
+/**
+ * Cached wrapper: system info (incl. spawning python --version probes) is expensive
+ * (~150ms+ sync) and does not change during the agent's lifetime.
+ */
 export function getSystemInfo(): SystemInfo {
+    if (!cachedSystemInfo) cachedSystemInfo = computeSystemInfo();
+    return cachedSystemInfo;
+}
+
+function computeSystemInfo(): SystemInfo {
     const platform = os.platform();
     const isWindows = platform === 'win32';
     const isMacOS = platform === 'darwin';

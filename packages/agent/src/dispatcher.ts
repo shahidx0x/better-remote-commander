@@ -7,56 +7,60 @@ import { getConfig, setConfigValue } from './core/tools/config.js';
 import { getUsageStats } from './core/tools/usage.js';
 import { buildToolDefinitions, EXCLUDED_TOOLS, type ToolDefinition } from './core/tool-definitions.js';
 import { usageTracker } from './core/utils/usageTracker.js';
+import { BRC_TOOL_HANDLERS, buildBrcToolDefinitions } from './tools/brc-tools.js';
 import type { ToolResult } from 'brc-shared';
 
 type Args = Record<string, unknown>;
 type Handler = (args: Args) => Promise<unknown>;
 
-const TOOL_HANDLERS: Record<string, Handler> = {
-  get_config: () => getConfig(),
-  set_config_value: (a) => setConfigValue(a),
-  get_usage_stats: () => getUsageStats(),
-  get_recent_tool_calls: (a) => handlers.handleGetRecentToolCalls(a),
-  start_process: (a) => handlers.handleStartProcess(a),
-  read_process_output: (a) => handlers.handleReadProcessOutput(a),
-  interact_with_process: (a) => handlers.handleInteractWithProcess(a),
-  force_terminate: (a) => handlers.handleForceTerminate(a),
-  list_sessions: () => handlers.handleListSessions(),
-  list_processes: () => handlers.handleListProcesses(),
-  kill_process: (a) => handlers.handleKillProcess(a),
-  read_file: (a) => handlers.handleReadFile(a),
-  read_multiple_files: (a) => handlers.handleReadMultipleFiles(a),
-  write_file: (a) => handlers.handleWriteFile(a),
-  write_pdf: (a) => handlers.handleWritePdf(a),
-  create_directory: (a) => handlers.handleCreateDirectory(a),
-  list_directory: (a) => handlers.handleListDirectory(a),
-  move_file: (a) => handlers.handleMoveFile(a),
-  prepare_file_transfer: (a) => handlers.handlePrepareFileTransfer(a),
-  send_file_transfer: (a) => handlers.handleSendFileTransfer(a),
-  receive_file_transfer: (a) => handlers.handleReceiveFileTransfer(a),
-  get_file_info: (a) => handlers.handleGetFileInfo(a),
-  edit_block: (a) => handlers.handleEditBlock(a),
-  start_search: (a) => handlers.handleStartSearch(a),
-  get_more_search_results: (a) => handlers.handleGetMoreSearchResults(a),
-  stop_search: (a) => handlers.handleStopSearch(a),
-  list_searches: () => handlers.handleListSearches(),
-};
+const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
+  ['get_config', () => getConfig()],
+  ['set_config_value', (a) => setConfigValue(a)],
+  ['get_usage_stats', () => getUsageStats()],
+  ['get_recent_tool_calls', (a) => handlers.handleGetRecentToolCalls(a)],
+  ['start_process', (a) => handlers.handleStartProcess(a)],
+  ['read_process_output', (a) => handlers.handleReadProcessOutput(a)],
+  ['interact_with_process', (a) => handlers.handleInteractWithProcess(a)],
+  ['force_terminate', (a) => handlers.handleForceTerminate(a)],
+  ['list_sessions', () => handlers.handleListSessions()],
+  ['list_processes', () => handlers.handleListProcesses()],
+  ['kill_process', (a) => handlers.handleKillProcess(a)],
+  ['read_file', (a) => handlers.handleReadFile(a)],
+  ['read_multiple_files', (a) => handlers.handleReadMultipleFiles(a)],
+  ['write_file', (a) => handlers.handleWriteFile(a)],
+  ['write_pdf', (a) => handlers.handleWritePdf(a)],
+  ['create_directory', (a) => handlers.handleCreateDirectory(a)],
+  ['list_directory', (a) => handlers.handleListDirectory(a)],
+  ['move_file', (a) => handlers.handleMoveFile(a)],
+  ['prepare_file_transfer', (a) => handlers.handlePrepareFileTransfer(a)],
+  ['send_file_transfer', (a) => handlers.handleSendFileTransfer(a)],
+  ['receive_file_transfer', (a) => handlers.handleReceiveFileTransfer(a)],
+  ['get_file_info', (a) => handlers.handleGetFileInfo(a)],
+  ['edit_block', (a) => handlers.handleEditBlock(a)],
+  ['start_search', (a) => handlers.handleStartSearch(a)],
+  ['get_more_search_results', (a) => handlers.handleGetMoreSearchResults(a)],
+  ['stop_search', (a) => handlers.handleStopSearch(a)],
+  ['list_searches', () => handlers.handleListSearches()],
+  // BRC-native tools
+  ...Object.entries(BRC_TOOL_HANDLERS),
+]);
 
 let cachedDefs: ToolDefinition[] | null = null;
 
 export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = buildToolDefinitions().filter((t) => t.name in TOOL_HANDLERS && !EXCLUDED_TOOLS.has(t.name));
+    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions()]
+      .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name));
   }
   return cachedDefs;
 }
 
 export function hasTool(name: string): boolean {
-  return name in TOOL_HANDLERS;
+  return TOOL_HANDLERS.has(name);
 }
 
 export async function callTool(name: string, args: Args): Promise<ToolResult> {
-  const handler = TOOL_HANDLERS[name];
+  const handler = TOOL_HANDLERS.get(name);
   if (!handler) {
     return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
   }

@@ -5,14 +5,24 @@ import { validatePath } from './tools/filesystem.js';
 import { capture } from './utils/capture.js';
 import { getRipgrepPath } from './utils/ripgrep-resolver.js';
 import { isExcelFile } from './utils/files/index.js';
-import PizZip from 'pizzip';
 
 export interface SearchResult {
   file: string;
   line?: number;
   match?: string;
   type: 'file' | 'content';
+  /** BRC: full text of the matched/context line (trimmed, capped) for grep-style output */
+  lineText?: string;
+  /** BRC: true for ripgrep context lines (not actual matches) */
+  isContext?: boolean;
 }
+
+const MAX_LINE_TEXT = 400;
+const capLine = (s: string | undefined): string | undefined => {
+  if (s === undefined) return undefined;
+  const t = s.replace(/\r?\n$/, '');
+  return t.length > MAX_LINE_TEXT ? t.slice(0, MAX_LINE_TEXT) + '…' : t;
+};
 
 export interface SearchSession {
   id: string;
@@ -552,8 +562,10 @@ export interface SearchSessionOptions {
       });
     }
 
+    const PizZip = docxFiles.length ? (await import('pizzip')).default : null;
     for (const filePath of docxFiles) {
       if (maxResults && results.length >= maxResults) break;
+      if (!PizZip) break;
 
       try {
         const buf = await fs.readFile(filePath);
@@ -922,7 +934,7 @@ export interface SearchSessionOptions {
       if (result) {
         session.results.push(result);
         // Separate counting of matches vs context lines
-        if (result.type === 'content' && line.includes('"type":"context"')) {
+        if (result.type === 'content' && result.isContext) {
           session.totalContextLines++;
         } else {
           session.totalMatches++;
@@ -965,7 +977,8 @@ export interface SearchSessionOptions {
             file: parsed.data.path.text,
             line: parsed.data.line_number,
             match: submatch?.match?.text || parsed.data.lines.text,
-            type: 'content'
+            type: 'content',
+            lineText: capLine(parsed.data.lines?.text),
           };
         }
         
@@ -974,7 +987,9 @@ export interface SearchSessionOptions {
             file: parsed.data.path.text,
             line: parsed.data.line_number,
             match: parsed.data.lines.text.trim(),
-            type: 'content'
+            type: 'content',
+            lineText: capLine(parsed.data.lines?.text),
+            isContext: true,
           };
         }
         

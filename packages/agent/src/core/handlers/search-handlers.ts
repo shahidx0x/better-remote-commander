@@ -19,6 +19,10 @@ export async function handleStartSearch(args: unknown): Promise<ServerResult> {
     };
   }
 
+  if (parsed.data.wait) {
+    return runBlockingSearch(parsed.data);
+  }
+
   try {
     const result = await searchManager.startSearch({
       rootPath: parsed.data.path,
@@ -77,6 +81,92 @@ export async function handleStartSearch(args: unknown): Promise<ServerResult> {
       isError: true,
     };
   }
+}
+
+// BRC: blocking search mode (start_search with wait=true).
+// Must stay below the relay's per-call timeout (120s).
+const WAIT_DEFAULT_TIMEOUT_MS = 30_000;
+const WAIT_MAX_TIMEOUT_MS = 110_000;
+const WAIT_DEFAULT_MAX_RESULTS = 200;
+const WAIT_POLL_MS = 25;
+
+type StartSearchArgs = ReturnType<typeof StartSearchArgsSchema.parse>;
+
+async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
+  const timeoutMs = Math.min(Math.max(args.timeout_ms ?? WAIT_DEFAULT_TIMEOUT_MS, 1_000), WAIT_MAX_TIMEOUT_MS);
+  const cap = Math.max(1, args.maxResults ?? WAIT_DEFAULT_MAX_RESULTS);
+  const isContent = args.searchType === 'content';
+
+  let sessionId: string;
+  try {
+    const started = await searchManager.startSearch({
+      rootPath: args.path,
+      pattern: args.pattern,
+      searchType: args.searchType,
+      filePattern: args.filePattern,
+      ignoreCase: args.ignoreCase,
+      maxResults: args.maxResults,
+      includeHidden: args.includeHidden,
+      contextLines: args.contextLines,
+      timeout: timeoutMs,
+      earlyTermination: args.earlyTermination,
+      literalSearch: args.literalSearch,
+    });
+    sessionId = started.sessionId;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    return { content: [{ type: "text", text: `Error starting search: ${errorMessage}` }], isError: true };
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let stoppedReason: 'complete' | 'cap' | 'timeout' = 'complete';
+  for (;;) {
+    const s = searchManager.readSearchResults(sessionId, 0, 0);
+    if (s.isComplete) { stoppedReason = 'complete'; break; }
+    if (s.totalMatches >= cap) { stoppedReason = 'cap'; break; }
+    if (Date.now() >= deadline) { stoppedReason = 'timeout'; break; }
+    await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
+  }
+  if (stoppedReason !== 'complete') searchManager.terminateSearch(sessionId);
+
+  const all = searchManager.readSearchResults(sessionId, 0, Number.MAX_SAFE_INTEGER);
+  if (all.isError && all.totalResults === 0 && all.error?.trim()) {
+    return { content: [{ type: "text", text: `Search failed: ${all.error}` }], isError: true };
+  }
+
+  // Keep results up to `cap` matches (context lines ride along with their match).
+  const lines: string[] = [];
+  let matches = 0;
+  let truncated = false;
+  let lastFile = '';
+  for (const r of all.results) {
+    if (r.type === 'file') {
+      if (matches >= cap) { truncated = true; break; }
+      matches++;
+      lines.push(r.file);
+      continue;
+    }
+    if (!r.isContext) {
+      if (matches >= cap) { truncated = true; break; }
+      matches++;
+    }
+    if (r.file !== lastFile) {
+      if (lastFile) lines.push('');
+      lines.push(r.file);
+      lastFile = r.file;
+    }
+    const text = r.lineText ?? r.match ?? '';
+    lines.push(`${r.line}${r.isContext ? '-' : ':'} ${text}`);
+  }
+
+  const kind = isContent ? 'match(es)' : 'file(s)';
+  let header = `${matches} ${kind} for "${args.pattern}" in ${args.path} (${Math.round(all.runtime)}ms)`;
+  if (stoppedReason === 'cap' || truncated) header += ` — stopped at maxResults=${cap}; narrow the pattern/filePattern or raise maxResults`;
+  if (stoppedReason === 'timeout') header += ` — timed out after ${timeoutMs}ms, results may be incomplete`;
+  if (all.wasIncomplete) header += ` — some paths were inaccessible`;
+
+  const body = lines.length ? lines.join('\n') : 'No matches found.';
+  return { content: [{ type: "text", text: `${header}\n\n${body}` }] };
 }
 
 /**

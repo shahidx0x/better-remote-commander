@@ -259,7 +259,27 @@ class ConfigManager {
 
   private queueMutation(mutate: (config: ServerConfig) => void): void {
     this.pendingMutations.push(mutate);
-    this.scheduleSave();
+    // BRC: debounce high-frequency background writes (usage stats are bumped on
+    // every tool call). Batching them avoids a lock+read+write+rename per call.
+    if (this.debounceTimer) return;
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = null;
+      this.scheduleSave();
+    }, ConfigManager.BACKGROUND_SAVE_DELAY_MS);
+    this.debounceTimer.unref?.();
+  }
+
+  private static readonly BACKGROUND_SAVE_DELAY_MS = 5_000;
+  private debounceTimer: NodeJS.Timeout | null = null;
+
+  /** Persist any debounced background mutations now (call before exit). */
+  async flush(): Promise<void> {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+    if (this.pendingMutations.length) this.scheduleSave();
+    await this.writeChain;
   }
 
   /** Non-blocking, coalesced persistence for high-frequency state updates. */

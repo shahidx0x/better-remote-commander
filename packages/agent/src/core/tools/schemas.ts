@@ -67,9 +67,20 @@ export const ReadFileArgsSchema = z.object({
   origin: z.enum(['ui', 'llm']).optional(),
 });
 
-export const ReadMultipleFilesArgsSchema = z.object({
-  paths: z.array(z.string()),
+// BRC: `files` adds per-file line ranges (offset/length, same semantics as read_file).
+export const ReadMultipleFilesEntrySchema = z.object({
+  path: z.string(),
+  offset: z.number().optional(),
+  length: z.number().optional(),
 });
+
+export const ReadMultipleFilesArgsSchema = z.object({
+  paths: z.array(z.string()).optional().default([]),
+  files: z.array(ReadMultipleFilesEntrySchema).optional().default([]),
+}).refine(
+  data => data.paths.length + data.files.length > 0,
+  { message: "Provide at least one entry in paths or files" }
+);
 
 export const WriteFileArgsSchema = z.object({
   path: z.string(),
@@ -162,12 +173,23 @@ export const GetFileInfoArgsSchema = z.object({
 // Now supports only: text replacement and range rewrites
 // Removed 'edits' array parameter - location-based surgical edits were complex and unnecessary
 // Range rewrites are more powerful and cover all structured file editing needs
+// BRC: multi-edit — several find/replace pairs applied in order to one file in a
+// single call. For text files all edits are validated in memory and written once
+// (all-or-nothing).
+export const EditBlockEditSchema = z.object({
+  old_string: z.string(),
+  new_string: z.string(),
+  expected_replacements: z.number().int().min(1).optional().default(1),
+});
+
 export const EditBlockArgsSchema = z.object({
   file_path: z.string(),
   // Text file string replacement
   old_string: z.string().optional(),
   new_string: z.string().optional(),
   expected_replacements: z.number().optional().default(1),
+  // Multiple replacements in one call (applied sequentially, atomically for text files)
+  edits: z.array(EditBlockEditSchema).optional(),
   // Structured file range rewrite (Excel, etc.)
   range: z.string().optional(),
   content: z.any().optional(),
@@ -179,10 +201,11 @@ export const EditBlockArgsSchema = z.object({
   data => {
     // Helper to check if value is actually provided (not undefined, not empty string)
     const hasValue = (v: unknown) => v !== undefined && v !== '';
-    return (hasValue(data.old_string) && data.new_string !== undefined) ||
+    return (Array.isArray(data.edits) && data.edits.length > 0) ||
+           (hasValue(data.old_string) && data.new_string !== undefined) ||
            (hasValue(data.range) && hasValue(data.content));
   },
-  { message: "Must provide either (old_string + new_string) or (range + content)" }
+  { message: "Must provide either edits[], (old_string + new_string) or (range + content)" }
 );
 
 // Send input to process schema
@@ -220,6 +243,9 @@ export const StartSearchArgsSchema = z.object({
   timeout_ms: z.number().optional(), // Match process naming convention
   earlyTermination: z.boolean().optional(), // Stop search early when exact filename match is found (default: true for files, false for content)
   literalSearch: z.boolean().optional().default(false), // Force literal string matching (-F flag) instead of regex
+  // BRC: block until the search finishes (or maxResults / timeout is hit) and return
+  // all results in one call — no get_more_search_results round trips needed.
+  wait: z.boolean().optional().default(false),
   // 'ui' marks widget-fired calls (e.g. markdown link-target search);
   // excluded from tool-call telemetry (see isUiOriginCall in server.ts).
   origin: z.enum(['ui', 'llm']).optional(),

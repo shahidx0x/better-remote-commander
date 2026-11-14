@@ -487,6 +487,11 @@ export const capture = async (event: string, properties?: any) => {
     if (isInsideUiOriginCall()) {
         return;
     }
+    // BRC: bail out before building event properties (which probes system info)
+    // when telemetry is disabled — the default. Saves work on every tool call.
+    if (isTelemetryDisabledByEnv()) {
+        return;
+    }
     void (async () => {
         try {
             const eventProperties = await buildEventProperties(properties);

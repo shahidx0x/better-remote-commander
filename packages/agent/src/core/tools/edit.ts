@@ -360,6 +360,88 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
     throw new Error("Unexpected error during search and replace operation.");
 }
 
+function countNonOverlapping(haystack: string, needle: string): number {
+    let count = 0;
+    let pos = haystack.indexOf(needle);
+    while (pos !== -1) {
+        count++;
+        pos = haystack.indexOf(needle, pos + needle.length);
+    }
+    return count;
+}
+
+/**
+ * BRC: apply several find/replace edits to one text file in a single call.
+ * Edits are applied in order against the in-memory result of the previous edit.
+ * All edits are validated before anything is written: if any edit does not match
+ * its expected_replacements count, the file is left untouched (all-or-nothing).
+ */
+export async function performMultiEdit(
+    validPath: string,
+    displayPath: string,
+    edits: Array<{ old_string: string; new_string: string; expected_replacements?: number }>,
+): Promise<ServerResult> {
+    const content = await readFileInternal(validPath, 0, Number.MAX_SAFE_INTEGER);
+    if (typeof content !== 'string') {
+        return createErrorResponse('Wrong content for file ' + displayPath);
+    }
+    const lineEnding = detectLineEnding(content);
+    let next = content;
+
+    for (let i = 0; i < edits.length; i++) {
+        const e = edits[i];
+        const expected = e.expected_replacements ?? 1;
+        const label = `Edit #${i + 1} of ${edits.length}`;
+        if (!e.old_string) {
+            return createErrorResponse(`${label}: old_string must be non-empty. No changes were written.`);
+        }
+        const search = normalizeLineEndings(e.old_string, lineEnding);
+        const replace = normalizeLineEndings(e.new_string, lineEnding);
+        const count = countNonOverlapping(next, search);
+
+        if (count !== expected) {
+            let hint = '';
+            if (count === 0) {
+                try {
+                    const fuzzy = await runFuzzySearchInWorker(next, e.old_string);
+                    const similarity = getSimilarityRatio(e.old_string, fuzzy.value);
+                    if (similarity >= FUZZY_THRESHOLD) {
+                        hint = `\nClosest match (${Math.round(similarity * 100)}% similar):\n${highlightDifferences(e.old_string, fuzzy.value)}`;
+                    }
+                } catch { /* fuzzy hint is best-effort */ }
+            } else {
+                hint = ` Set expected_replacements to ${count} to replace all, or add surrounding context to make old_string unique.`;
+            }
+            return createErrorResponse(
+                `${label} failed: expected ${expected} occurrence(s) of old_string but found ${count}` +
+                (i > 0 ? ' (after applying the previous edits)' : '') +
+                `. No changes were written.${hint}`
+            );
+        }
+
+        if (expected === 1) {
+            const idx = next.indexOf(search);
+            next = next.substring(0, idx) + replace + next.substring(idx + search.length);
+        } else {
+            next = next.split(search).join(replace);
+        }
+    }
+
+    if (next === content) {
+        return { content: [{ type: "text", text: `No changes: the ${edits.length} edit(s) produced identical content in ${displayPath}.` }] };
+    }
+
+    await writeFile(validPath, next);
+    capture('server_edit_block_multi', { fileExtension: path.extname(validPath).toLowerCase(), editCount: edits.length });
+    const totalLines = next.split('\n').length;
+    return {
+        content: [{
+            type: "text",
+            text: `Successfully applied ${edits.length} edit(s) to ${displayPath} (now ${totalLines} lines).`
+        }],
+    };
+}
+
 /**
  * Generates a character-level diff using standard {-removed-}{+added+} format
  * @param expected The string that was searched for
@@ -470,6 +552,34 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
         }
 
         return createErrorResponse(`Range-based editing not supported for ${parsed.file_path}. For text files, use old_string and new_string parameters instead. If your client requires range/content parameters, set them to empty strings ("").`);
+    }
+
+    // Path 1b (BRC): multi-edit — edits[] applied in order
+    if (parsed.edits && parsed.edits.length > 0) {
+        if (hasEditRange) {
+            // Structured handlers (e.g. DOCX) own find/replace; apply sequentially.
+            let applied = 0;
+            for (let i = 0; i < parsed.edits.length; i++) {
+                const e = parsed.edits[i];
+                try {
+                    const result = await handler.editRange!(validatedPath!, '', {
+                        old_string: e.old_string,
+                        new_string: e.new_string,
+                        expected_replacements: e.expected_replacements,
+                    });
+                    if (!result.success) {
+                        const errorMsg = result.errors?.map(er => er.error).join('; ') || 'Unknown error';
+                        return createErrorResponse(`Edit #${i + 1} of ${parsed.edits.length} failed: ${errorMsg}. ${applied} earlier edit(s) were already applied.`);
+                    }
+                    applied++;
+                } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    return createErrorResponse(`Edit #${i + 1} of ${parsed.edits.length} failed: ${errorMessage}. ${applied} earlier edit(s) were already applied.`);
+                }
+            }
+            return { content: [{ type: "text", text: `Successfully applied ${applied} edit(s) to ${parsed.file_path}` }] };
+        }
+        return performMultiEdit(validatedPath!, parsed.file_path, parsed.edits);
     }
 
     // Path 2: Text replacement — old_string + new_string
