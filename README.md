@@ -27,9 +27,9 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 - **Security**: login rate limiting, signed session cookies, security headers, blocked-command list and
   `allowedDirectories` on the agent. See `SECURITY.md`.
 - **Deployment**: Docker Compose profiles for Caddy (auto-TLS), Cloudflare Tunnel, ngrok or localhost.
-- **Android agent** (branch `feat/android-agent`, `apps/android-agent`): native Kotlin agent that exposes
-  Android-specific tools (accessibility automation, screenshots, notifications, contacts, SMS, location,
-  camera/mic capture, screen recording, app install, automation jobs, Shizuku/Device Owner modes).
+- **Android agent** (branch `feat/android-agent`): native Kotlin agent that exposes Android-specific tools
+  (accessibility automation, screenshots, notifications, contacts, SMS, location, camera/mic capture, screen
+  recording, app install, automation jobs, Shizuku/Device Owner modes). See [docs/android-agent.md](docs/android-agent.md).
 
 ## Tools available to the AI
 
@@ -90,6 +90,9 @@ The agent prints a pairing code and opens `https://rdp.example.com/device/verify
 Then make it start at login: `brc-agent --install-service`.
 
 Docker agent (Linux servers): `docker run -d -v brc-agent:/home/rdp/.brc -e BRC_RELAY=https://rdp.example.com -e BRC_NAME=srv1 ghcr.io/shahidx0x/better-remote-commander/agent`
+
+**Android phone** (branch `feat/android-agent`): build the APK from `apps/android-agent`, install it, enter your relay
+URL and approve the pairing. Full guide, tool list and permissions: [docs/android-agent.md](docs/android-agent.md).
 
 ### 3. Connect your AI
 
