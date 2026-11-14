@@ -13,9 +13,50 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 - **Many machines**: pair Windows, macOS, Linux boxes and containers to one relay; agents only connect outbound.
 - **Control**: browser dashboard to pair, pause, rename and remove devices, manage OAuth clients and see an audit log.
 
-Tools available to the AI (24): `read_file`, `write_file`, `edit_block`, `list_directory`, `move_file`, `get_file_info`,
-`start_process`, `interact_with_process`, `read_process_output`, `list_processes`, `kill_process`, `start_search`,
-`write_pdf`, `get_config`, `set_config_value` and more — the same tool set as Desktop Commander.
+## Features
+
+- **Remote MCP relay** with OAuth 2.0 (dynamic client registration, PKCE) and API keys, for Claude and ChatGPT.
+- **Device pairing**: the agent shows a code, you approve it in the browser. Device tokens are stored hashed.
+- **Multi-device**: every tool takes an optional `deviceId`. With one device online it is picked automatically.
+- **Outbound-only agents**: no open ports on your machines. Automatic reconnect, heartbeat and re-pairing.
+- **Admin dashboard** (`/admin`): rename, pause, resume and delete devices, view the audit log and stats.
+  `/auth/clients` manages OAuth clients and `/auth/apikeys` manages API keys.
+- **Audit log** of every tool call, and per-device pause switch.
+- **Encrypted file transfer** between devices (see below).
+- **OS service install** (`--install-service`) so the agent starts at login.
+- **Security**: login rate limiting, signed session cookies, security headers, blocked-command list and
+  `allowedDirectories` on the agent. See `SECURITY.md`.
+- **Deployment**: Docker Compose profiles for Caddy (auto-TLS), Cloudflare Tunnel, ngrok or localhost.
+- **Android agent** (branch `feat/android-agent`, `apps/android-agent`): native Kotlin agent that exposes
+  Android-specific tools (accessibility automation, screenshots, notifications, contacts, SMS, location,
+  camera/mic capture, screen recording, app install, automation jobs, Shizuku/Device Owner modes).
+
+## Tools available to the AI
+
+The relay adds `list_devices`. The agent provides 28 tools, derived from Desktop Commander plus BRC additions.
+
+| Category | Tools |
+| --- | --- |
+| Devices | `list_devices` |
+| Config | `get_config`, `set_config_value` |
+| Files | `read_file`, `read_multiple_files`, `write_file`, `create_directory`, `list_directory`, `move_file`, `get_file_info` |
+| Editing | `edit_block` (surgical text replace), `write_pdf` |
+| Search | `start_search`, `get_more_search_results`, `stop_search`, `list_searches` |
+| Processes | `start_process`, `read_process_output`, `interact_with_process`, `force_terminate`, `list_sessions`, `list_processes`, `kill_process` |
+| File transfer | `prepare_file_transfer`, `send_file_transfer`, `receive_file_transfer` |
+| Diagnostics | `get_usage_stats`, `get_recent_tool_calls`, `get_prompts`, `give_feedback_to_desktop_commander` |
+
+Note: `write_pdf` downloads Chrome on first use.
+
+### Encrypted file transfer
+
+Move a file from one paired device to another without routing it through the relay. The encrypted blob is hosted temporarily on tmpfiles.org:
+
+1. `prepare_file_transfer` on the destination. Returns a `receiveId` and `recipientPublicKey`.
+2. `send_file_transfer` on the source with that public key. The file is encrypted and uploaded;
+   it returns a `transferToken` holding the download URL and a wrapped key (never the raw AES key).
+3. `receive_file_transfer` on the destination with the `receiveId` and `transferToken`.
+   It downloads, authenticates, decrypts and saves the file.
 
 ## Install
 
