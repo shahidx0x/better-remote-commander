@@ -5,4 +5,5 @@ dist/
 *.log
 data/
 dist-pack/
-tools/
+/tools/
+*.cpuprofile
