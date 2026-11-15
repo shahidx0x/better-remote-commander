@@ -117,28 +117,28 @@ test('parser cancellation leaves the event loop usable',async()=>{
 });
 class Sock extends EventEmitter{OPEN=1;readyState=1;bufferedAmount=0;sent=[];send(s){this.sent.push(JSON.parse(s));}close(){this.readyState=3;this.emit('close');}terminate(){this.close();}}
 const hello=(id,tool='read_file')=>Buffer.from(JSON.stringify({type:'hello',protocol:1,device:{deviceId:id,name:id,platform:'test'},tools:[{name:tool,description:'test',inputSchema:{type:'object'}}]}));
-test('relay schema cache preserves stable discovery while device pause and reconnect remain fresh',()=>{
+test('relay schema cache preserves stable discovery while device pause and reconnect remain fresh',async()=>{
  const h=new DeviceHub('test',()=>{}),s=new Sock();h.attach(s,'u','pc');s.emit('message',hello('pc'));
  let paused=false;const store={getDevice:()=>({paused:paused?1:0})};
- const first=liveTools(h,store,'u'),second=liveTools(h,store,'u');assert.equal(first.tools,second.tools);
+ const first=await liveTools(h,store,'u'),second=await liveTools(h,store,'u');assert.equal(first.tools,second.tools);
  const stable=first.tools.map(t=>t.name);assert.ok(stable.length>=60);
  assert.equal(first.online,1);
  paused=true;
- const duringPause=liveTools(h,store,'u');
+ const duringPause=await liveTools(h,store,'u');
  assert.equal(duringPause.online,0,'paused agent must not appear online');
  assert.deepEqual(duringPause.tools.map(t=>t.name),stable,'pausing must not remove discoverable tool schemas');
  paused=false;
- const resumed=liveTools(h,store,'u');assert.equal(resumed.online,1);
+ const resumed=await liveTools(h,store,'u');assert.equal(resumed.online,1);
  assert.deepEqual(resumed.tools.map(t=>t.name),stable);
  const next=new Sock();h.attach(next,'u','pc');next.emit('message',hello('pc','read_code_file'));
- const reconnected=liveTools(h,store,'u');assert.equal(reconnected.online,1);
+ const reconnected=await liveTools(h,store,'u');assert.equal(reconnected.online,1);
  assert.deepEqual(reconnected.tools.map(t=>t.name),stable);
  const selected=reconnected.tools.find(t=>t.name==='read_code_file');
  assert.match(selected.description,/^USE WHEN: /,'reviewed tool-choice guidance must survive an older agent reconnecting');
  assert.notEqual(selected.description,'test','do not let stale agent descriptions override reviewed choices');
  assert.equal(selected.inputSchema.type,'object','live agent schema remains authoritative');
  assert.ok(selected.inputSchema.properties.deviceId,'device targeting remains available');
- const other=liveTools(h,store,'other');assert.equal(other.online,0);
+ const other=await liveTools(h,store,'other');assert.equal(other.online,0);
  assert.deepEqual(other.tools.map(t=>t.name),stable,'static catalog is public schema; device ownership is still enforced by invocation');
  h.close();
 });

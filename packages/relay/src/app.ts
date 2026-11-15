@@ -19,6 +19,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { DeviceHub } from './device-hub.js';
 import { SqliteStore, verifyPassword } from './store/sqlite.js';
+import { MongoStore } from './store/mongo.js';
+import type { RelayStore } from './store/types.js';
 import { RelayOAuthProvider, SCOPES } from './auth/provider.js';
 import { parseAuthorizeRequest, validateClientId, validateRedirectUri, approveCallback } from './auth/client-recovery.js';
 import { Sessions } from './auth/sessions.js';
@@ -34,6 +36,8 @@ export interface RelayConfig {
   publicUrl: string;
   trustProxy: boolean;
   dbFile: string;
+  mongoUri?: string;
+  mongoDb?: string;
   sessionSecret: string;
   adminUser: string;
   adminPassword: string;
@@ -49,6 +53,8 @@ export function loadConfig(): RelayConfig {
     publicUrl: (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/$/, ''),
     trustProxy: env.TRUST_PROXY === 'true' || env.TRUST_PROXY === '1',
     dbFile: env.BRC_DB ?? 'data/relay.sqlite',
+    mongoUri: env.MONGODB_URI || undefined,
+    mongoDb: env.MONGODB_DB || undefined,
     sessionSecret: env.BRC_SESSION_SECRET ?? '',
     adminUser: env.BRC_ADMIN_USER ?? 'admin',
     adminPassword: env.BRC_ADMIN_PASSWORD ?? '',
@@ -59,11 +65,14 @@ export function loadConfig(): RelayConfig {
 const DEVICE_CODE_TTL_MS = 15 * 60_000;
 const DEVICE_POLL_INTERVAL_S = 5;
 
-export interface Relay { http: HttpServer; hub: DeviceHub; store: SqliteStore; close(): Promise<void> }
+export interface Relay { http: HttpServer; hub: DeviceHub; store: RelayStore; close(): Promise<void> }
 
-export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) => void): Relay {
-  const store = new SqliteStore(cfg.dbFile);
-  const admin = store.upsertUser(cfg.adminUser, cfg.adminPassword);
+export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) => void): Promise<Relay> {
+  // MongoDB is the durable primary when selected; never fall back silently to an empty SQLite.
+  const store: RelayStore = cfg.mongoUri ? await MongoStore.connect(cfg.mongoUri, cfg.mongoDb) : new SqliteStore(cfg.dbFile);
+  let admin;
+  try { admin = await store.upsertUser(cfg.adminUser, cfg.adminPassword); }
+  catch (error) { await store.close(); throw error; }
   const sessions = new Sessions(cfg.sessionSecret, cfg.publicUrl.startsWith('https://'));
   const hub = new DeviceHub(cfg.relayVersion, log);
   const publicUrl = new URL(cfg.publicUrl);
@@ -121,11 +130,11 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   // A lost/stale client ID or a newly requested callback gets a useful recovery
   // screen. No registration happens here: only an authenticated admin can approve it.
   // Valid registered clients continue through the SDK's standard exact-match checks.
-  app.get('/authorize', (req, res, next) => {
+  app.get('/authorize', async (req, res, next) => {
     let requested;
     try { requested = parseAuthorizeRequest(cfg.publicUrl + req.originalUrl, cfg.publicUrl); }
     catch { return next(); } // Let the OAuth SDK reject malformed requests normally.
-    const saved = store.getClient(requested.clientId);
+    const saved = await store.getClient(requested.clientId);
     let allowed = false;
     if (saved) {
       try {
@@ -160,7 +169,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     res.type('html').send(pages.consentPage(pendingId, p.client.client_name ?? p.client.client_id, p.params.redirectUri, p.params.scopes ?? SCOPES));
   });
 
-  app.post('/auth/consent', (req, res) => {
+  app.post('/auth/consent', async (req, res) => {
     const userId = currentUser(req);
     if (!userId) return res.status(401).type('html').send(pages.messagePage('Not signed in', 'Sign in first.', false));
     const pendingId = String(req.body.pending ?? '');
@@ -168,7 +177,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
       const url = provider.denyCode(pendingId);
       return url ? res.redirect(url) : res.type('html').send(pages.messagePage('Denied', 'Authorization denied.', false));
     }
-    try { res.redirect(provider.issueCode(pendingId, userId)); }
+    try { res.redirect(await provider.issueCode(pendingId, userId)); }
     catch { res.status(400).type('html').send(pages.messagePage('Expired', 'This authorization request has expired. Retry from your AI client.', false)); }
   });
 
@@ -177,12 +186,12 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
 
   app.get('/auth/login', (req, res) => res.type('html').send(pages.loginPage(safeReturn(req.query.returnTo))));
   const limiter = new LoginLimiter();
-  app.post('/auth/login', (req, res) => {
+  app.post('/auth/login', async (req, res) => {
     const { username, password, returnTo } = req.body as Record<string, string>;
     const key = `${req.ip}|${String(username ?? '').toLowerCase()}`;
     const wait = limiter.locked(key);
     if (wait) return res.status(429).type('html').send(pages.loginPage(safeReturn(returnTo), `Too many attempts. Try again in ${wait} s.`));
-    const user = store.getUserByName(String(username ?? ''));
+    const user = await store.getUserByName(String(username ?? ''));
     if (!user || !verifyPassword(String(password ?? ''), user.password_hash)) {
       limiter.fail(key);
       log('warn', `login failed for "${username}" from ${req.ip}`);
@@ -194,19 +203,26 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   });
   app.get('/auth/logout', (_req, res) => { sessions.clear(res); res.redirect('/'); });
 
-  app.get('/', (req, res) => {
+  app.get('/', async (req, res) => {
     const userId = currentUser(req);
     const online = new Set(hub.list(userId ?? undefined).map((d) => d.deviceId));
-    const devices = userId ? store.listDevices(userId).map((d) => ({ ...d, online: online.has(d.device_id) })) : [];
+    const devices = userId ? (await store.listDevices(userId)).map((d) => ({ ...d, online: online.has(d.device_id) })) : [];
     res.type('html').send(pages.homePage(cfg.publicUrl, !!userId, devices));
   });
 
-  app.get('/health', (_req, res) => res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl, mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1 }));
+  app.get('/health', async (_req, res) => {
+    if (store instanceof MongoStore) {
+      try { await store.ping(); }
+      catch { return res.status(503).json({ ok: false, storage: 'mongodb', error: 'database_unavailable' }); }
+    }
+    res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl,
+      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1, storage: cfg.mongoUri ? 'mongodb' : 'sqlite' });
+  });
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */
-  app.post('/device/start', express.json({ limit: '4kb' }), (req, res) => {
+  app.post('/device/start', express.json({ limit: '4kb' }), async (req, res) => {
     const clientName = String((req.body as Record<string, unknown>)?.client_name ?? 'brc-agent').slice(0, 80);
-    const row = store.createDeviceCode(clientName, DEVICE_CODE_TTL_MS);
+    const row = await store.createDeviceCode(clientName, DEVICE_CODE_TTL_MS);
     res.json({
       device_code: row.device_code, user_code: row.user_code,
       verification_uri: `${cfg.publicUrl}/device/verify`,
@@ -215,16 +231,16 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     });
   });
 
-  app.post('/device/poll', express.json({ limit: '4kb' }), (req, res) => {
+  app.post('/device/poll', express.json({ limit: '4kb' }), async (req, res) => {
     const { device_code, device_id, name, platform } = (req.body ?? {}) as Record<string, string | undefined>;
-    const row = device_code ? store.getDeviceCode(device_code) : undefined;
+    const row = device_code ? await store.getDeviceCode(device_code) : undefined;
     if (!row) return res.status(400).json({ error: 'invalid_grant', error_description: 'unknown device_code' });
-    if (row.expires_at < Date.now()) { store.deleteDeviceCode(row.device_code); return res.status(400).json({ error: 'expired_token' }); }
-    if (row.denied) { store.deleteDeviceCode(row.device_code); return res.status(400).json({ error: 'access_denied' }); }
+    if (row.expires_at < Date.now()) { await store.deleteDeviceCode(row.device_code); return res.status(400).json({ error: 'expired_token' }); }
+    if (row.denied) { await store.deleteDeviceCode(row.device_code); return res.status(400).json({ error: 'access_denied' }); }
     if (!row.approved || !row.user_id) return res.status(400).json({ error: 'authorization_pending', interval: DEVICE_POLL_INTERVAL_S });
     const deviceId = device_id || row.device_id || `dev_${row.user_code.replace('-', '').toLowerCase()}`;
-    const token = store.issueDeviceToken(deviceId, row.user_id, name || row.client_name, platform ?? null);
-    store.deleteDeviceCode(row.device_code);
+    const token = await store.issueDeviceToken(deviceId, row.user_id, name || row.client_name, platform ?? null);
+    await store.deleteDeviceCode(row.device_code);
     log('info', `device paired: ${name || row.client_name} [${deviceId}] for user ${row.user_id}`);
     res.json({ device_token: token, device_id: deviceId, token_type: 'bearer', ws_url: cfg.publicUrl.replace(/^http/, 'ws') + '/ws' });
   });
@@ -233,27 +249,27 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     currentUser(req) ? next() : res.redirect(`/auth/login?returnTo=${encodeURIComponent(req.originalUrl)}`);
 
   app.get('/device/verify', requireLogin, (req, res) => res.type('html').send(pages.deviceVerifyPage(String(req.query.user_code ?? ''))));
-  app.post('/device/verify', requireLogin, (req, res) => {
-    const row = store.getDeviceCodeByUserCode(String(req.body.user_code ?? ''));
+  app.post('/device/verify', requireLogin, async (req, res) => {
+    const row = await store.getDeviceCodeByUserCode(String(req.body.user_code ?? ''));
     if (!row || row.expires_at < Date.now()) return res.status(404).type('html').send(pages.deviceVerifyPage('', 'Code not found or expired.'));
     res.type('html').send(pages.deviceApprovePage(row.user_code, row.client_name));
   });
-  app.post('/device/approve', requireLogin, (req, res) => {
+  app.post('/device/approve', requireLogin, async (req, res) => {
     const userId = currentUser(req)!;
-    const row = store.getDeviceCodeByUserCode(String(req.body.user_code ?? ''));
+    const row = await store.getDeviceCodeByUserCode(String(req.body.user_code ?? ''));
     if (!row || row.expires_at < Date.now()) return res.status(404).type('html').send(pages.messagePage('Not found', 'Code not found or expired.', false));
-    if (req.body.decision !== 'allow') { store.denyDeviceCode(row.device_code); return res.type('html').send(pages.messagePage('Denied', 'Device pairing denied.', false)); }
-    store.approveDeviceCode(row.device_code, userId, row.device_id ?? '');
+    if (req.body.decision !== 'allow') { await store.denyDeviceCode(row.device_code); return res.type('html').send(pages.messagePage('Denied', 'Device pairing denied.', false)); }
+    await store.approveDeviceCode(row.device_code, userId, row.device_id ?? '');
     res.type('html').send(pages.messagePage('Device approved', `${row.client_name} can now connect. The agent will finish pairing automatically.`));
   });
 
 
   /* ---------- OAuth clients registered automatically via DCR ---------- */
-  const clientRows = () => store.listClients().map((c) => {
+  const clientRows = async () => (await store.listClients()).map((c) => {
     const m = JSON.parse(c.metadata) as { client_name?: string; redirect_uris?: string[] };
     return { client_id: c.client_id, name: m.client_name ?? c.client_id, redirect_uris: m.redirect_uris ?? [], hasSecret: !!c.client_secret, created_at: c.created_at };
   });
-  app.get('/auth/clients', requireLogin, (req, res) => {
+  app.get('/auth/clients', requireLogin, async (req, res) => {
     const csrf = sessions.csrfToken(req)!;
     const pasted = typeof req.query.authorize === 'string' ? req.query.authorize : '';
     let recovery;
@@ -268,9 +284,9 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     } else if (req.query.added === '1') {
       feedback = { ok: true, message: 'OAuth callback approved. You can retry connecting your AI application.' };
     }
-    res.type('html').send(pages.clientsPage(clientRows(), csrf, recovery, feedback));
+    res.type('html').send(pages.clientsPage(await clientRows(), csrf, recovery, feedback));
   });
-  app.post('/auth/clients/import', requireLogin, (req, res) => {
+  app.post('/auth/clients/import', requireLogin, async (req, res) => {
     if (!sessions.checkCsrf(req, req.body?.csrf)) return res.status(403).type('html').send(pages.messagePage('Forbidden', 'Invalid form token. Reload the clients page.', false));
     if (req.body?.trust !== 'yes') return res.status(400).type('html').send(pages.messagePage('Not approved', 'You must explicitly approve the callback destination.', false));
     const csrf = sessions.csrfToken(req)!;
@@ -279,21 +295,21 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
       const input = rawAuthorize
         ? parseAuthorizeRequest(rawAuthorize, cfg.publicUrl)
         : { clientId: validateClientId(String(req.body?.client_id ?? '')), redirectUri: validateRedirectUri(String(req.body?.redirect_uri ?? '')) };
-      approveCallback(store, input, String(req.body?.client_name ?? ''));
+      await approveCallback(store, input, String(req.body?.client_name ?? ''));
       // Redirect only to an already validated same-issuer /authorize URL;
       // the SDK still checks PKCE, scope and exact registered callback.
       if (input.authorizeUrl) return res.redirect(303, input.authorizeUrl);
       res.redirect(303, '/auth/clients?added=1');
     } catch (error) {
-      res.status(400).type('html').send(pages.clientsPage(clientRows(), csrf, undefined, {
+      res.status(400).type('html').send(pages.clientsPage(await clientRows(), csrf, undefined, {
         ok: false,
         message: error instanceof Error ? error.message : 'Could not approve callback',
       }));
     }
   });
-  app.post('/auth/clients/delete', requireLogin, (req, res) => {
+  app.post('/auth/clients/delete', requireLogin, async (req, res) => {
     if (!sessions.checkCsrf(req, req.body?.csrf)) return res.status(403).type('html').send(pages.messagePage('Forbidden', 'Invalid form token. Reload the clients page.', false));
-    store.deleteClient(String(req.body?.client_id ?? ''));
+    await store.deleteClient(String(req.body?.client_id ?? ''));
     res.redirect('/auth/clients');
   });
 
@@ -323,59 +339,59 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
 
   // OAuth-free capability URLs: no redirect_uri, no Authorization header, no public anonymous access.
   // A fresh SQLite token-hash lookup is required for every request, including after revocation.
-  app.all('/c/:key/mcp', (req, res, next) => {
-    if (!store.getConnectionLink(String(req.params.key ?? ''))) return res.status(404).json({ error: 'invalid_connection' });
+  app.all('/c/:key/mcp', async (req, res, next) => {
+    if (!await store.getConnectionLink(String(req.params.key ?? ''))) return res.status(404).json({ error: 'invalid_connection' });
     next();
   }, express.json({ limit: '32mb' }), async (req, res) => {
-    const link = store.getConnectionLink(String(req.params.key ?? ''));
+    const link = await store.getConnectionLink(String(req.params.key ?? ''));
     if (!link) return res.status(404).json({ error: 'invalid_connection' });
     await handleMcp(req, res, link.user_id, `link:${link.id}`, link.mode);
   });
 
   /* ---------- admin dashboard ---------- */
-  app.get('/admin', requireLogin, (req, res) => {
+  app.get('/admin', requireLogin, async (req, res) => {
     const userId = currentUser(req)!;
     const online = new Set(hub.list(userId).map((d) => d.deviceId));
-    const devices = store.listDevices(userId).map((d) => ({ ...d, online: online.has(d.device_id) }));
+    const devices = (await store.listDevices(userId)).map((d) => ({ ...d, online: online.has(d.device_id) }));
     const names = new Map(devices.map((d) => [d.device_id, d.name]));
-    const audit = store.recentAudit(userId, 100).map((a) => ({ ts: a.ts, device: names.get(a.device_id ?? '') ?? (a.device_id ?? '?').slice(0, 8), client: a.client, tool: a.tool, ok: a.ok, ms: a.ms, error: a.error }));
-    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, store.auditStats(userId)));
+    const audit = (await store.recentAudit(userId, 100)).map((a) => ({ ts: a.ts, device: names.get(a.device_id ?? '') ?? (a.device_id ?? '?').slice(0, 8), client: a.client, tool: a.tool, ok: a.ok, ms: a.ms, error: a.error }));
+    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, await store.auditStats(userId)));
   });
-  app.post('/admin/device', requireLogin, (req, res) => {
+  app.post('/admin/device', requireLogin, async (req, res) => {
     const userId = currentUser(req)!;
     const { device_id, action, name } = req.body as Record<string, string>;
-    const dev = store.getDevice(String(device_id ?? ''));
+    const dev = await store.getDevice(String(device_id ?? ''));
     if (!dev || dev.user_id !== userId) return res.status(404).type('html').send(pages.messagePage('Not found', 'Unknown device.', false));
     switch (action) {
-      case 'rename': store.renameDevice(dev.device_id, String(name ?? '').trim().slice(0, 80) || dev.name); break;
-      case 'pause': store.setDevicePaused(dev.device_id, true); break;
-      case 'resume': store.setDevicePaused(dev.device_id, false); break;
-      case 'delete': store.deleteDevice(dev.device_id); hub.get(dev.device_id)?.socket.close(4401, 'device removed'); break;
+      case 'rename': await store.renameDevice(dev.device_id, String(name ?? '').trim().slice(0, 80) || dev.name); break;
+      case 'pause': await store.setDevicePaused(dev.device_id, true); break;
+      case 'resume': await store.setDevicePaused(dev.device_id, false); break;
+      case 'delete': await store.deleteDevice(dev.device_id); hub.get(dev.device_id)?.socket.close(4401, 'device removed'); break;
     }
     log('info', `admin: ${action} device ${dev.device_id}`);
     res.redirect('/admin');
   });
 
   /* ---------- API keys ---------- */
-  app.get('/auth/apikeys', requireLogin, (req, res) => res.type('html').send(adminPages.apiKeysPage(store.listApiKeys(currentUser(req)!))));
-  app.post('/auth/apikeys', requireLogin, (req, res) => {
+  app.get('/auth/apikeys', requireLogin, async (req, res) => res.type('html').send(adminPages.apiKeysPage(await store.listApiKeys(currentUser(req)!))));
+  app.post('/auth/apikeys', requireLogin, async (req, res) => {
     const userId = currentUser(req)!;
     const name = String(req.body.name ?? '').trim().slice(0, 80) || 'api-key';
-    const { raw } = store.createApiKey(userId, name);
+    const { raw } = await store.createApiKey(userId, name);
     log('info', `api key created: ${name}`);
-    res.type('html').send(adminPages.apiKeysPage(store.listApiKeys(userId), { name, raw }));
+    res.type('html').send(adminPages.apiKeysPage(await store.listApiKeys(userId), { name, raw }));
   });
-  app.post('/auth/apikeys/revoke', requireLogin, (req, res) => {
-    store.revokeApiKey(currentUser(req)!, String(req.body.prefix ?? ''));
+  app.post('/auth/apikeys/revoke', requireLogin, async (req, res) => {
+    await store.revokeApiKey(currentUser(req)!, String(req.body.prefix ?? ''));
     res.redirect('/auth/apikeys');
   });
 
   /* ---------- Copy/paste connection URLs: no OAuth callback required ---------- */
-  app.get('/auth/links', requireLogin, (req, res) => {
+  app.get('/auth/links', requireLogin, async (req, res) => {
     const userId = currentUser(req)!;
-    res.type('html').send(adminPages.connectionLinksPage(store.listConnectionLinks(userId), sessions.csrfToken(req)!));
+    res.type('html').send(adminPages.connectionLinksPage(await store.listConnectionLinks(userId), sessions.csrfToken(req)!));
   });
-  app.post('/auth/links', requireLogin, (req, res) => {
+  app.post('/auth/links', requireLogin, async (req, res) => {
     if (!sessions.checkCsrf(req, req.body?.csrf)) return res.status(403).type('html').send(pages.messagePage('Forbidden', 'Invalid form token. Reload the links page.', false));
     const userId = currentUser(req)!;
     const csrf = sessions.csrfToken(req)!;
@@ -386,16 +402,16 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
       const mode = req.body?.mode === 'full' ? 'full' : req.body?.mode === 'read' ? 'read' : null;
       const days = Number(req.body?.days);
       if (!mode) throw new Error('Choose a valid access level.');
-      const created = store.createConnectionLink(userId, name, mode, days);
+      const created = await store.createConnectionLink(userId, name, mode, days);
       const url = `${cfg.publicUrl}/c/${created.key}/mcp`;
-      res.type('html').send(adminPages.connectionLinksPage(store.listConnectionLinks(userId), csrf, { name, url, expiresAt: created.expiresAt }));
+      res.type('html').send(adminPages.connectionLinksPage(await store.listConnectionLinks(userId), csrf, { name, url, expiresAt: created.expiresAt }));
     } catch (error) {
-      res.status(400).type('html').send(adminPages.connectionLinksPage(store.listConnectionLinks(userId), csrf, undefined, error instanceof Error ? error.message : 'Invalid request'));
+      res.status(400).type('html').send(adminPages.connectionLinksPage(await store.listConnectionLinks(userId), csrf, undefined, error instanceof Error ? error.message : 'Invalid request'));
     }
   });
-  app.post('/auth/links/revoke', requireLogin, (req, res) => {
+  app.post('/auth/links/revoke', requireLogin, async (req, res) => {
     if (!sessions.checkCsrf(req, req.body?.csrf)) return res.status(403).type('html').send(pages.messagePage('Forbidden', 'Invalid form token. Reload the links page.', false));
-    store.revokeConnectionLink(currentUser(req)!, String(req.body?.link_id ?? ''));
+    await store.revokeConnectionLink(currentUser(req)!, String(req.body?.link_id ?? ''));
     res.redirect('/auth/links');
   });
 
@@ -404,25 +420,34 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
 
   http.on('upgrade', (req, socket, head) => {
+    void (async () => {
     const url = new URL(req.url ?? '/', cfg.publicUrl);
     if (url.pathname !== '/ws') return socket.destroy();
     const h = req.headers.authorization;
     const token = h?.startsWith('Bearer ') ? h.slice(7).trim() : url.searchParams.get('token');
-    const dev = token ? store.getDeviceByToken(token) : undefined;
+    const dev = token ? await store.getDeviceByToken(token) : undefined;
     if (!dev) { log('warn', `agent auth failed from ${req.socket.remoteAddress}`); socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); return socket.destroy(); }
     wss.handleUpgrade(req, socket, head, (ws) => {
       hub.attach(ws, dev.user_id, dev.device_id);
-      store.touchDevice(dev.device_id);
+      void Promise.resolve(store.touchDevice(dev.device_id)).catch(() => log('warn', 'Agent last-seen update failed'));
     });
+    })().catch(() => { log('warn', 'Agent authentication storage unavailable'); socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n'); socket.destroy(); });
   });
 
-  const housekeeping = setInterval(() => { try { store.vacuumExpired(); } catch { log('warn', 'Audit cleanup failed; will retry next minute'); } }, 60_000);
+  // Async errors must fail safely, not expose database addresses, credentials or stack traces.
+  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    log('error', `relay request failed: ${err instanceof Error ? err.name : 'unexpected error'}`);
+    if (res.headersSent) return next(err);
+    res.status(503).json({ error: 'service_unavailable' });
+  });
+
+  const housekeeping = setInterval(() => { void Promise.resolve(store.vacuumExpired()).catch(() => log('warn', 'Storage cleanup failed; will retry next minute')); }, 60_000);
   housekeeping.unref();
 
-  log('info', `admin user "${admin.username}" ready; db ${cfg.dbFile}`);
+  log('info', `admin user "${admin.username}" ready; storage ${cfg.mongoUri ? 'MongoDB' : 'SQLite'}`);
 
   return {
     http, hub, store,
-    close: async () => { clearInterval(housekeeping); hub.close(); wss.close(); await new Promise<void>((r) => http.close(() => r())); store.close(); },
+    close: async () => { clearInterval(housekeeping); hub.close(); wss.close(); await new Promise<void>((r) => http.close(() => r())); await store.close(); },
   };
 }

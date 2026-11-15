@@ -3,7 +3,7 @@
  * after the relay's client registry was reset, or do not implement DCR.
  * Never register a redirect URI from an unauthenticated /authorize request.
  */
-import type { SqliteStore } from '../store/sqlite.js';
+import type { RelayStore } from '../store/types.js';
 
 export interface ClientRecoveryInput {
   clientId: string;
@@ -56,14 +56,14 @@ export function parseAuthorizeRequest(raw: string, publicUrl: string): ClientRec
   return { clientId, redirectUri, authorizeUrl: url.toString() };
 }
 
-export function approveCallback(
-  store: SqliteStore,
+export async function approveCallback(
+  store: RelayStore,
   input: ClientRecoveryInput,
   label: string,
-): 'registered' | 'added_callback' | 'already_registered' {
+): Promise<'registered' | 'added_callback' | 'already_registered'> {
   const clientId = validateClientId(input.clientId);
   const redirectUri = validateRedirectUri(input.redirectUri);
-  const current = store.getClient(clientId);
+  const current = await store.getClient(clientId);
   if (!current) {
     const full = {
       client_id: clientId,
@@ -74,7 +74,7 @@ export function approveCallback(
       token_endpoint_auth_method: 'none',
       client_id_issued_at: Math.floor(Date.now() / 1000),
     };
-    store.insertClient({ client_id: clientId, client_secret: null, metadata: JSON.stringify(full), created_at: Date.now() });
+    await store.insertClient({ client_id: clientId, client_secret: null, metadata: JSON.stringify(full), created_at: Date.now() });
     return 'registered';
   }
   const metadata = JSON.parse(current.metadata) as Record<string, unknown>;
@@ -85,6 +85,6 @@ export function approveCallback(
   if (!uris.every((item) => typeof item === 'string')) throw new Error('Registered callback metadata is invalid');
   if (uris.includes(redirectUri)) return 'already_registered';
   if (uris.length >= 16) throw new Error('Maximum 16 callbacks per OAuth client');
-  store.updateClientMetadata(clientId, JSON.stringify({ ...metadata, redirect_uris: [...uris, redirectUri] }));
+  await store.updateClientMetadata(clientId, JSON.stringify({ ...metadata, redirect_uris: [...uris, redirectUri] }));
   return 'added_callback';
 }

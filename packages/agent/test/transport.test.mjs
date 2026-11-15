@@ -17,7 +17,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
  const p=path.join(project,'sample.ts'),source='const sourceSecret = "DO_NOT_LOG_SOURCE_7e164";\nconst value = 1;\n';await fs.writeFile(p,source);
  await fs.writeFile(path.join(project,'package.json'),JSON.stringify({name:'mcp-fixture',packageManager:'pnpm@11.24.0',scripts:{test:'node --check sample.ts'}}));
  await fs.writeFile(path.join(project,'AGENTS.md'),'Keep edits small. Verify before completion.');
- const relay=buildRelay({port:0,host:'127.0.0.1',publicUrl:'http://127.0.0.1:3210',trustProxy:false,dbFile:path.join(dir,'relay.sqlite'),sessionSecret:'test-only',adminUser:'admin',adminPassword:'test-only',relayVersion:'integration'},()=>{});
+ const relay=await buildRelay({port:0,host:'127.0.0.1',publicUrl:'http://127.0.0.1:3210',trustProxy:false,dbFile:path.join(dir,'relay.sqlite'),sessionSecret:'test-only',adminUser:'admin',adminPassword:'test-only',relayVersion:'integration'},()=>{});
  await new Promise(r=>relay.http.listen(0,'127.0.0.1',r));
  const url=`http://127.0.0.1:${relay.http.address().port}`,user=relay.store.getUserByName('admin');
  const token=relay.store.issueDeviceToken('integration-pc',user.id,'Test PC','win32'),apiKey=relay.store.createApiKey(user.id,'integration');

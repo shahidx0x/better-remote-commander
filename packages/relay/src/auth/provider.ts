@@ -9,7 +9,8 @@ import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/serv
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { OAuthClientInformationFull, OAuthTokens, OAuthTokenRevocationRequest } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { InvalidGrantError, InvalidRequestError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-import { SqliteStore, randomToken, sha256 } from '../store/sqlite.js';
+import { randomToken, sha256 } from '../store/sqlite.js';
+import type { RelayStore } from '../store/types.js';
 
 export const SCOPES = ['mcp:tools'];
 const AUTH_CODE_TTL_MS = 10 * 60_000;
@@ -17,27 +18,27 @@ const ACCESS_TTL_MS = 60 * 60_000;
 const REFRESH_TTL_MS = 30 * 86_400_000;
 
 export class RelayClientsStore implements OAuthRegisteredClientsStore {
-  constructor(private readonly store: SqliteStore) {}
+  constructor(private readonly store: RelayStore) {}
 
-  getClient(clientId: string): OAuthClientInformationFull | undefined {
-    const row = this.store.getClient(clientId);
+  async getClient(clientId: string): Promise<OAuthClientInformationFull | undefined> {
+    const row = await this.store.getClient(clientId);
     return row ? (JSON.parse(row.metadata) as OAuthClientInformationFull) : undefined;
   }
 
-  registerClient(client: Omit<OAuthClientInformationFull, 'client_id' | 'client_id_issued_at'>): OAuthClientInformationFull {
+  async registerClient(client: Omit<OAuthClientInformationFull, 'client_id' | 'client_id_issued_at'>): Promise<OAuthClientInformationFull> {
     const full: OAuthClientInformationFull = {
       ...client,
       client_id: `cl_${randomToken(16)}`,
       client_id_issued_at: Math.floor(Date.now() / 1000),
     };
     if (client.token_endpoint_auth_method !== 'none') full.client_secret = randomToken(32);
-    this.store.insertClient({ client_id: full.client_id, client_secret: full.client_secret ?? null, metadata: JSON.stringify(full), created_at: Date.now() });
+    await this.store.insertClient({ client_id: full.client_id, client_secret: full.client_secret ?? null, metadata: JSON.stringify(full), created_at: Date.now() });
     return full;
   }
 }
 
 export interface ProviderDeps {
-  store: SqliteStore;
+  store: RelayStore;
   /** Resolve logged-in user id from the request cookie, or null. */
   currentUserId: (res: Response) => string | null;
   /** Render login page that returns to `returnTo` after success. */
@@ -72,12 +73,12 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   }
 
   /** Called by the consent POST handler after the user approved. Returns the redirect URL. */
-  issueCode(pendingId: string, userId: string): string {
+  async issueCode(pendingId: string, userId: string): Promise<string> {
     const p = this.pending.get(pendingId);
     if (!p) throw new InvalidRequestError('authorization request expired');
     this.pending.delete(pendingId);
     const code = randomToken(32);
-    this.deps.store.insertAuthCode({
+    await this.deps.store.insertAuthCode({
       code, client_id: p.client.client_id, user_id: userId, code_challenge: p.params.codeChallenge,
       redirect_uri: p.params.redirectUri, scopes: (p.params.scopes ?? SCOPES).join(' '),
       resource: p.params.resource?.toString() ?? null, expires_at: Date.now() + AUTH_CODE_TTL_MS,
@@ -101,13 +102,13 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   }
 
   async challengeForAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
-    const row = this.deps.store.peekAuthCode(authorizationCode);
+    const row = await this.deps.store.peekAuthCode(authorizationCode);
     if (!row || row.client_id !== client.client_id) throw new InvalidGrantError('invalid authorization code');
     return row.code_challenge;
   }
 
   async exchangeAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string, _codeVerifier?: string, redirectUri?: string, resource?: URL): Promise<OAuthTokens> {
-    const row = this.deps.store.takeAuthCode(authorizationCode);
+    const row = await this.deps.store.takeAuthCode(authorizationCode);
     if (!row || row.client_id !== client.client_id) throw new InvalidGrantError('invalid authorization code');
     if (redirectUri && redirectUri !== row.redirect_uri) throw new InvalidGrantError('redirect_uri mismatch');
     const requestedResource = resource?.toString() ?? null;
@@ -116,11 +117,11 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   }
 
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
-    const row = this.deps.store.getToken(refreshToken, 'refresh');
+    const row = await this.deps.store.getToken(refreshToken, 'refresh');
     if (!row || row.client_id !== client.client_id) throw new InvalidGrantError('invalid refresh token');
     const requestedResource = resource?.toString() ?? null;
     if (row.resource && requestedResource && requestedResource !== row.resource) throw new InvalidGrantError('resource mismatch');
-    this.deps.store.revokeToken(refreshToken);
+    await this.deps.store.revokeToken(refreshToken);
     const granted = row.scopes.split(' ');
     const wanted = scopes?.length ? scopes.filter((s) => granted.includes(s)) : granted;
     return this.mint(client.client_id, row.user_id, wanted, requestedResource ?? row.resource);
@@ -128,11 +129,11 @@ export class RelayOAuthProvider implements OAuthServerProvider {
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     if (token.startsWith('brc_ak_') || token.startsWith('sesrdp_ak_')) {
-      const key = this.deps.store.getApiKey(token);
+      const key = await this.deps.store.getApiKey(token);
       if (!key) throw new InvalidTokenError('invalid or revoked API key');
       return { token, clientId: `apikey:${key.name}`, scopes: SCOPES, expiresAt: Math.floor(Date.now() / 1000) + 3600, extra: { userId: key.user_id, apiKey: key.prefix } };
     }
-    const row = this.deps.store.getToken(token, 'access');
+    const row = await this.deps.store.getToken(token, 'access');
     if (!row) throw new InvalidTokenError('invalid or expired access token');
     return {
       token, clientId: row.client_id, scopes: row.scopes.split(' '),
@@ -143,15 +144,15 @@ export class RelayOAuthProvider implements OAuthServerProvider {
   }
 
   async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
-    const row = this.deps.store.getToken(request.token, 'access') ?? this.deps.store.getToken(request.token, 'refresh');
-    if (row && row.client_id === client.client_id) this.deps.store.revokeToken(request.token);
+    const row = await this.deps.store.getToken(request.token, 'access') ?? await this.deps.store.getToken(request.token, 'refresh');
+    if (row && row.client_id === client.client_id) await this.deps.store.revokeToken(request.token);
   }
 
-  private mint(clientId: string, userId: string, scopes: string[], resource: string | null): OAuthTokens {
+  private async mint(clientId: string, userId: string, scopes: string[], resource: string | null): Promise<OAuthTokens> {
     const access = `brc_at_${randomToken(32)}`;
     const refresh = `brc_rt_${randomToken(32)}`;
     const now = Date.now();
-    this.deps.store.insertToken({ token_hash: sha256(access), kind: 'access', client_id: clientId, user_id: userId, scopes: scopes.join(' '), resource, expires_at: now + ACCESS_TTL_MS, created_at: now, revoked: 0 });
+    await this.deps.store.insertToken({ token_hash: sha256(access), kind: 'access', client_id: clientId, user_id: userId, scopes: scopes.join(' '), resource, expires_at: now + ACCESS_TTL_MS, created_at: now, revoked: 0 });
     this.deps.store.insertToken({ token_hash: sha256(refresh), kind: 'refresh', client_id: clientId, user_id: userId, scopes: scopes.join(' '), resource, expires_at: now + REFRESH_TTL_MS, created_at: now, revoked: 0 });
     return { access_token: access, token_type: 'bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: refresh, scope: scopes.join(' ') };
   }

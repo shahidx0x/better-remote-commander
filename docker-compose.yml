@@ -16,6 +16,9 @@ x-relay: &relay
     BRC_ADMIN_USER: ${BRC_ADMIN_USER:-admin}
     BRC_ADMIN_PASSWORD: ${BRC_ADMIN_PASSWORD:?set BRC_ADMIN_PASSWORD in .env}
     BRC_SESSION_SECRET: ${BRC_SESSION_SECRET:?set BRC_SESSION_SECRET in .env}
+    BRC_DB: ${BRC_DB:-/data/relay.sqlite}
+    MONGODB_URI: ${MONGODB_URI:-}
+    MONGODB_DB: ${MONGODB_DB:-}
     LOG_LEVEL: ${LOG_LEVEL:-info}
   volumes:
     - relay-data:/data

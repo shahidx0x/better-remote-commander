@@ -112,7 +112,7 @@ test('real CLI auto-connects after four seconds; live menu pauses only new calls
   const home = path.join(scratch, 'live-agent'); await fs.mkdir(home);
   await fs.writeFile(path.join(home, 'config.json'), JSON.stringify({ allowedDirectories: [home], telemetryEnabled: false }));
   const codeFile = path.join(home, 'sample.txt'); await fs.writeFile(codeFile, 'preserve this file');
-  const relay = buildRelay({ port: 0, host: '127.0.0.1', publicUrl: 'http://127.0.0.1:3210', trustProxy: false, dbFile: path.join(scratch, 'relay.sqlite'), sessionSecret: 'autostart-test', adminUser: 'admin', adminPassword: 'autostart-test', relayVersion: 'autostart-test' }, () => {});
+  const relay = await buildRelay({ port: 0, host: '127.0.0.1', publicUrl: 'http://127.0.0.1:3210', trustProxy: false, dbFile: path.join(scratch, 'relay.sqlite'), sessionSecret: 'autostart-test', adminUser: 'admin', adminPassword: 'autostart-test', relayVersion: 'autostart-test' }, () => {});
   await new Promise(resolve => relay.http.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${relay.http.address().port}`, user = relay.store.getUserByName('admin');
   const token = relay.store.issueDeviceToken('auto-pc', user.id, 'Auto PC', 'win32');

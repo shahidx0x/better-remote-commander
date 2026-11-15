@@ -22,6 +22,7 @@
     "pack:all": "pnpm -r --filter \"./packages/*\" exec pnpm pack --pack-destination ../../dist-pack",
     "publish:all": "pnpm -r --filter \"./packages/*\" publish --access public",
     "test:unit": "node --test packages/relay/test/unit.test.mjs",
+    "test:mongo": "node packages/relay/test/mongo.e2e.mjs",
     "test:e2e": "node scripts/e2e-all.mjs",
     "test": "pnpm test:unit && pnpm test:agent && pnpm test:e2e",
     "test:agent": "node --test packages/agent/test/*.test.mjs",

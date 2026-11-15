@@ -1,7 +1,7 @@
 # brc-relay
 
 Relay server for **Better Remote Commander** — the self-hosted bridge between AI clients (Claude, ChatGPT) and your
-machines running [`brc-agent`](https://www.npmjs.com/package/brc-agent). One process, SQLite, your domain.
+machines running [`brc-agent`](https://www.npmjs.com/package/brc-agent). One process, SQLite **or MongoDB**, your domain.
 
 Doors it exposes:
 - `/mcp` — remote MCP (Streamable HTTP) with OAuth 2.0 (PKCE, dynamic client registration) or API-key bearer auth
@@ -32,7 +32,75 @@ Recommended Easypanel settings are **Build Path `/`** with **Dockerfile `package
 | `TRUST_PROXY` | `true` behind a proxy/tunnel |
 | `BRC_ADMIN_USER`, `BRC_ADMIN_PASSWORD` | dashboard login (single-user) |
 | `BRC_SESSION_SECRET` | cookie signing secret |
-| `BRC_DB` | SQLite file (default `data/relay.sqlite`) |
+| `BRC_DB` | SQLite file (default `data/relay.sqlite`); used only when `MONGODB_URI` is absent |
+| `MONGODB_URI` | **Optional** MongoDB connection string; when supplied, MongoDB is the sole persistent backend, no SQLite fallback |
+| `MONGODB_DB` | Optional dedicated database name override (otherwise uses the database from the URI, or `brc_relay` if no database is specified) |
+
+## Optional MongoDB persistence (Easypanel or self-hosted)
+
+Use **either** SQLite **or** MongoDB. No second SQLite database or MongoDB cache is created
+when MongoDB is selected. All persistent BRC accounts, OAuth clients/codes, access
+and refresh tokens, device pairings, API keys, and private connection links are
+stored natively in MongoDB. Recent tool activity and CMD logs remain RAM-only.
+
+In **Easypanel -> better-remote -> Environment**, keep your existing
+PUBLIC_URL, PORT, BRC_ADMIN_USER, BRC_ADMIN_PASSWORD, BRC_SESSION_SECRET and
+add just:
+
+```dotenv
+MONGODB_URI=mongodb://<username>:<password>@<mongodb-internal-host>:27017/brc_relay?authSource=admin
+# Optional override, only if the URI does not select the desired database:
+MONGODB_DB=brc_relay
+```
+
+Use the actual MongoDB service host, database and credentials from your
+deployment. Keep its data directory on its **own persistent volume**, and use
+TLS for off-host connections. Percent-encode special characters in the URI.
+With `MONGODB_URI` set, `BRC_DB` is ignored; omit `MONGODB_URI` to continue
+using SQLite and the existing `BRC_DB=/data/relay.sqlite` volume.
+
+**Startup safety:** If the MongoDB URI is configured but the server, permissions,
+or indexes are unavailable, BRC fails startup rather than starting an empty
+SQLite database. The `/health` endpoint reports `"storage":"mongodb"` and
+checks MongoDB connectivity; a connection failure returns HTTP 503.
+Database credentials are never included in BRC logs.
+
+### Preserve existing SQLite registrations when switching
+
+Changing the environment variable does **not** automatically copy existing
+SQLite state. To keep **existing devices, OAuth clients, login IDs, API tokens
+and private links**, migrate the old SQLite DB **before** pointing the live
+relay at a fresh MongoDB database:
+
+1. Back up your current persistent SQLite database and its WAL safely (stop the
+   old relay or take a consistent SQLite backup). If the old ephemeral volume
+   has already been deleted, BRC cannot reconstruct the missing credentials.
+2. Make the backup accessible to a computer/container that can reach MongoDB.
+   Use an **empty dedicated MongoDB database**.
+3. From the repository root, after `pnpm build`, run:
+
+```sh
+BRC_DB=/path/to/backup/relay.sqlite MONGODB_URI='mongodb://USER:PASSWORD@HOST:27017/brc_relay?authSource=admin' pnpm --filter brc-relay migrate:sqlite-to-mongo --dry-run
+BRC_DB=/path/to/backup/relay.sqlite MONGODB_URI='mongodb://USER:PASSWORD@HOST:27017/brc_relay?authSource=admin' pnpm --filter brc-relay migrate:sqlite-to-mongo
+```
+
+For PowerShell, set `$env:BRC_DB` and `$env:MONGODB_URI` separately,
+then run `pnpm.cmd --filter brc-relay migrate:sqlite-to-mongo`.
+
+The import is insert-only (does not overwrite MongoDB records), ignores
+expired temporary credentials, and **never migrates activity/audit logs**.
+If interrupted, inspect the destination before using `--resume`. Keep the
+original backup for rollback. Use a dedicated BRC MongoDB database to avoid
+mixing different products' records.
+
+4. Keep your original **BRC_SESSION_SECRET** unchanged if you want existing
+   signed admin sessions to remain valid. Set `MONGODB_URI` in Easypanel,
+   redeploy, then verify `/health` includes `"storage":"mongodb"` and your
+   paired devices still appear.
+
+Your agent and MCP URLs do not change. A MongoDB database also needs persistent
+storage and backups; selecting MongoDB alone cannot prevent data loss if the
+MongoDB service is itself ephemeral.
 
 ## Connect clients
 
@@ -42,7 +110,7 @@ Recommended Easypanel settings are **Build Path `/`** with **Dockerfile `package
 3. Copy the generated `https://your-relay.example/c/brc_link_<random-secret>/mcp` into any client that supports a custom **Streamable HTTP MCP** server with **No authentication**.
 4. Revoke it from the same page when no longer needed. Expired links stop working automatically.
 
-This skips the OAuth login/redirect flow **but is not public anonymous access**. The URL itself is a 256-bit bearer credential: anyone holding it can use the permitted tools. The raw secret is shown once, only its SHA-256 hash is stored in the relay's operational SQLite database, and no per-call activity records are saved. Treat the URL like a password, never place it in issues/screenshots/logs, and do not expose the relay's port 3000 over unencrypted HTTP. Reverse proxies and hosting providers can independently log URL paths; configure their access-log redaction or disable access logging. New connections require the user's authenticated admin session and CSRF token.
+This skips the OAuth login/redirect flow **but is not public anonymous access**. The URL itself is a 256-bit bearer credential: anyone holding it can use the permitted tools. The raw secret is shown once, only its SHA-256 hash is stored in the selected relay database (SQLite or MongoDB), and no per-call activity records are saved. Treat the URL like a password, never place it in issues/screenshots/logs, and do not expose the relay's port 3000 over unencrypted HTTP. Reverse proxies and hosting providers can independently log URL paths; configure their access-log redaction or disable access logging. New connections require the user's authenticated admin session and CSRF token.
 
 ### Repair OAuth for any wrapper you trust
 
@@ -64,11 +132,11 @@ Any HTTPS callback you explicitly trust is allowed; localhost HTTP is also
 supported for native apps. OAuth still requires PKCE S256 and the normal
 authorization consent. A new callback for an existing ID needs separate approval.
 
-**Important:** Persist `/data` as an Easypanel volume. The SQLite file
-`/data/relay.sqlite` contains the registered OAuth clients, accounts,
-tokens and device pairing. Without persistent storage, Docker image recreation
-can erase those registrations. Do not disable Cloudflare HTTPS proxy or remove
-OAuth redirect validation to fix a stale client ID.
+**Important:** If using SQLite, persist `/data` as an Easypanel volume. The file
+`/data/relay.sqlite` contains OAuth clients, accounts, tokens and device pairings;
+without a persistent volume, Docker recreation can erase them. Alternatively,
+configure MongoDB as described below, with **persistent storage on the MongoDB service**.
+Do not disable Cloudflare HTTPS proxy or remove OAuth redirect validation to fix a stale client ID.
 
 **Existing OAuth remains available** and is appropriate for clients requiring it:
 - **Claude**: Settings → Connectors → add `https://your-relay.example/mcp` → sign in → Allow

@@ -8,7 +8,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { DeviceHub } from '../device-hub.js';
-import type { SqliteStore } from '../store/sqlite.js';
+import type { RelayStore } from '../store/types.js';
 import { invokeTool, listUserDevices, type InvokeContext } from './invoke.js';
 import { BUNDLED_AGENT_TOOL_CATALOG } from './agent-tools.catalog.js';
 
@@ -74,8 +74,10 @@ const ROUTING_DESCRIPTIONS = new Map(BUNDLED_AGENT_TOOL_CATALOG.map(t => [t.name
 // agent has not yet been restarted with its updated tool definitions.
 const MULTI_FILE_INPUT_SCHEMA = BUNDLED_AGENT_TOOL_CATALOG.find(t => t.name === 'read_multiple_files')?.inputSchema;
 /** Stable tool set plus online agent-specific schemas; execution still requires a live, owned device. */
-export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
-  const online = hub.list(userId).filter((d) => !store.getDevice(d.deviceId)?.paused);
+export async function liveTools(hub: DeviceHub, store: RelayStore, userId: string) {
+  const connected = hub.list(userId);
+  const pauseStates = await Promise.all(connected.map(d => store.getDevice(d.deviceId)));
+  const online = connected.filter((d,i) => !pauseStates[i]?.paused);
   const devices=online.map(d=>hub.get(d.deviceId)!).filter(Boolean);
   let cache=schemaCaches.get(hub);if(!cache){cache=new Map();schemaCaches.set(hub,cache);}
   const prior=cache.get(userId);
@@ -116,12 +118,12 @@ export const TOOL_ROUTING_GUIDANCE = [
   'Never invent a tool name, path, file contents, running service, test result, subagent or successful edit. If a tool is unavailable or fails, say so and use the observed output. Tool descriptions are guidance, not permission; device ownership, scope and safe edit checks still apply.'
 ].join(' ');
 
-export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full'): Server {
+export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full'): Server {
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} },
     instructions: TOOL_ROUTING_GUIDANCE + (access === 'read' ? ' THIS CONNECTION IS READ-ONLY: batch_tools accepts only read tools; do not attempt terminal or file mutations.' : '') });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const { online, tools } = liveTools(hub, store, ctx.userId);
+    const { online, tools } = await liveTools(hub, store, ctx.userId);
     const selected = access === 'read' ? tools.filter(t => READ_ONLY_TOOLS.has(t.name)).map(t =>
       t.name === 'batch_tools' ? { ...t, description: 'READ-ONLY BATCH: all nested tools must be permitted reads. ' + t.description,
         annotations: { ...t.annotations, readOnlyHint: true, destructiveHint: false } } : t) : tools;
@@ -131,7 +133,7 @@ export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpCont
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
     if (name === 'list_devices') {
-      return { content: [{ type: 'text', text: JSON.stringify({ devices: listUserDevices(hub, store, ctx.userId) }, null, 2) }] };
+      return { content: [{ type: 'text', text: JSON.stringify({ devices: await listUserDevices(hub, store, ctx.userId) }, null, 2) }] };
     }
     // Defense in depth: hiding a write tool from tools/list is not enough.
     if (access === 'read' && !readOnlyToolAllowed(name, args))

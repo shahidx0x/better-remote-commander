@@ -171,15 +171,15 @@ test('manual OAuth recovery validates issuer, callback, PKCE and explicit owner 
   assert.throws(() => parseAuthorizeRequest(known.replace('my-relay.example%2Fmcp', 'another.example%2Fmcp'), base), /resource/);
   const store = new SqliteStore(':memory:');
   try {
-    assert.equal(approveCallback(store, parsed, 'Wrapper'), 'registered');
+    assert.equal(await approveCallback(store, parsed, 'Wrapper'), 'registered');
     const row = store.getClient(parsed.clientId);
     const metadata = JSON.parse(row.metadata);
     assert.equal(metadata.token_endpoint_auth_method, 'none');
     assert.deepEqual(metadata.redirect_uris, [parsed.redirectUri]);
-    assert.equal(approveCallback(store, parsed, 'Wrapper'), 'already_registered');
-    assert.equal(approveCallback(store, { clientId: parsed.clientId, redirectUri: 'https://another.example/cb' }, 'Other'), 'added_callback');
+    assert.equal(await approveCallback(store, parsed, 'Wrapper'), 'already_registered');
+    assert.equal(await approveCallback(store, { clientId: parsed.clientId, redirectUri: 'https://another.example/cb' }, 'Other'), 'added_callback');
     assert.deepEqual(JSON.parse(store.getClient(parsed.clientId).metadata).redirect_uris, [parsed.redirectUri, 'https://another.example/cb']);
-    assert.throws(() => approveCallback(store, { clientId: parsed.clientId, redirectUri: 'http://remote.example/cb' }, 'Bad'), /HTTPS/);
+    await assert.rejects(() => approveCallback(store, { clientId: parsed.clientId, redirectUri: 'http://remote.example/cb' }, 'Bad'), /HTTPS/);
   } finally { store.close(); }
 });
 
@@ -191,7 +191,7 @@ test('MCP catalog is stable before agent connects, while online, and after disco
   const store = new SqliteStore(':memory:');
   try {
     const owner = store.upsertUser('owner', 'secret');
-    const offline = liveTools(hub, store, owner.id);
+    const offline = await liveTools(hub, store, owner.id);
     const names = offline.tools.map(t => t.name);
     assert.equal(offline.online, 0);
     assert.equal(names.length, BUNDLED_AGENT_TOOL_CATALOG.length);
@@ -207,7 +207,7 @@ test('MCP catalog is stable before agent connects, while online, and after disco
       { name: 'find_references', description: 'WRONG: this is a guaranteed semantic language-server reference search', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
       { name: 'device_extra', description: 'newer agent extra', inputSchema: { type: 'object', properties: {} } },
     ]));
-    const online = liveTools(hub, store, owner.id);
+    const online = await liveTools(hub, store, owner.id);
     assert.equal(online.online, 1);
     assert.ok(online.tools.some(t => t.name === 'device_extra'));
     assert.match(online.tools.find(t => t.name === 'read_file').description, /ONE FILE OR URL ONLY/, 'relay overrides stale agent description with recommended multi-file routing');
@@ -216,7 +216,7 @@ test('MCP catalog is stable before agent connects, while online, and after disco
     assert.doesNotMatch(online.tools.find(t => t.name === 'find_references').description, /WRONG: this is a guaranteed semantic/, 'incorrect claims from older agents are not advertised');
     assert.ok(names.every(n => online.tools.some(t => t.name === n)), 'online does not hide stable tools');
     socket.close(1000, 'done');
-    const recovered = liveTools(hub, store, owner.id);
+    const recovered = await liveTools(hub, store, owner.id);
     assert.equal(recovered.online, 0);
     assert.deepEqual(recovered.tools.map(t => t.name), names, 'offline and reconnect states keep the same base catalog');
     assert.equal(hub.resolveDefault(owner.id), null, 'advertised offline tools are not executable on an offline device');
@@ -259,4 +259,48 @@ test('LLM routing guidance chooses batches for known files and read-only batchin
     {calls: Array(65).fill({tool: 'read_file', arguments: {path:'/x'}})},
     {calls: []}, {calls: [{ tool: 'read_file', arguments: 'not-an-object' }]}, null,
   ]) assert.equal(readOnlyToolAllowed('batch_tools', bad), false);
+});
+
+test('MongoDB is opt-in, no silent SQLite fallback on bad URI', async () => {
+  const { buildRelay, loadConfig } = await import('../dist/app.js');
+  const { MongoStore } = await import('../dist/store/mongo.js');
+  const { mkdtempSync, existsSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const folder = mkdtempSync(join(tmpdir(), 'brc-mongo-select-'));
+  try {
+    const dbFile = join(folder, 'must-not-exist.sqlite');
+    const cfg = { ...loadConfig(), dbFile, mongoUri: 'not-a-mongodb-uri', adminPassword: 'strong-test-pass', sessionSecret: 'only-for-tests' };
+    await assert.rejects(() => buildRelay(cfg, () => {}), /MONGODB_URI/);
+    assert.equal(existsSync(dbFile), false, 'selection failure must not create an empty SQLite database');
+    await assert.rejects(() => MongoStore.connect('http://not-a-database'), /MONGODB_URI/);
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('SQLite-to-Mongo migration dry run preserves auth state but excludes audit logs', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const folder = mkdtempSync(join(tmpdir(), 'brc-sqlite-migrate-'));
+  try {
+    const file = join(folder, 'previous-relay.sqlite');
+    const s = new SqliteStore(file);
+    const user = s.upsertUser('admin', 'original-secret');
+    const pairedToken = s.issueDeviceToken('pc-001', user.id, 'My PC', 'win32');
+    s.insertClient({ client_id: 'client-a', client_secret: null, metadata: '{"client_name":"AI"}', created_at: Date.now() });
+    s.createConnectionLink(user.id, 'backup', 'read', 7);
+    s.audit({ ts: Date.now(), user_id: user.id, device_id: 'pc-001', client: 'chat', tool: 'read_file', args_hash: null, ok: 1, ms: 1, error: null });
+    s.close();
+    const res = spawnSync(process.execPath, ['packages/relay/dist/store/migrate.js', '--dry-run'], {
+      cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, BRC_DB: file, MONGODB_URI: '' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /users: 1/);
+    assert.match(res.stdout, /oauth_clients: 1/);
+    assert.match(res.stdout, /devices: 1/);
+    assert.match(res.stdout, /connection_links: 1/);
+    assert.doesNotMatch(res.stdout, /audit:\s*\d+|original-secret|brc_dev_/i);
+    assert.ok(pairedToken.startsWith('brc_dev_'));
+  } finally { rmSync(folder, { recursive: true, force: true }); }
 });

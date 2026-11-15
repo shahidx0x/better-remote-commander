@@ -14,7 +14,7 @@ const dir=mkdtempSync(path.join(realpathSync.native(tmpdir()),'brc-io-bench-'));
 const project=path.join(dir,'project'),home=path.join(dir,'agent');await fs.mkdir(project);
 const source=i=>`// fixture ${i}\nexport function sample${i}() { return ${i}; }\n`;
 for(let i=0;i<N;i++){await fs.writeFile(path.join(project,`read-${i}.ts`),source(i));await fs.writeFile(path.join(project,`single-${i}.txt`),'baseline');await fs.writeFile(path.join(project,`batch-${i}.txt`),'baseline');await fs.writeFile(path.join(project,`parallel-${i}.txt`),'baseline');}
-const relay=buildRelay({port:0,host:'127.0.0.1',publicUrl:'http://127.0.0.1:3210',trustProxy:false,dbFile:path.join(dir,'relay.sqlite'),sessionSecret:randomBytes(20).toString('hex'),adminUser:'benchmark',adminPassword:randomBytes(20).toString('hex'),relayVersion:'benchmark'},()=>{});
+const relay=await buildRelay({port:0,host:'127.0.0.1',publicUrl:'http://127.0.0.1:3210',trustProxy:false,dbFile:path.join(dir,'relay.sqlite'),sessionSecret:randomBytes(20).toString('hex'),adminUser:'benchmark',adminPassword:randomBytes(20).toString('hex'),relayVersion:'benchmark'},()=>{});
 await new Promise(r=>relay.http.listen(0,'127.0.0.1',r));
 const url=`http://127.0.0.1:${relay.http.address().port}`,u=relay.store.getUserByName('benchmark');
 const token=relay.store.issueDeviceToken('bench-device',u.id,'Benchmark','win32'),key=relay.store.createApiKey(u.id,'temporary benchmark');

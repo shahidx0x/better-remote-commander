@@ -5,6 +5,7 @@ applyLegacyEnv();
 import { buildRelay, loadConfig } from './app.js';
 
 const cfg = loadConfig();
+if (cfg.mongoUri && !cfg.mongoDb) console.log('Using MongoDB database selected by MONGODB_URI; set MONGODB_DB to override.');
 if (!cfg.adminPassword) { console.error('BRC_ADMIN_PASSWORD is required'); process.exit(2); }
 if (!cfg.sessionSecret) {
   cfg.sessionSecret = randomBytes(32).toString('hex');
@@ -16,7 +17,7 @@ const log = (level: string, msg: string) => {
   (level === 'error' || level === 'warn' ? console.error : console.log)(line);
 };
 
-const relay = buildRelay(cfg, log);
+const relay = await buildRelay(cfg, log);
 relay.http.listen(cfg.port, cfg.host, () => {
   log('info', `brc-relay ${cfg.relayVersion} listening on ${cfg.host}:${cfg.port}`);
   log('info', `public URL ${cfg.publicUrl}  MCP: ${cfg.publicUrl}/mcp  pair: ${cfg.publicUrl}/device/verify`);

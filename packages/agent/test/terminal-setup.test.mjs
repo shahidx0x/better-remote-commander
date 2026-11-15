@@ -142,7 +142,7 @@ test('real CLI change failure preserves the old saved URL and token', { timeout:
 });
 test('first-run UI pairs with a loopback relay; saved connect and confirmed forgetting work', { timeout: 30000 }, async () => {
   const home = path.join(scratch, 'real-ui'); await fs.mkdir(home); await fs.writeFile(path.join(home, 'config.json'), JSON.stringify({ allowedDirectories: [home], telemetryEnabled: false }));
-  const relay = buildRelay({ port: 0, host: '127.0.0.1', publicUrl: 'http://127.0.0.1:3210', trustProxy: false, dbFile: path.join(scratch, 'ui-relay.sqlite'), sessionSecret: 'ui-fixture', adminUser: 'admin', adminPassword: 'ui-fixture', relayVersion: 'ui-fixture' }, () => {});
+  const relay = await buildRelay({ port: 0, host: '127.0.0.1', publicUrl: 'http://127.0.0.1:3210', trustProxy: false, dbFile: path.join(scratch, 'ui-relay.sqlite'), sessionSecret: 'ui-fixture', adminUser: 'admin', adminPassword: 'ui-fixture', relayVersion: 'ui-fixture' }, () => {});
   await new Promise(r => relay.http.listen(0, '127.0.0.1', r)); const url = `http://127.0.0.1:${relay.http.address().port}`;
   let child = childCli(home, ['--setup', '--no-browser']);
   try {

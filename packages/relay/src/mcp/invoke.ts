@@ -2,7 +2,7 @@
  * Tool-invocation path for /mcp: device resolution, pause check, and audit.
  */
 import type { DeviceHub } from '../device-hub.js';
-import type { SqliteStore } from '../store/sqlite.js';
+import type { RelayStore } from '../store/types.js';
 import type { ToolResult } from 'brc-shared';
 
 export interface InvokeContext { userId: string; clientId: string }
@@ -11,15 +11,15 @@ export type InvokeOutcome =
   | { ok: false; status: number; message: string };
 
 
-export function listUserDevices(hub: DeviceHub, store: SqliteStore, userId: string) {
+export async function listUserDevices(hub: DeviceHub, store: RelayStore, userId: string) {
   const online = new Set(hub.list(userId).map((d) => d.deviceId));
-  return store.listDevices(userId).map((d) => ({
+  return (await store.listDevices(userId)).map((d) => ({
     deviceId: d.device_id, name: d.name, platform: d.platform, online: online.has(d.device_id), paused: !!d.paused, lastSeen: d.last_seen,
   }));
 }
 
 export async function invokeTool(
-  hub: DeviceHub, store: SqliteStore, ctx: InvokeContext,
+  hub: DeviceHub, store: RelayStore, ctx: InvokeContext,
   tool: string, rawArgs: Record<string, unknown> | undefined, opts: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<InvokeOutcome> {
   const args = { ...(rawArgs ?? {}) };
@@ -32,7 +32,7 @@ export async function invokeTool(
   }
   const dev = hub.get(deviceId);
   if (!dev || dev.ownerId !== ctx.userId) return { ok: false, status: 404, message: `Device ${deviceId} is not online or not yours.` };
-  if (store.getDevice(deviceId)?.paused) return { ok: false, status: 423, message: `Device ${dev.info.name} is paused by its owner.` };
+  if ((await store.getDevice(deviceId))?.paused) return { ok: false, status: 423, message: `Device ${dev.info.name} is paused by its owner.` };
 
   const started = Date.now();
   try {
@@ -40,8 +40,8 @@ export async function invokeTool(
     const ms = Date.now() - started;
     result._meta = {...result._meta, auditPersisted:false, activityStorage:"memory-only"};
     try {
-      store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: null, ok: result.isError ? 0 : 1, ms, error: null });
-      store.touchDevice(deviceId);
+      await store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: null, ok: result.isError ? 0 : 1, ms, error: null });
+      await store.touchDevice(deviceId);
     } catch {
       // The command may already have changed files. Never invite a blind replay.
       result._meta = {...result._meta, auditPersisted:false, auditWarning:'Live activity update failed; tool result is still valid.'};
@@ -50,7 +50,7 @@ export async function invokeTool(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     try {
-    store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: null, ok: 0, ms: Date.now() - started, error: /^[A-Z_]+/.exec(message)?.[0] ?? 'RELAY_ERROR' });
+    await store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: null, ok: 0, ms: Date.now() - started, error: /^[A-Z_]+/.exec(message)?.[0] ?? 'RELAY_ERROR' });
     } catch { /* Preserve the original execution error if diagnostic storage also fails. */ }
     const status = message.startsWith('UNKNOWN_TOOL') ? 404 : message.startsWith('CALL_TIMEOUT') ? 504 : /^(?:RELAY_BUSY|DEVICE_BUSY|RELAY_BACKPRESSURE)/.test(message) ? 503 : message.startsWith('CALL_TOO_LARGE') ? 413 : 502;
     return { ok: false, status, message: `Relay error: ${message}` };
