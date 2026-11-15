@@ -62,7 +62,7 @@ export function connectionLinksPage(
 <button type="submit" class="secondary danger">Revoke URL</button></form></div>`).join('') : '<p>No active connection URLs. Create one below.</p>';
   return layout('Connect without OAuth', `<h1>Connect without OAuth</h1>
 <p>Create a private URL once and paste it into any MCP client that supports a custom Streamable HTTP URL and no-auth connections. No OAuth callback or headers to configure.</p>
-<p><strong>Security:</strong> the randomly generated URL is a secret credential. Use HTTPS and revoke URLs you no longer need. The ordinary <code>/mcp</code> OAuth endpoint remains unchanged.</p>
+<p><strong>Security:</strong> the randomly generated URL is a secret credential. Use HTTPS and revoke URLs you no longer need, especially when choosing a 1- or 2-year expiry. The ordinary <code>/mcp</code> OAuth endpoint remains unchanged.</p>
 ${error ? `<p class="err">${esc(error)}</p>` : ''}${banner}
 <div class="section panel"><h2>Create a connection URL</h2>
 <form method="post" action="/auth/links">
@@ -72,7 +72,7 @@ ${error ? `<p class="err">${esc(error)}</p>` : ''}${banner}
 <option value="read" selected>Read only (safer)</option>
 <option value="full">Full access (files + terminal + other tools)</option></select>
 <label>Expires after</label><select name="days" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text)">
-<option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option><option value="90">90 days</option></select>
+<option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year (365 days)</option><option value="730">2 years (730 days)</option></select>
 <div class="row"><button type="submit" class="primary">Generate private MCP URL</button></div></form></div>
 <div class="section"><h2>Active connections (${links.length})</h2><div class="device-grid">${rows}</div></div>
 <p class="section"><a href="/admin">Back to admin</a></p>`, 'wide');

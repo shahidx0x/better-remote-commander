@@ -240,7 +240,7 @@ export class MongoStore implements RelayStore {
   /* ---------- private URL capabilities ---------- */
   async createConnectionLink(userId: string, rawName: string, mode: 'read' | 'full', days = 7): Promise<{ id: string; key: string; expiresAt: number }> {
     if (!['read', 'full'].includes(mode)) throw new Error('Invalid connection access mode');
-    if (![1, 7, 30, 90].includes(days)) throw new Error('Invalid connection lifetime');
+    if (![1, 7, 30, 90, 365, 730].includes(days)) throw new Error('Invalid connection lifetime');
     const name = rawName.trim().slice(0, 80);
     if (!name) throw new Error('Connection name is required');
     const n = await this.col('connection_links').countDocuments({ user_id: userId, expires_at: { $gt: Date.now() } }, { limit: 21 });

@@ -140,7 +140,18 @@ test('URL-only MCP credentials: hashed storage, owner-scoped revoke, expiry and 
     s.vacuumExpired();
     assert.equal(s.listConnectionLinks(first.id).length, 0);
     assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM connection_links').get().n, 0);
-    assert.throws(() => s.createConnectionLink(first.id, 'x', 'full', 365));
+    // Long-lived URLs must work while remaining immediately revocable.
+    for (const days of [365, 730]) {
+      const before = Date.now();
+      const annual = s.createConnectionLink(first.id, 'annual link', 'full', days);
+      assert.ok(annual.expiresAt >= before + days * 86_400_000);
+      assert.ok(annual.expiresAt <= Date.now() + days * 86_400_000);
+      assert.equal(s.getConnectionLink(annual.key)?.expires_at, annual.expiresAt);
+      assert.equal(s.revokeConnectionLink(first.id, annual.id), true);
+      assert.equal(s.getConnectionLink(annual.key), undefined);
+    }
+    assert.throws(() => s.createConnectionLink(first.id, 'x', 'full', 731), /Invalid connection lifetime/);
+    assert.throws(() => s.createConnectionLink(first.id, 'x', 'full', 366), /Invalid connection lifetime/);
     assert.throws(() => s.createConnectionLink(first.id, 'x', 'nope', 7));
     assert.throws(() => s.createConnectionLink(first.id, '', 'read', 7));
     for (let i = 0; i < 20; i++) s.createConnectionLink(first.id, 'test ' + i, 'read', 7);
@@ -303,4 +314,13 @@ test('SQLite-to-Mongo migration dry run preserves auth state but excludes audit 
     assert.doesNotMatch(res.stdout, /audit:\s*\d+|original-secret|brc_dev_/i);
     assert.ok(pairedToken.startsWith('brc_dev_'));
   } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('connection page displays one- and two-year expiration choices', async () => {
+  const { connectionLinksPage } = await import('../dist/pages/admin.js');
+  const page = connectionLinksPage([], 'test-csrf');
+  assert.match(page, /<option value="365">1 year \(365 days\)<\/option>/);
+  assert.match(page, /<option value="730">2 years \(730 days\)<\/option>/);
+  assert.match(page, /<option value="7" selected>7 days<\/option>/);
+  assert.match(page, /<option value="90">90 days<\/option>/);
 });

@@ -54,6 +54,12 @@ try {
   assert.equal((await store.getApiKey(key.raw)).user_id, user.id);
   const link = await store.createConnectionLink(user.id, 'Coding MCP', 'full', 7);
   assert.equal((await store.getConnectionLink(link.key)).user_id, user.id);
+  const annual = await store.createConnectionLink(user.id, 'Annual MCP', 'read', 365);
+  const biennial = await store.createConnectionLink(user.id, 'Two-year MCP', 'full', 730);
+  assert.ok(Math.abs(annual.expiresAt - (Date.now() + 365 * 86_400_000)) < 2000);
+  assert.ok(Math.abs(biennial.expiresAt - (Date.now() + 730 * 86_400_000)) < 2000);
+  assert.equal((await store.getConnectionLink(annual.key)).expires_at, annual.expiresAt);
+  assert.equal((await store.getConnectionLink(biennial.key)).expires_at, biennial.expiresAt);
   store.audit({ ts: Date.now(), user_id: user.id, device_id: 'workstation', client: 'test',
     tool: 'read_file', args_hash: null, ok: 1, ms: 1, error: null });
   assert.equal(store.auditStats(user.id).total, 1);
@@ -67,6 +73,10 @@ try {
   assert.equal((await store.getDeviceByToken(originalDeviceToken)).device_id, 'workstation');
   assert.ok(await store.getApiKey(key.raw));
   assert.ok(await store.getConnectionLink(link.key));
+  assert.equal((await store.getConnectionLink(annual.key)).expires_at, annual.expiresAt);
+  assert.equal((await store.getConnectionLink(biennial.key)).expires_at, biennial.expiresAt);
+  await store.revokeConnectionLink(user.id, annual.id);
+  assert.equal(await store.getConnectionLink(annual.key), undefined);
   assert.equal(store.recentAudit(user.id).length, 0, 'tool call activity is RAM-only, not persisted');
   await store.revokeConnectionLink(user.id, link.id);
   assert.equal(await store.getConnectionLink(link.key), undefined, 'revocation persists');

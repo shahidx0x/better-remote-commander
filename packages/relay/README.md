@@ -106,7 +106,7 @@ MongoDB service is itself ephemeral.
 
 ### One-click private URL (no OAuth callback)
 1. Sign in to `https://your-relay.example/auth/links` (or click **Connect without OAuth** in the admin dashboard).
-2. Name the connection, choose **read only** or **full access**, choose 1/7/30/90-day expiry, and click **Generate private MCP URL**.
+2. Name the connection, choose **read only** or **full access**, choose a 1/7/30/90-day, 1-year (365-day), or 2-year (730-day) expiry, and click **Generate private MCP URL**.
 3. Copy the generated `https://your-relay.example/c/brc_link_<random-secret>/mcp` into any client that supports a custom **Streamable HTTP MCP** server with **No authentication**.
 4. Revoke it from the same page when no longer needed. Expired links stop working automatically.
 
