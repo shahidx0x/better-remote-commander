@@ -216,7 +216,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
       catch { return res.status(503).json({ ok: false, storage: 'mongodb', error: 'database_unavailable' }); }
     }
     res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl,
-      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1, storage: cfg.mongoUri ? 'mongodb' : 'sqlite' });
+      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1, storage: cfg.mongoUri ? 'mongodb' : 'sqlite', relayInstance: hub.instanceId });
   });
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */

@@ -153,7 +153,7 @@ export class RelayOAuthProvider implements OAuthServerProvider {
     const refresh = `brc_rt_${randomToken(32)}`;
     const now = Date.now();
     await this.deps.store.insertToken({ token_hash: sha256(access), kind: 'access', client_id: clientId, user_id: userId, scopes: scopes.join(' '), resource, expires_at: now + ACCESS_TTL_MS, created_at: now, revoked: 0 });
-    this.deps.store.insertToken({ token_hash: sha256(refresh), kind: 'refresh', client_id: clientId, user_id: userId, scopes: scopes.join(' '), resource, expires_at: now + REFRESH_TTL_MS, created_at: now, revoked: 0 });
+    await this.deps.store.insertToken({ token_hash: sha256(refresh), kind: 'refresh', client_id: clientId, user_id: userId, scopes: scopes.join(' '), resource, expires_at: now + REFRESH_TTL_MS, created_at: now, revoked: 0 });
     return { access_token: access, token_type: 'bearer', expires_in: ACCESS_TTL_MS / 1000, refresh_token: refresh, scope: scopes.join(' ') };
   }
 }

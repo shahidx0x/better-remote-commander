@@ -172,6 +172,40 @@ The bundled descriptions take priority over stale hints from an older local
 agent, while live device schemas and permissions are still enforced. Refresh
 the MCP connector after deployment if your AI host has cached old tools.
 
+### OAuth says the PC is offline after the agent restarts
+
+Closing the agent does **not** revoke an OAuth authorization. Reopening the
+agent with its saved `device.json` reconnects the **same paired device ID**
+and the same owner; the MCP client's existing access/refresh tokens continue
+working. Do **not** re-pair the device or create another OAuth client on each
+restart. The MongoDB integration test exercises the full sequence: OAuth
+authorization, `list_devices`, a file call, agent disconnect, reconnect, and
+the same OAuth access token performing another file call.
+
+If `list_devices` reports `no_devices_for_oauth_account`, the OAuth
+authorization belongs to a BRC account without that paired PC. Reauthorize
+the OAuth connector **once**, signed into the same BRC account you used to
+approve the device pairing. Never bypass ownership checks or automatically
+assign an online computer to an arbitrary OAuth token. If it reports
+`paired_device_offline`, that account does have paired devices but they
+haven't connected (or were disconnected). If `paused`, resume the device
+in the admin dashboard.
+
+If the relay homepage shows the PC online but the OAuth tool sees none,
+compare `relayInstance` in `/health` and the MCP `list_devices` result.
+They must match. **The live WebSocket hub is held in each relay process's
+RAM; MongoDB only persists authentication and pairing.** Two load-balanced
+Easypanel replicas can route the PC's WebSocket to one process and MCP
+requests to another, causing exactly this symptom. Run **one relay replica**
+for this lightweight deployment (or implement an explicit shared call router
+before scaling out). Never disable OAuth or route across users to mask
+the problem. The instance IDs are temporary diagnostic identifiers, not
+credentials or persisted logs.
+
+Older BRC installs may intentionally keep their pairing under
+`~/.ses-rdp/device.json` until moved; deleting that file forces a
+new pairing. Don't clear a valid saved token just to restart the agent.
+
 ### Fix for clients seeing only `list_devices`
 
 Earlier relay versions populated `tools/list` only with tools from devices that

@@ -9,7 +9,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { DeviceHub } from '../device-hub.js';
 import type { RelayStore } from '../store/types.js';
-import { invokeTool, listUserDevices, type InvokeContext } from './invoke.js';
+import { invokeTool, connectionStatus, type InvokeContext } from './invoke.js';
 import { BUNDLED_AGENT_TOOL_CATALOG } from './agent-tools.catalog.js';
 
 export type McpContext = InvokeContext;
@@ -56,7 +56,7 @@ export function readOnlyToolAllowed(name: string, args: unknown): boolean {
 
 export const LIST_DEVICES_TOOL = {
   name: 'list_devices',
-  description: 'USE WHEN: identify your paired PCs and their real online state/device IDs, especially with multiple devices. USE INSTEAD: for files on a known device use the file/code tools; for agent operations use agent_status. IMPORTANT: an online device is not proof files are accessible or tests passed.',
+  description: 'USE WHEN: identify devices available to THIS OAuth account, with status and relayInstance. USE INSTEAD: for files on a known device use the file/code tools; for agent operations use agent_status. IMPORTANT: zero accessible devices does NOT prove the PC is powered off; no_devices_for_oauth_account means this OAuth principal has no paired PC. A different relayInstance from /health suggests multiple relay processes. Never bypass device ownership.',
   inputSchema: { type: 'object', properties: {} },
   annotations: { title: 'List devices', readOnlyHint: true },
 };
@@ -133,7 +133,7 @@ export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpConte
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
     if (name === 'list_devices') {
-      return { content: [{ type: 'text', text: JSON.stringify({ devices: await listUserDevices(hub, store, ctx.userId) }, null, 2) }] };
+      return { content: [{ type: 'text', text: JSON.stringify({ ...await connectionStatus(hub, store, ctx.userId), relayInstance: hub.instanceId }, null, 2) }] };
     }
     // Defense in depth: hiding a write tool from tools/list is not enough.
     if (access === 'read' && !readOnlyToolAllowed(name, args))

@@ -38,6 +38,8 @@ interface Pending {
 }
 
 export class DeviceHub {
+  /** A fresh, non-secret identifier on each relay process start. Helps spot load-balancer misrouting. */
+  readonly instanceId = randomUUID().slice(0, 12);
   private devices = new Map<string, ConnectedDevice>();
   private pending = new Map<string, Pending>();
   private heartbeat: NodeJS.Timeout;
@@ -84,7 +86,10 @@ export class DeviceHub {
 
       if (!deviceId) return; // ignore anything before hello
       const dev = this.devices.get(deviceId);
-      if (dev) dev.lastSeen = Date.now();
+      // Ignore all late frames from a socket replaced by a newer connection.
+      // A stale pong/result must not keep the replacement 'alive' or affect its calls.
+      if (!dev || dev.socket !== socket) return;
+      dev.lastSeen = Date.now();
 
       if (msg.type === 'pong') return;
       if (msg.type === 'result') {

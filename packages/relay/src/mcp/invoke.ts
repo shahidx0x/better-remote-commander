@@ -18,6 +18,27 @@ export async function listUserDevices(hub: DeviceHub, store: RelayStore, userId:
   }));
 }
 
+/** Scope every detail to the OAuth principal. Never expose other users' device names or IDs. */
+export async function connectionStatus(hub: DeviceHub, store: RelayStore, userId: string) {
+  const devices = await listUserDevices(hub, store, userId);
+  const eligible = devices.some(d => d.online && !d.paused);
+  if (eligible) return { devices, status: 'ready' as const };
+  if (devices.length) return {
+    devices,
+    status: devices.some(d => d.online) ? 'paused' as const : 'paired_device_offline' as const,
+    message: devices.some(d => d.online)
+      ? 'The paired device is paused by this account. Resume it in BRC Admin.'
+      : 'The devices paired to this OAuth account are offline. Restart brc-agent using the saved device pairing.',
+  };
+  // A globally connected device belongs to someone else, not necessarily this
+  // OAuth principal. Never silently pick it (or reassign its user_id).
+  return {
+    devices,
+    status: 'no_devices_for_oauth_account' as const,
+    message: 'This OAuth account has no paired devices. If your PC appears online on the relay homepage, reconnect OAuth while signed in as the same BRC account that paired that PC. No pairing or OAuth credentials need to be cleared.',
+  };
+}
+
 export async function invokeTool(
   hub: DeviceHub, store: RelayStore, ctx: InvokeContext,
   tool: string, rawArgs: Record<string, unknown> | undefined, opts: { timeoutMs?: number; signal?: AbortSignal } = {},
@@ -28,7 +49,12 @@ export async function invokeTool(
   const deviceId = requested ?? hub.resolveDefault(ctx.userId);
   if (!deviceId) {
     const n = hub.list(ctx.userId).length;
-    return { ok: false, status: n === 0 ? 503 : 409, message: n === 0 ? 'No device is online. Start brc-agent on the target machine.' : `${n} devices are online; pass deviceId (see list_devices).` };
+    if (n === 0) {
+      const status = await connectionStatus(hub, store, ctx.userId);
+      return { ok: false, status: 503, message: 'No device is online for this OAuth account. ' +
+        (status.status === 'ready' ? 'Retry list_devices.' : status.message) };
+    }
+    return { ok: false, status: 409, message: `${n} devices are online for this account; pass deviceId (see list_devices).` };
   }
   const dev = hub.get(deviceId);
   if (!dev || dev.ownerId !== ctx.userId) return { ok: false, status: 404, message: `Device ${deviceId} is not online or not yours.` };

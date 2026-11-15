@@ -101,6 +101,7 @@ try {
   const res = await fetch(base + '/health');
   const health = await res.json();
   assert.equal(health.ok, true); assert.equal(health.storage, 'mongodb'); assert.equal(health.mcpTools, 71);
+  assert.equal(health.relayInstance, relay.hub.instanceId, 'health must identify the relay process handling device sockets');
   assert.equal((await relay.store.getDeviceByToken(originalDeviceToken)).device_id, 'workstation');
 
   // The complete HTTP OAuth dynamic-registration path must await Mongo writes.
@@ -149,6 +150,7 @@ try {
   const credentials = await tokenReply.json();
   assert.equal(tokenReply.status, 200, JSON.stringify(credentials).slice(0, 300));
   assert.ok(credentials.access_token && credentials.refresh_token);
+  assert.ok(await relay.store.getToken(credentials.refresh_token, 'refresh'), 'refresh token must be durable before the OAuth token response');
   const mcpResponse = await fetch(base + '/mcp', { method: 'POST',
     headers: { authorization: 'Bearer ' + credentials.access_token,
       'content-type': 'application/json', accept: 'application/json, text/event-stream' },
@@ -158,33 +160,105 @@ try {
   assert.ok(await relay.store.getToken(credentials.access_token, 'access'));
   console.log('PASS MongoDB OAuth client registration, login, PKCE code exchange, token and MCP tools');
 
-  // Critical: verify a previously paired device token authenticates the REAL
-  // WebSocket upgrade after the store was reloaded from MongoDB.
-  const socket = new WebSocket('ws://127.0.0.1:' + port + '/ws', {
-    headers: { Authorization: 'Bearer ' + originalDeviceToken },
-  });
-  await Promise.race([
-    new Promise((resolve, reject) => {
-      socket.once('error', reject);
-      socket.once('open', () => socket.send(JSON.stringify({
-        type: 'hello', protocol: 1, device: { deviceId: 'workstation', name: 'My Windows PC',
-          platform: 'win32', hostname: 'mongo-test-pc', agentVersion: '2.0.5' },
-        tools: [{ name: 'read_file', description: 'Read one file', inputSchema: { type: 'object', properties: {} } }],
-      })));
-      socket.on('message', raw => {
-        const packet = JSON.parse(String(raw));
-        if (packet.type === 'welcome') resolve();
-      });
-    }),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Mongo-backed WebSocket authentication timed out')), 3000)),
-  ]);
-  assert.ok(relay.hub.list(user.id).some(d => d.deviceId === 'workstation' && d.online));
-  socket.close();
+  // Reproduce the user's failure: OAuth stays connected while brc-agent exits,
+  // reopens, and reuses its saved device token. Never reauthorize or re-pair.
+  async function callMcp(name, args = {}) {
+    const response = await fetch(base + '/mcp', { method: 'POST',
+      headers: { authorization: 'Bearer ' + credentials.access_token,
+        'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 20, method: 'tools/call',
+        params: { name, arguments: args } }) });
+    const raw = await response.text();
+    const json = raw.trim().startsWith('{') ? JSON.parse(raw)
+      : raw.split('\n').filter(l => l.startsWith('data: '))
+        .map(l => JSON.parse(l.slice(6))).find(v => v.result || v.error);
+    assert.equal(response.status, 200, raw.slice(0, 280));
+    assert.ok(json?.result, 'MCP response must include a result');
+    return json.result;
+  }
+  async function socketConnect() {
+    const socket = new WebSocket('ws://127.0.0.1:' + port + '/ws', {
+      headers: { Authorization: 'Bearer ' + originalDeviceToken },
+    });
+    await Promise.race([
+      new Promise((resolve, reject) => {
+        socket.once('error', reject);
+        socket.once('open', () => socket.send(JSON.stringify({
+          type: 'hello', protocol: 1,
+          device: { deviceId: 'workstation', name: 'My Windows PC', platform: 'win32',
+            hostname: 'mongo-test-pc', agentVersion: '2.0.5' },
+          tools: [{ name: 'read_file', description: 'Read a file',
+            inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }],
+        })));
+        socket.on('message', raw => {
+          const packet = JSON.parse(String(raw));
+          if (packet.type === 'welcome') resolve();
+          if (packet.type === 'call') socket.send(JSON.stringify({ type: 'result', id: packet.id,
+            result: { content: [{ type: 'text', text: 'reconnected-agent-ok' }] } }));
+        });
+      }),
+      new Promise((_, reject) => setTimeout(() =>
+        reject(new Error('Mongo-backed WebSocket welcome timed out')), 3000)),
+    ]);
+    return socket;
+  }
+  async function waitFor(predicate, message) {
+    for (let i = 0; i < 35; i++) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error(message);
+  }
+  function onlineStatus(result) {
+    return JSON.parse(result.content.find(c => c.type === 'text').text);
+  }
+  const first = await socketConnect();
+  assert.equal(onlineStatus(await callMcp('list_devices')).status, 'ready');
+  assert.equal(onlineStatus(await callMcp('list_devices')).relayInstance, health.relayInstance, 'OAuth must connect to same relay process as the agent');
+  assert.equal((await callMcp('read_file', { path: '/test/code.ts' })).content[0].text,
+    'reconnected-agent-ok');
+  first.close(1000, 'agent shutdown');
+  await waitFor(() => relay.hub.list(user.id).length === 0, 'agent did not disconnect');
+  assert.equal(onlineStatus(await callMcp('list_devices')).status, 'paired_device_offline',
+    'OAuth must remain authorized when agent is temporarily offline');
+
+  const second = await socketConnect();
+  assert.equal(onlineStatus(await callMcp('list_devices')).status, 'ready');
+  assert.equal((await callMcp('read_file', { path: '/test/code.ts' })).content[0].text,
+    'reconnected-agent-ok');
+  assert.ok(await relay.store.getToken(credentials.access_token, 'access'),
+    'OAuth bearer token must remain valid after agent restart');
+
+  // Overlapping sockets: new hello must replace the previous socket atomically,
+  // and the old socket's late close must NOT remove the new connection.
+  const third = await socketConnect();
+  await waitFor(() => relay.hub.list(user.id).length === 1, 'stale socket changed online count');
+  // The relay's server-side socket is a different JS object from the client socket.
+  assert.equal(relay.hub.get('workstation')?.socket.readyState, WebSocket.OPEN);
+  assert.equal(onlineStatus(await callMcp('list_devices')).status, 'ready');
+  assert.equal((await callMcp('read_file', { path: '/test/code.ts' })).content[0].text,
+    'reconnected-agent-ok');
+  second.terminate();
+
+  // A different OAuth account must never inherit this device just because
+  // the global relay shows "1 online".
+  const other = await relay.store.upsertUser('another-user', 'other-strong-password');
+  const { connectionStatus, invokeTool } = await import('../dist/mcp/invoke.js');
+  const foreign = await connectionStatus(relay.hub, relay.store, other.id);
+  assert.equal(foreign.status, 'no_devices_for_oauth_account');
+  assert.equal(foreign.devices.length, 0);
+  assert.ok(!JSON.stringify(foreign).includes('My Windows PC'));
+  const forbidden = await invokeTool(relay.hub, relay.store,
+    { userId: other.id, clientId: 'foreign-oauth' }, 'read_file', { path: '/test/code.ts' });
+  assert.equal(forbidden.ok, false);
+  assert.match(forbidden.message, /OAuth account/);
+
+  third.close();
   await relay.close(); relay = undefined;
   store = await MongoStore.connect(uri, dbName);
-  assert.ok(await store.getClient(clientData.client_id), 'DCR client survives server restart');
+  assert.ok(await store.getClient(clientData.client_id), 'DCR client survives relay restart');
   await store.close(); store = undefined;
-  console.log('PASS native Mongo HTTP, OAuth DCR registration, paired WebSocket login and restart');
+  console.log('PASS OAuth stays authorized across agent stop/start, stale-socket takeover, and owner-isolated routing');
 
   // Migration from the old SQLite format is verified using a DIFFERENT test DB.
   const sqliteFile = join(temp, 'legacy.sqlite');
