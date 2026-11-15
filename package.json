@@ -17,6 +17,8 @@
     "dev:relay": "pnpm --filter brc-relay build && node packages/relay/dist/cli.js",
     "dev:agent": "pnpm --filter brc-agent build && node packages/agent/dist/cli.js",
     "extract-tools": "node scripts/extract-tools.mjs",
+    "catalog:update": "node scripts/generate-relay-catalog.mjs",
+    "catalog:check": "node scripts/generate-relay-catalog.mjs --check",
     "pack:all": "pnpm -r --filter \"./packages/*\" exec pnpm pack --pack-destination ../../dist-pack",
     "publish:all": "pnpm -r --filter \"./packages/*\" publish --access public",
     "test:unit": "node --test packages/relay/test/unit.test.mjs",

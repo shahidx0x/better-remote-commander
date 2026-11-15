@@ -23,6 +23,7 @@ import { RelayOAuthProvider, SCOPES } from './auth/provider.js';
 import { parseAuthorizeRequest, validateClientId, validateRedirectUri, approveCallback } from './auth/client-recovery.js';
 import { Sessions } from './auth/sessions.js';
 import { createMcpServer } from './mcp/server.js';
+import { BUNDLED_AGENT_TOOL_CATALOG } from './mcp/agent-tools.catalog.js';
 import * as pages from './pages/html.js';
 import * as adminPages from './pages/admin.js';
 import { LoginLimiter } from './auth/rate-limit.js';
@@ -200,7 +201,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     res.type('html').send(pages.homePage(cfg.publicUrl, !!userId, devices));
   });
 
-  app.get('/health', (_req, res) => res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl }));
+  app.get('/health', (_req, res) => res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl, mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1 }));
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */
   app.post('/device/start', express.json({ limit: '4kb' }), (req, res) => {

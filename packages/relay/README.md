@@ -76,4 +76,26 @@ OAuth redirect validation to fix a stale client ID.
 
 Not every MCP host supports a no-auth remote HTTP URL or suppresses OAuth. This option works in clients that support it; it cannot force unrelated AI products to bypass their own connection policies.
 
+### Fix for clients seeing only `list_devices`
+
+Earlier relay versions populated `tools/list` only with tools from devices that
+were online **at the moment the AI host connected**. Some clients cache that
+initial result, even if the agent reconnects later. The relay now includes a
+generated **stable catalog of the 70 agent tools**, and overrides schemas from
+the running agent when available. Authentication, owner/device routing and
+pause/online checks are always performed at invocation time. Advertising an
+offline tool does not make it executable while the agent is offline.
+
+After deploying the fix, check `https://your-relay.example/health` for
+`"mcpTools":71` (70 agent tools plus `list_devices`).
+**An AI client with an old cached one-tool list must refresh its MCP connector
+or remove/re-add that connection once.** Restarting the Windows agent alone
+cannot change a tool list that the AI host has already cached.
+
+Maintainers: after changing agent tool definitions, run `pnpm build` followed
+by `pnpm catalog:update`, and commit
+`packages/relay/src/mcp/agent-tools.catalog.ts`. CI runs
+`pnpm catalog:check` to detect stale snapshots. This catalog is a static
+schema (about 125 KiB), not a project index, user database, or activity log.
+
 Full docs: https://github.com/shahidx0x/better-remote-commander · License MIT.

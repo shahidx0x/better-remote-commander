@@ -1,13 +1,16 @@
 /**
  * MCP server factory: one low-level Server per HTTP request (stateless Streamable HTTP).
- * Tools = `list_devices` + union of tools reported by the user's online agents,
- * each augmented with an optional `deviceId` argument. Invocation goes through invoke.ts.
+ * Publish stable agent tool schemas even with zero connected devices. Many MCP clients
+ * snapshot tools/list at first connection and never refresh automatically.
+ * Online agents override bundled schemas; authorization and execution always use
+ * live owner/device/pause checks in invoke.ts.
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { DeviceHub } from '../device-hub.js';
 import type { SqliteStore } from '../store/sqlite.js';
 import { invokeTool, listUserDevices, type InvokeContext } from './invoke.js';
+import { BUNDLED_AGENT_TOOL_CATALOG } from './agent-tools.catalog.js';
 
 export type McpContext = InvokeContext;
 
@@ -45,7 +48,7 @@ export const LIST_DEVICES_TOOL = {
 // Device objects change on reconnect/hello; pause state is read freshly for every tools/list.
 type ToolCache = {devices:object[];definitions:unknown[];tools:{name:string;description:string;inputSchema:unknown;annotations?:Record<string,unknown>}[]};
 const schemaCaches = new WeakMap<DeviceHub,Map<string,ToolCache>>();
-/** Live tool set for a user: union across online, non-paused devices (with deviceId prop). */
+/** Stable tool set plus online agent-specific schemas; execution still requires a live, owned device. */
 export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
   const online = hub.list(userId).filter((d) => !store.getDevice(d.deviceId)?.paused);
   const devices=online.map(d=>hub.get(d.deviceId)!).filter(Boolean);
@@ -54,8 +57,16 @@ export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
   if(prior&&prior.devices.length===devices.length&&devices.every((d,i)=>prior.devices[i]===d&&prior.definitions[i]===d.tools)){
     cache.delete(userId);cache.set(userId,prior);return{online:devices.length,tools:prior.tools};
   }
+  // Seed with stable definitions so a client connecting while the agent is offline
+  // gets the same tools as one connecting while it is online.
+  // Do not cache user authorization: this is only static, public schema metadata.
   const merged = new Map<string, { name: string; description: string; inputSchema: unknown; annotations?: Record<string, unknown> }>();
-  for (const d of devices) for (const t of d.tools) if (!merged.has(t.name)) merged.set(t.name, { ...t, inputSchema: withDeviceId(t.inputSchema) });
+  for (const t of BUNDLED_AGENT_TOOL_CATALOG)
+    merged.set(t.name, { ...t, inputSchema: withDeviceId(t.inputSchema) });
+  // Prefer currently connected agent schemas if its installed version differs.
+  // Overriding preserves catalog order for the usual tools/list snapshot.
+  for (const d of devices) for (const t of d.tools)
+    merged.set(t.name, { ...t, inputSchema: withDeviceId(t.inputSchema) });
   const tools=[...merged.values()];cache.set(userId,{devices,definitions:devices.map(d=>d.tools),tools});
   while(cache.size>128)cache.delete(cache.keys().next().value!);
   return { online: devices.length, tools };

@@ -117,12 +117,26 @@ test('parser cancellation leaves the event loop usable',async()=>{
 });
 class Sock extends EventEmitter{OPEN=1;readyState=1;bufferedAmount=0;sent=[];send(s){this.sent.push(JSON.parse(s));}close(){this.readyState=3;this.emit('close');}terminate(){this.close();}}
 const hello=(id,tool='read_file')=>Buffer.from(JSON.stringify({type:'hello',protocol:1,device:{deviceId:id,name:id,platform:'test'},tools:[{name:tool,description:'test',inputSchema:{type:'object'}}]}));
-test('relay schema cache preserves pause and reconnect freshness',()=>{
+test('relay schema cache preserves stable discovery while device pause and reconnect remain fresh',()=>{
  const h=new DeviceHub('test',()=>{}),s=new Sock();h.attach(s,'u','pc');s.emit('message',hello('pc'));
  let paused=false;const store={getDevice:()=>({paused:paused?1:0})};
  const first=liveTools(h,store,'u'),second=liveTools(h,store,'u');assert.equal(first.tools,second.tools);
- paused=true;assert.equal(liveTools(h,store,'u').tools.length,0);paused=false;assert.equal(liveTools(h,store,'u').tools.length,1);
- const next=new Sock();h.attach(next,'u','pc');next.emit('message',hello('pc','read_code_file'));assert.equal(liveTools(h,store,'u').tools[0].name,'read_code_file');assert.equal(liveTools(h,store,'other').tools.length,0);h.close();
+ const stable=first.tools.map(t=>t.name);assert.ok(stable.length>=60);
+ assert.equal(first.online,1);
+ paused=true;
+ const duringPause=liveTools(h,store,'u');
+ assert.equal(duringPause.online,0,'paused agent must not appear online');
+ assert.deepEqual(duringPause.tools.map(t=>t.name),stable,'pausing must not remove discoverable tool schemas');
+ paused=false;
+ const resumed=liveTools(h,store,'u');assert.equal(resumed.online,1);
+ assert.deepEqual(resumed.tools.map(t=>t.name),stable);
+ const next=new Sock();h.attach(next,'u','pc');next.emit('message',hello('pc','read_code_file'));
+ const reconnected=liveTools(h,store,'u');assert.equal(reconnected.online,1);
+ assert.deepEqual(reconnected.tools.map(t=>t.name),stable);
+ assert.equal(reconnected.tools.find(t=>t.name==='read_code_file').description,'test','reconnected agent overrides that schema');
+ const other=liveTools(h,store,'other');assert.equal(other.online,0);
+ assert.deepEqual(other.tools.map(t=>t.name),stable,'static catalog is public schema; device ownership is still enforced by invocation');
+ h.close();
 });
 test('relay overload rejects before dispatch and per-device limits do not block other devices',async()=>{
  const h=new DeviceHub('test',()=>{}),a=new Sock(),b=new Sock();h.attach(a,'u','a');h.attach(b,'u','b');a.emit('message',hello('a'));b.emit('message',hello('b'));

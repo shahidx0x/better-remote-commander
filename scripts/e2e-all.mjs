@@ -49,6 +49,14 @@ try {
   start('relay', [relayCli], { PORT: String(PORT), HOST: '127.0.0.1', PUBLIC_URL: base, BRC_ADMIN_PASSWORD: pass, BRC_SESSION_SECRET: 'e2e', BRC_DB: path.join(scratch, 'relay.sqlite'), LOG_LEVEL: 'warn' });
   await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay');
 
+  // An MCP client frequently connects before its target device is online.
+  // Assert its first tools/list has the full catalog so it cannot cache list_devices alone.
+  console.log('== scripts/e2e-offline-catalog.mjs');
+  const offlineOutput = await runScript('scripts/e2e-offline-catalog.mjs', base, 'admin', pass);
+  process.stdout.write(offlineOutput.split('\n').filter(l => /^(PASS|FAIL)/.test(l)).map(l => '  ' + l.slice(0, 110)).join('\n') + '\n');
+  if (/^FAIL/m.test(offlineOutput) || !/^PASS/m.test(offlineOutput))
+    throw new Error('offline catalog suite failed: ' + offlineOutput.slice(-650));
+
   const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { BRC_HOME: path.join(scratch, 'agent-home') });
   const code = await waitFor(() => agent.out.match(/code: ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1], 20_000, 'pairing code');
 

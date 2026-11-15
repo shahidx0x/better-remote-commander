@@ -182,3 +182,39 @@ test('manual OAuth recovery validates issuer, callback, PKCE and explicit owner 
     assert.throws(() => approveCallback(store, { clientId: parsed.clientId, redirectUri: 'http://remote.example/cb' }, 'Bad'), /HTTPS/);
   } finally { store.close(); }
 });
+
+test('MCP catalog is stable before agent connects, while online, and after disconnect', async () => {
+  const { liveTools, BUNDLED_AGENT_TOOL_CATALOG } = await import('../dist/mcp/server.js').then(async m => ({
+    ...m, BUNDLED_AGENT_TOOL_CATALOG: (await import('../dist/mcp/agent-tools.catalog.js')).BUNDLED_AGENT_TOOL_CATALOG,
+  }));
+  const hub = new DeviceHub('test', () => {});
+  const store = new SqliteStore(':memory:');
+  try {
+    const owner = store.upsertUser('owner', 'secret');
+    const offline = liveTools(hub, store, owner.id);
+    const names = offline.tools.map(t => t.name);
+    assert.equal(offline.online, 0);
+    assert.equal(names.length, BUNDLED_AGENT_TOOL_CATALOG.length);
+    assert.ok(names.includes('read_file') && names.includes('write_file') && names.includes('run_command') && names.includes('workspace_batch'));
+    assert.ok(offline.tools.every(t => t.inputSchema?.properties?.deviceId), 'all tools have device targeting property');
+    const readFile = offline.tools.find(t => t.name === 'read_file');
+    assert.equal(typeof readFile.description, 'string');
+    const socket = new FakeSocket();
+    hub.attach(socket, owner.id, 'device');
+    store.issueDeviceToken('device', owner.id, 'PC', 'win32');
+    socket.recv(hello('device', [
+      { name: 'read_file', description: 'agent-specific live schema', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
+      { name: 'device_extra', description: 'newer agent extra', inputSchema: { type: 'object', properties: {} } },
+    ]));
+    const online = liveTools(hub, store, owner.id);
+    assert.equal(online.online, 1);
+    assert.ok(online.tools.some(t => t.name === 'device_extra'));
+    assert.equal(online.tools.find(t => t.name === 'read_file').description, 'agent-specific live schema');
+    assert.ok(names.every(n => online.tools.some(t => t.name === n)), 'online does not hide stable tools');
+    socket.close(1000, 'done');
+    const recovered = liveTools(hub, store, owner.id);
+    assert.equal(recovered.online, 0);
+    assert.deepEqual(recovered.tools.map(t => t.name), names, 'offline and reconnect states keep the same base catalog');
+    assert.equal(hub.resolveDefault(owner.id), null, 'advertised offline tools are not executable on an offline device');
+  } finally { hub.close(); store.close(); }
+});
