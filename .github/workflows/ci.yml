@@ -36,6 +36,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - run: docker build -f packages/relay/Dockerfile -t brc/relay:ci .
+      - name: Verify Easypanel subfolder build context
+        if: github.ref == 'refs/heads/main'
+        run: docker build --build-arg GIT_SHA="$GITHUB_SHA" -f packages/relay/Dockerfile -t brc/relay:easypanel-ci packages/relay
       - run: docker build -f packages/agent/Dockerfile -t brc/agent:ci .
       - name: smoke relay image
         run: |

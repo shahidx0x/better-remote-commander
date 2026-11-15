@@ -1,13 +1,39 @@
-# BRC relay image (multi-stage, pnpm workspace, node 24 for node:sqlite)
+# BRC relay image: works with the full monorepo context or Easypanel's subfolder context.
+# The fallback fetches the exact GIT_SHA provided by Easypanel, never an unpinned branch when SHA is available.
 FROM node:24-alpine AS build
-RUN corepack enable
+RUN corepack enable && apk add --no-cache git ca-certificates
 WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc tsconfig.base.json ./
-COPY packages/shared/package.json packages/shared/tsconfig.json packages/shared/
-COPY packages/relay/package.json packages/relay/tsconfig.json packages/relay/
+ARG GIT_SHA
+COPY . /source-context/
+RUN set -eu; \
+    if [ -f /source-context/tsconfig.base.json ] \
+       && [ -f /source-context/packages/shared/tsconfig.json ] \
+       && [ -f /source-context/packages/relay/tsconfig.json ] \
+       && [ -d /source-context/packages/shared/src ] \
+       && [ -d /source-context/packages/relay/src ]; then \
+      echo 'BRC: using complete local Docker build context'; \
+      cp -a /source-context/. /app/; \
+    else \
+      echo 'BRC: incomplete Docker context; fetching source for the Git revision'; \
+      if [ -n "${GIT_SHA:-}" ]; then \
+        echo "$GIT_SHA" | grep -Eq '^[0-9a-fA-F]{40}$' || { echo 'BRC: GIT_SHA must be a 40-character commit hash' >&2; exit 1; }; \
+      fi; \
+      git init -q /app; \
+      git remote add origin https://github.com/Rifatul-Islam-Munna/better-better-remote-commander.git; \
+      git -c protocol.version=2 fetch -q --depth 1 origin "${GIT_SHA:-main}"; \
+      git checkout -q --detach FETCH_HEAD; \
+      if [ -n "${GIT_SHA:-}" ]; then \
+        test "$(git rev-parse HEAD)" = "$GIT_SHA" || { echo 'BRC: fetched revision differs from requested Git SHA' >&2; exit 1; }; \
+      fi; \
+      rm -rf .git; \
+    fi; \
+    test -f package.json; \
+    test -f pnpm-lock.yaml; \
+    test -f pnpm-workspace.yaml; \
+    test -f tsconfig.base.json; \
+    test -f packages/shared/tsconfig.json; \
+    test -f packages/relay/tsconfig.json
 RUN pnpm install --frozen-lockfile --filter brc-relay... --config.confirmModulesPurge=false
-COPY packages/shared/src packages/shared/src
-COPY packages/relay/src packages/relay/src
 RUN pnpm --filter brc-shared build && pnpm --filter brc-relay build
 RUN pnpm --filter brc-relay --prod deploy --legacy /out
 

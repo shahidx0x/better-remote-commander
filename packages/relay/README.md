@@ -17,6 +17,12 @@ PUBLIC_URL=https://brc.example.com BRC_ADMIN_PASSWORD=change-me BRC_SESSION_SECR
 Put it behind any HTTPS reverse proxy or tunnel that forwards WebSockets (Caddy, nginx, Cloudflare Tunnel, ngrok).
 Docker Compose profiles for VPS / Cloudflare Tunnel / ngrok are in the repository.
 
+### Easypanel Docker builds
+
+The relay Dockerfile supports two build contexts. With the repository root as context, it builds the checked-out source directly. If Easypanel supplies only `packages/relay` instead, it fetches the public repository at the exact `GIT_SHA` build argument (which Easypanel supplies), then builds that revision. It checks the resulting commit hash and refuses a mismatch; no source files are taken from a misleading partial context. The image build therefore needs outbound HTTPS access to GitHub in the fallback case. `GIT_SHA` is optional for standalone builds without a GitHub source and defaults to `main` only when omitted.
+
+Recommended Easypanel settings are **Build Path `/`** with **Dockerfile `packages/relay/Dockerfile`**. The alternative **Build Path `/packages/relay`** with **Dockerfile `Dockerfile`** also works using the fallback. Neither layout requires modifying the project source tree in Easypanel.
+
 ## Configuration
 
 | Env | Meaning |

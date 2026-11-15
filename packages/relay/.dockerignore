@@ -1,0 +1,10 @@
+node_modules
+dist
+test
+.env
+.env.*
+*.log
+*.pem
+*.key
+.git
+.brc
