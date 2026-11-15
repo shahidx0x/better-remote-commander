@@ -9,6 +9,8 @@ import { buildToolDefinitions, EXCLUDED_TOOLS, type ToolDefinition } from './cor
 import { BRC_TOOL_HANDLERS, buildBrcToolDefinitions } from './tools/brc-tools.js';
 import type { ToolResult } from 'brc-shared';
 import { randomUUID } from 'node:crypto';
+import { WORKER_TOOL_HANDLERS, buildWorkerToolDefinitions } from './tools/worker-tools.js';
+import { workerCoordinator } from './runtime/worker-coordination.js';
 import { DEVELOPER_TOOL_HANDLERS, buildDeveloperToolDefinitions } from './tools/developer-tools.js';
 import { reclaimCaches } from './runtime/resource-limits.js';
 import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions, runBatch } from './tools/coding-tools.js';
@@ -59,6 +61,7 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(EXPERT_TOOL_HANDLERS),
   ...Object.entries(POLYGLOT_TOOL_HANDLERS),
   ...Object.entries(DEVELOPER_TOOL_HANDLERS),
+  ...Object.entries(WORKER_TOOL_HANDLERS),
   ['batch_tools', (a) => runBatch(a, callTool)],
 ]);
 
@@ -66,7 +69,7 @@ let cachedDefs: ToolDefinition[] | null = null;
 
 export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildCodingToolDefinitions(), ...buildExpertToolDefinitions(), ...buildPolyglotToolDefinitions(), ...buildDeveloperToolDefinitions()]
+    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildCodingToolDefinitions(), ...buildExpertToolDefinitions(), ...buildPolyglotToolDefinitions(), ...buildDeveloperToolDefinitions(), ...buildWorkerToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name))
       .filter(t => process.env.BRC_TOOL_PROFILE !== 'coding' || !['write_pdf','prepare_file_transfer','send_file_transfer','receive_file_transfer','get_recent_tool_calls','get_usage_stats'].includes(t.name));
   }
@@ -91,6 +94,7 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     const handler=TOOL_HANDLERS.get(name);
     if(!handler || EXCLUDED_TOOLS.has(name))throw new AgentError('UNKNOWN_TOOL',`Unknown tool: ${name}`);
     args=args??{};
+    await workerCoordinator.guardFileMutation(name,args);
     const perform=async()=>{
       checkCancelled();
       if((name==='write_file'||name==='edit_block')&&args.expected_sha256!==undefined){

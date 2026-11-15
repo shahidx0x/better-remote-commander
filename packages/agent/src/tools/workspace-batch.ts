@@ -12,7 +12,7 @@ import { projectIndex } from '../runtime/project-index.js';
 import { codeGraph } from '../runtime/code-graph.js';
 import { runProjectChecks } from '../runtime/harness.js';
 const Hash = z.string().regex(/^[a-fA-F0-9]{64}$/);
-const Change = z.object({
+export const WorkspaceChangeSchema = z.object({
     path: z.string().min(1), expected_sha256: Hash.nullable(),
     content: z.string().max(2 * 1024 * 1024).optional(),
     edits: z.array(z.object({ old_string: z.string().min(1), new_string: z.string(), expected_replacements: z.number().int().min(1).max(10000).default(1) })).min(1).max(100).optional(),
@@ -20,9 +20,10 @@ const Change = z.object({
     .refine(c => c.expected_sha256 !== null || c.content !== undefined, { message: 'New files require content and expected_sha256:null.' });
 export const WorkspaceBatchSchema = z.object({
     path: z.string().min(1),
-    changes: z.array(Change).max(64).default([]),
+    changes: z.array(WorkspaceChangeSchema).max(64).default([]),
     reads: z.array(z.object({ path: z.string().min(1), offset: z.number().int().min(0).default(0), length: z.number().int().min(1).max(2000).default(120), known_sha256: Hash.optional() })).max(64).default([]),
     checks: z.array(z.string().regex(/^[A-Za-z0-9_.:-]+$/)).max(5).default([]),
+    writeConcurrency: z.number().int().min(1).max(4).default(1),
     dryRun: z.boolean().default(true), maxChars: z.number().int().min(2000).max(256000).default(96000),
 }).refine(a => a.changes.length + a.reads.length + a.checks.length > 0, { message: 'Provide changes, reads or checks.' });
 async function createExclusive(file: string, bytes: Buffer) {
@@ -68,8 +69,11 @@ export async function workspaceBatch(raw: unknown): Promise<ToolResult> {
         for (let i = 0; i < a.changes.length; i++) {
             checkCancelled();
             const c = a.changes[i], p = paths[i];
-            const stat = await fs.lstat(p).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT')
-                return null; throw e; });
+            const stat = await fs.lstat(p).catch((e: NodeJS.ErrnoException) => {
+                if (e.code === 'ENOENT')
+                    return null;
+                throw e;
+            });
             if (stat && (!stat.isFile() || stat.isSymbolicLink()))
                 throw new AgentError('UNSAFE_TARGET', 'Changes require regular non-symlink files.');
             if ((c.expected_sha256 === null) !== !stat)
@@ -99,19 +103,28 @@ export async function workspaceBatch(raw: unknown): Promise<ToolResult> {
         }
         const committed: Prepared[] = [];
         try {
-            if (!a.dryRun)
-                for (const p of prepared) {
+            if (!a.dryRun) {
+                const pending = prepared.filter(p => p.beforeHash !== p.afterHash);
+                for (let i = 0; i < pending.length; i += a.writeConcurrency) {
                     checkCancelled();
-                    if (p.beforeHash === p.afterHash)
-                        continue;
-                    if (p.beforeHash === null)
-                        await createExclusive(p.path, p.after);
-                    else
-                        await atomicWrite(p.path, p.after, p.beforeHash);
-                    committed.push(p);
-                    projectIndex.invalidate(p.path);
-                    codeGraph.invalidate(p.path);
+                    // Files are distinct and all their locks are held. Wait for EVERY in-flight
+                    // publication before rolling back; never race rollback against a late rename.
+                    const wave = await Promise.allSettled(pending.slice(i, i + a.writeConcurrency).map(async (p) => {
+                        checkCancelled();
+                        if (p.beforeHash === null)
+                            await createExclusive(p.path, p.after);
+                        else
+                            await atomicWrite(p.path, p.after, p.beforeHash);
+                        committed.push(p);
+                        projectIndex.invalidate(p.path);
+                        codeGraph.invalidate(p.path);
+                    }));
+                    const rejected = wave.find((v): v is PromiseRejectedResult => v.status === 'rejected');
+                    if (rejected)
+                        throw rejected.reason;
+                    checkCancelled();
                 }
+            }
         }
         catch (error) {
             const conflicts: string[] = [];
@@ -165,5 +178,5 @@ export async function workspaceBatch(raw: unknown): Promise<ToolResult> {
     const checksFailed = !!checks && 'passed' in checks && !checks.passed;
     return result({ root, dryRun: a.dryRun, changes: prepared.map(p => ({ path: p.path, beforeSha256: p.beforeHash, afterSha256: p.afterHash, created: p.before === null, changed: p.beforeHash !== p.afterHash })),
         reads, readsSkipped: a.reads.length - reads.length, checks, checksSkipped: a.dryRun ? a.checks.length : 0,
-        durationMs: Math.round(performance.now() - started), note: 'Validate all changes, commit, read back, then explicitly selected checks. New parent directories must already exist. Per-file atomic publication; multi-file rollback is best-effort, not crash-atomic. A failing check does not undo code.' }, readErrors || checksFailed);
+        writeConcurrency: a.writeConcurrency, durationMs: Math.round(performance.now() - started), note: 'Validate all changes, commit, read back, then explicitly selected checks. New parent directories must already exist. Per-file atomic publication; multi-file rollback is best-effort, not crash-atomic. A failing check does not undo code.' }, readErrors || checksFailed);
 }

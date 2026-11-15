@@ -1,6 +1,6 @@
 # Coding agent: local launch, live output and project harness
 
-This source build exposes 67 agent tools, plus the relay's `list_devices` (68 total). The new tools do not contain another AI model: the connected AI chooses the work, and the local agent provides context, performs authorized operations and verifies results.
+This source build exposes 70 agent tools, plus the relay's `list_devices` (71 total). The new tools do not contain another AI model: the connected AI chooses the work, and the local agent provides context, performs authorized operations and verifies results.
 
 ## Run your checkout
 
@@ -143,3 +143,7 @@ The tests use disposable state, loopback relays and synthetic projects. They cov
 ## Faster batches, infrastructure and images
 
 See [the fast-agent guide](fast-agent.md) for 64-call read waves/write barriers, combined workspace edits/readback/checks, Docker observation, actual image previews, optional restricted execution, automatic cache eviction and `pnpm bench:io`. Diagnostics remain live-only. These tools do not add another model or a graph database.
+
+## Optional host-native worker coordination
+
+See [the parallel-worker guide](parallel-workers.md) for `worker_tasks`, `worker_patch`, and `worker_integrate`. Native AI workers, when the host actually supports them with BRC access, can claim independent scopes and submit patches without directly editing shared source. One parent integrates and verifies. Hosts without native workers keep ordinary batches; no model/API calls are added. `workspace_batch` also supports optional 1-4-way distinct-file publication with settled-wave rollback. Diagnostics and coordinator state remain live-only/RAM-only.

@@ -1,5 +1,6 @@
 /** Small, periodic cache maintenance. Does not scan/delete projects or operational credentials. */
 import { codeGraph } from './code-graph.js';
+import { workerCoordinator } from './worker-coordination.js';
 import { projectIndex } from './project-index.js';
 import { codeCacheStatus, pruneCodeCache } from './code-structure.js';
 import { releaseIdleParserWorkers } from './parser-pool.js';
@@ -9,8 +10,9 @@ export const CONTEXT_CACHE_BUDGET = 256 * 1024 * 1024;
 let timer: NodeJS.Timeout | undefined, lastCheck = 0, evictions = 0, cleanupErrors = 0;
 export function cacheStatus() {
     const graphs = codeGraph.status(), files = projectIndex.status(), parser = codeCacheStatus();
-    const estimated = parser.bytes + graphs.reduce((n, g) => n + g.metadataBytes * 2 + g.nodes * 512, 0) + files.reduce((n, f) => n + f.memoryBytes, 0);
-    return { estimatedRetainedContextBytes: estimated, retainedContextBudgetBytes: CONTEXT_CACHE_BUDGET,
+    const workers = workerCoordinator.stats();
+    const estimated = workers.estimatedRetainedBytes + parser.bytes + graphs.reduce((n, g) => n + g.metadataBytes * 2 + g.nodes * 512, 0) + files.reduce((n, f) => n + f.memoryBytes, 0);
+    return { workerCoordination: workers, estimatedRetainedContextBytes: estimated, retainedContextBudgetBytes: CONTEXT_CACHE_BUDGET,
         diskContextCacheBytes: 0, scratchBudgetBytes: SCRATCH_BUDGET, idleCacheTtlMs: 5 * 60000,
         evictions, cleanupErrors, rssBytes: process.memoryUsage().rss,
         note: 'Budgets cover managed cache payloads and BRC scratch, not installed packages, user projects, Docker images, operational authentication databases or an OS-enforced total RSS limit. Native decoding/parser allocations and JS object overhead are reported separately through process memory.' };
@@ -21,6 +23,7 @@ export function reclaimCaches(now = Date.now(), force = false) {
     lastCheck = now;
     evictions += codeGraph.pruneIdle(now) + projectIndex.pruneIdle(now) + pruneCodeCache(now);
     pruneHarnessSessions(now);
+    workerCoordinator.prune(now);
     if (cacheStatus().estimatedRetainedContextBytes > CONTEXT_CACHE_BUDGET) {
         evictions += codeGraph.pruneIdle(now, true) + projectIndex.pruneIdle(now, true) + pruneCodeCache(now, true);
         releaseIdleParserWorkers();

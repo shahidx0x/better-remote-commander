@@ -2,7 +2,7 @@
 
 Device agent for **Better Remote Commander** — self-hosted remote control of your computers from Claude and ChatGPT.
 Runs on the machine you want to control and connects *outbound* to your own `brc-relay`. Exposes files, terminal and
-processes and coding workflows (67 tools, including BRC-native tools) to any AI client authorized on the relay.
+processes and coding workflows (70 tools, including BRC-native tools) to any AI client authorized on the relay.
 
 ## Install
 
@@ -58,3 +58,7 @@ From the repository root, run `pnpm install`, `pnpm build`, then `START_AGENT.cm
 ## Faster batches, infrastructure and images
 
 See [the fast-agent guide](../../docs/fast-agent.md) for 64-call read waves/write barriers, combined workspace edits/readback/checks, Docker observation, actual image previews, optional restricted execution, automatic cache eviction and `pnpm bench:io`. Diagnostics remain live-only. These tools do not add another model or a graph database.
+
+## Optional host-native worker coordination
+
+See [the parallel-worker guide](../../docs/parallel-workers.md) for `worker_tasks`, `worker_patch`, and `worker_integrate`. Native AI workers, when the host actually supports them with BRC access, can claim independent scopes and submit patches without directly editing shared source. One parent integrates and verifies. Hosts without native workers keep ordinary batches; no model/API calls are added. `workspace_batch` also supports optional 1-4-way distinct-file publication with settled-wave rollback. Diagnostics and coordinator state remain live-only/RAM-only.

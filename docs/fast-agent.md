@@ -1,6 +1,6 @@
 # Fast coding tools, Docker observation, images and optional isolation
 
-This checkout exposes 67 agent tools plus the relay's `list_devices` (68 total in the default full profile). The work happens on the local agent; the relay authenticates, routes requests and advertises tools. There is no new model, orchestration framework, graph database or dependency installation for this upgrade.
+This checkout exposes 70 agent tools plus the relay's `list_devices` (71 total in the default full profile). The work happens on the local agent; the relay authenticates, routes requests and advertises tools. There is no new model, orchestration framework, graph database or dependency installation for this upgrade.
 
 ## The short workflow
 
@@ -127,3 +127,7 @@ The lessons do not establish a measured speedup for this implementation. Use the
 `START_AGENT.cmd` with no arguments asks for a URL only on first use. Saved connections auto-start after four seconds; Enter connects now and M opens settings. M remains available during idle live operation, even after new logs. Active tool calls are never interrupted by opening settings. See [the launch guide](coding-agent.md#run-your-checkout). The menu has no file-operation hot-path work and adds no dependency.
 
 Automatic cleanup removes only disposable graph/index/parser memory, known legacy BRC log files, and marked BRC sandbox input copies. No disk graph database exists. Source projects, Docker images, active credentials, and operational relay accounts are not targets. Forget is a separate explicit action: it removes only this agent's saved relay URL/token, not the old server's device entry.
+
+## Optional host-native worker coordination
+
+See [the parallel-worker guide](parallel-workers.md) for `worker_tasks`, `worker_patch`, and `worker_integrate`. Native AI workers, when the host actually supports them with BRC access, can claim independent scopes and submit patches without directly editing shared source. One parent integrates and verifies. Hosts without native workers keep ordinary batches; no model/API calls are added. `workspace_batch` also supports optional 1-4-way distinct-file publication with settled-wave rollback. Diagnostics and coordinator state remain live-only/RAM-only.

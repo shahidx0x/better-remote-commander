@@ -40,3 +40,7 @@ Review the working-tree diff. Report what changed, which checks passed, and any 
 ## Fast, evidence-based tool use
 
 Read `docs/fast-agent.md`. Prefer bounded batched reads and workspace edits/readbacks to many tiny remote calls. Keep mutations ordered and check hashes; never trade correctness for a latency claim. Inspect actual Docker containers/images before proposing duplicates, and do not translate a daemon error into an empty inventory. Image previews must be returned as image blocks, not massive escaped base64 text. Sandbox execution is explicit and never falls back to the host. Do not start Docker or pull/build images merely to satisfy an isolated test. Context caches stay in RAM; cleanup may remove only marked BRC-owned disposable scratch, never projects or credentials.
+
+## Optional coordinated workers
+
+Read `docs/parallel-workers.md`. Use actual host-native subagents for independent tasks only when this host supports spawning them with the required tools; never invent worker execution. Keep the parent coordinator key separate. Workers claim scoped tasks, read in batches and submit proposed patches. The parent previews/applies and runs real combined checks. Existing arbitrary terminal authority is not a sandbox; restrict delegated workers to read/context and claim/patch tools where supported. Keep task/patch state bounded in RAM, do not add provider calls, and retain the one-agent batch path for small tasks and incapable hosts.

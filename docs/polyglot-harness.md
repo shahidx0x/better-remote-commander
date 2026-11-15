@@ -24,7 +24,7 @@ A registered grammar does not mean every declaration construct has an extraction
 
 ## Tools
 
-The default full profile exposes 67 agent tools plus the relay's `list_devices` (68 total). Existing tools were extended rather than duplicated for each language.
+The default full profile exposes 70 agent tools plus the relay's `list_devices` (71 total). Existing tools were extended rather than duplicated for each language.
 
 - `language_capabilities`: exact parser/text capabilities, parser cache and graph status.
 - `code_graph`: query/refresh/status/clear a bounded file/import metadata graph; traverse dependencies or importers.
@@ -115,3 +115,7 @@ Rebuild/restart the local agent to activate the compiled source. Rebuild/redeplo
 ## Faster batches, infrastructure and images
 
 See [the fast-agent guide](fast-agent.md) for 64-call read waves/write barriers, combined workspace edits/readback/checks, Docker observation, actual image previews, optional restricted execution, automatic cache eviction and `pnpm bench:io`. Diagnostics remain live-only. These tools do not add another model or a graph database.
+
+## Optional host-native worker coordination
+
+See [the parallel-worker guide](parallel-workers.md) for `worker_tasks`, `worker_patch`, and `worker_integrate`. Native AI workers, when the host actually supports them with BRC access, can claim independent scopes and submit patches without directly editing shared source. One parent integrates and verifies. Hosts without native workers keep ordinary batches; no model/API calls are added. `workspace_batch` also supports optional 1-4-way distinct-file publication with settled-wave rollback. Diagnostics and coordinator state remain live-only/RAM-only.

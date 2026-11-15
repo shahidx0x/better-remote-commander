@@ -7,6 +7,7 @@
  * Env: BRC_RELAY, BRC_NAME, BRC_TOKEN, BRC_DEVICE_ID, BRC_HOME, BRC_DEBUG
  */
 import os from 'node:os';
+import { workerCoordinator } from './runtime/worker-coordination.js';
 import { listenForTerminalShortcuts } from './terminal-shortcuts.js';
 import { createTerminalPrompts, resolveStartupConnection, shouldPromptForConnection, type ConnectionOptions } from './terminal-setup.js';
 import { startResourceMaintenance, stopResourceMaintenance } from './runtime/resource-limits.js';
@@ -226,6 +227,7 @@ function shutdown(reason: string): void {
   projectIndex.close();
   codeGraph.clear();
   clearCodeCache();
+  workerCoordinator.clear();
   const exit = () => process.exit(0);
   const timer = setTimeout(exit, 1500);
   import('./core/config-manager.js')

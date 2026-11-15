@@ -46,7 +46,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    const r=await tool('verify_project',{cwd:project,commands:[{name:'syntax check',command:'node --check sample.ts'}]});assert.equal(r.isError,false);assert.equal(r.structuredContent.passed,true);
   });
   await t.test('project context, symbol tools and safe previews traverse real MCP',async()=>{
-   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,68);assert.ok(defs.tools.some(t=>t.name==='coding_session'));
+   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,71);assert.ok(defs.tools.some(t=>t.name==='coding_session'));
    const context=await tool('project_context',{path:project,focus:'sample.ts'});assert.equal(context.isError,false);assert.equal(context.structuredContent.package.packageManager,'pnpm');assert.ok(context.structuredContent.instructions.some(x=>x.path==='AGENTS.md'));
    const outline=await tool('code_outline',{path:p});assert.equal(outline.isError,false);assert.ok(outline.structuredContent.symbols.some(s=>s.name==='value'));
    const symbol=await tool('read_symbol',{path:p,name:'value'});assert.equal(symbol.isError,false);assert.match(symbol.structuredContent.text,/value = 2/);
@@ -88,6 +88,23 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    const block=preview.content.find(x=>x.type==='image');assert.ok(block);assert.equal(block.mimeType,'image/webp');assert.equal((await sharp(Buffer.from(block.data,'base64')).metadata()).width,128);
    assert.ok(!preview.content.filter(x=>x.type==='text').some(x=>x.text.includes(block.data)));
    const status=await tool('agent_status');assert.equal(status.structuredContent.resources.diskContextCacheBytes,0);
+  });
+  await t.test('independent worker clients coordinate patches and final checks over real MCP',async()=>{
+   const made=await tool('worker_tasks',{action:'create',path:project,goal:'Parallel changes with one verified integration',hostMode:'native_workers',tasks:[{id:'front',goal:'Change the saved constant',scope:['sample.ts']},{id:'back',goal:'Improve the Rust function',scope:['lib.rs']}],requiredChecks:['test']});
+   assert.equal(made.isError,false,JSON.stringify(made));const plan=made.structuredContent;assert.equal(plan.spawnedModels,0);
+   const leases=await Promise.all(['front','back'].map(taskId=>tool('worker_tasks',{action:'claim',planId:plan.planId,taskId,workerId:taskId,reads:[{path:taskId==='front'?'sample.ts':'lib.rs'}]})));
+   leases.forEach(r=>assert.equal(r.isError,false,JSON.stringify(r)));
+   const beforeTs=await fs.readFile(p,'utf8'),rs=path.join(project,'lib.rs'),beforeRs=await fs.readFile(rs,'utf8');
+   const pending=leases.map((r,i)=>tool('worker_patch',{planId:plan.planId,taskId:i===0?'front':'back',claimKey:r.structuredContent.claimKey,submissionId:'proposal-'+i,summary:'Unverified proposal',changes:[{path:i===0?'sample.ts':'lib.rs',expected_sha256:r.structuredContent.snapshot.reads[0].sha256,content:i===0?beforeTs.replace('value = 2','value = 4'):'pub fn hello() -> i32 { 4 }'}]}));
+   const proposed=await Promise.all(pending);proposed.forEach(r=>assert.equal(r.isError,false,JSON.stringify(r)));assert.equal(await fs.readFile(p,'utf8'),beforeTs);assert.equal(await fs.readFile(rs,'utf8'),beforeRs);
+   const direct=await tool('write_file',{path:p,content:'incorrect bypass',mode:'rewrite'});assert.equal(direct.structuredContent.error.code,'COORDINATED_WRITE_REQUIRED');
+   const preview=await tool('worker_integrate',{planId:plan.planId,coordinatorKey:plan.coordinatorKey});assert.equal(preview.isError,false,JSON.stringify(preview));
+   const applyArgs={action:'apply',planId:plan.planId,coordinatorKey:plan.coordinatorKey,review_sha256:preview.structuredContent.review_sha256,runChecks:true};
+   const applied=await tool('worker_integrate',applyArgs);assert.equal(applied.isError,false,JSON.stringify(applied));assert.equal(applied.structuredContent.checks.passed,true);assert.match(await fs.readFile(p,'utf8'),/value = 4/);
+   const replay=await tool('worker_integrate',applyArgs);assert.equal(replay.structuredContent.replay,true);assert.equal(replay.structuredContent.checks,undefined);
+   const finish=await tool('worker_integrate',{action:'finish',planId:plan.planId,coordinatorKey:plan.coordinatorKey});assert.equal(finish.isError,false,JSON.stringify(finish));assert.equal(finish.structuredContent.verifiedCurrentSource,true);
+   const status=await tool('agent_status');assert.equal(status.structuredContent.resources.workerCoordination.patchBytes,0);assert.equal(status.structuredContent.resources.workerCoordination.spawnedModels,0);
+   assert.ok(!output.includes(plan.coordinatorKey));for(const r of leases)assert.ok(!output.includes(r.structuredContent.claimKey));
   });
   await t.test('a long-running remote command can be inspected and cancelled' ,async()=>{
    const pending=tool('run_command',{cwd:project,command:'node -e "setInterval(()=>{},1000)"',timeout_ms:15000});

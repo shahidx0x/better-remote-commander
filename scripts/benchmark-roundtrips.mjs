@@ -13,7 +13,7 @@ const sha=s=>createHash('sha256').update(s).digest('hex');
 const dir=mkdtempSync(path.join(realpathSync.native(tmpdir()),'brc-io-bench-'));
 const project=path.join(dir,'project'),home=path.join(dir,'agent');await fs.mkdir(project);
 const source=i=>`// fixture ${i}\nexport function sample${i}() { return ${i}; }\n`;
-for(let i=0;i<N;i++){await fs.writeFile(path.join(project,`read-${i}.ts`),source(i));await fs.writeFile(path.join(project,`single-${i}.txt`),'baseline');await fs.writeFile(path.join(project,`batch-${i}.txt`),'baseline');}
+for(let i=0;i<N;i++){await fs.writeFile(path.join(project,`read-${i}.ts`),source(i));await fs.writeFile(path.join(project,`single-${i}.txt`),'baseline');await fs.writeFile(path.join(project,`batch-${i}.txt`),'baseline');await fs.writeFile(path.join(project,`parallel-${i}.txt`),'baseline');}
 const relay=buildRelay({port:0,host:'127.0.0.1',publicUrl:'http://127.0.0.1:3210',trustProxy:false,dbFile:path.join(dir,'relay.sqlite'),sessionSecret:randomBytes(20).toString('hex'),adminUser:'benchmark',adminPassword:randomBytes(20).toString('hex'),relayVersion:'benchmark'},()=>{});
 await new Promise(r=>relay.http.listen(0,'127.0.0.1',r));
 const url=`http://127.0.0.1:${relay.http.address().port}`,u=relay.store.getUserByName('benchmark');
@@ -33,7 +33,7 @@ try{
  const start=Date.now();while(relay.hub.list().length===0){if(child.exitCode!==null||Date.now()-start>20000)throw new Error('Benchmark agent did not connect: '+childOutput);await sleep(30);}
  await rpc('initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'local-benchmark',version:'1'}});
  const before=await tool('agent_status');await tool('read_code_file',{path:path.join(project,'read-0.ts'),length:20});
- const singleReads=[],batchReads=[],workspaceReads=[],singleWrites=[],workspaceWrites=[];
+ const singleReads=[],batchReads=[],workspaceReads=[],singleWrites=[],workspaceWrites=[],parallelWrites=[];
  let last='baseline';
  for(let round=0;round<ROUNDS;round++){
   singleReads.push(await elapsed(async()=>{for(let i=0;i<N;i++){const out=await tool('read_code_file',{path:path.join(project,`read-${i}.ts`),length:20});assert.equal(out.structuredContent.sha256,sha(source(i)));}}));
@@ -42,13 +42,14 @@ try{
   const next=`verified write round ${round}\n`;
   singleWrites.push(await elapsed(async()=>{for(let i=0;i<N;i++)await tool('write_file',{path:path.join(project,`single-${i}.txt`),mode:'rewrite',expected_sha256:sha(last),content:next});}));
   workspaceWrites.push(await elapsed(async()=>{const out=await tool('workspace_batch',{path:project,dryRun:false,changes:Array.from({length:N},(_,i)=>({path:`batch-${i}.txt`,expected_sha256:sha(last),content:next})),reads:Array.from({length:N},(_,i)=>({path:`batch-${i}.txt`,length:20}))});assert.equal(out.structuredContent.changes.length,N);assert.equal(out.structuredContent.reads.length,N);assert.ok(out.structuredContent.reads.every(r=>r.sha256===sha(next)));}));
+  parallelWrites.push(await elapsed(async()=>{const out=await tool('workspace_batch',{path:project,dryRun:false,writeConcurrency:4,changes:Array.from({length:N},(_,i)=>({path:`parallel-${i}.txt`,expected_sha256:sha(last),content:next})),reads:Array.from({length:N},(_,i)=>({path:`parallel-${i}.txt`,length:20}))});assert.equal(out.structuredContent.writeConcurrency,4);assert.equal(out.structuredContent.changes.length,N);assert.ok(out.structuredContent.reads.every(r=>r.sha256===sha(next)));}));
   for(let i=0;i<N;i++)assert.equal(await fs.readFile(path.join(project,`single-${i}.txt`),'utf8'),next);
   last=next;
  }
  const after=await tool('agent_status');
  console.log(JSON.stringify({fixture:`${N} small files`,transport:'loopback HTTP MCP + relay + WebSocket + separate agent process',rounds:ROUNDS,
   read:{separateCalls:N,separateMedianMs:median(singleReads),autoBatchCalls:1,autoBatchMedianMs:median(batchReads),workspaceCalls:1,workspaceMedianMs:median(workspaceReads)},
-  write:{separateCalls:N,separateMedianMs:median(singleWrites),workspaceCalls:1,workspaceWriteAndReadbackMedianMs:median(workspaceWrites)},
+  write:{separateCalls:N,separateMedianMs:median(singleWrites),workspaceCalls:1,workspaceWriteAndReadbackMedianMs:median(workspaceWrites),parallelWriteConcurrency:4,parallelWriteAndReadbackMedianMs:median(parallelWrites)},
   agentRssMiB:{before:+(before.structuredContent.memoryBytes/1048576).toFixed(1),after:+(after.structuredContent.memoryBytes/1048576).toFixed(1)},managedContextBytes:after.structuredContent.resources.estimatedRetainedContextBytes,
   caveat:'Local synthetic timings only, not measured Internet/ChatGPT latency. Model generation and deployment network are excluded. No blanket production speedup or hard RSS guarantee.'},null,2));
 }finally{
