@@ -237,20 +237,36 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   /* ---------- MCP endpoint (stateless: new server + transport per request) ---------- */
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
-  app.all('/mcp', bearer, express.json({ limit: '32mb' }), async (req, res) => {
-    const auth = (req as Request & { auth?: AuthInfo }).auth!;
-    const userId = String(auth.extra?.userId ?? '');
-    if (!userId) return res.status(401).json({ error: 'invalid_token' });
-    const server = createMcpServer(hub, store, { userId, clientId: auth.clientId }, cfg.relayVersion);
+  const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
-      log('error', `mcp request failed: ${err instanceof Error ? err.message : String(err)}`);
+      // Never log credential-bearing URLs or request bodies.
+      log('error', `mcp request failed: ${err instanceof Error ? err.name : 'unexpected error'}`);
       if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'internal error' }, id: null });
     }
+  };
+
+  app.all('/mcp', bearer, express.json({ limit: '32mb' }), async (req, res) => {
+    const auth = (req as Request & { auth?: AuthInfo }).auth!;
+    const userId = String(auth.extra?.userId ?? '');
+    if (!userId) return res.status(401).json({ error: 'invalid_token' });
+    await handleMcp(req, res, userId, auth.clientId);
+  });
+
+  // OAuth-free capability URLs: no redirect_uri, no Authorization header, no public anonymous access.
+  // A fresh SQLite token-hash lookup is required for every request, including after revocation.
+  app.all('/c/:key/mcp', (req, res, next) => {
+    if (!store.getConnectionLink(String(req.params.key ?? ''))) return res.status(404).json({ error: 'invalid_connection' });
+    next();
+  }, express.json({ limit: '32mb' }), async (req, res) => {
+    const link = store.getConnectionLink(String(req.params.key ?? ''));
+    if (!link) return res.status(404).json({ error: 'invalid_connection' });
+    await handleMcp(req, res, link.user_id, `link:${link.id}`, link.mode);
   });
 
   /* ---------- admin dashboard ---------- */
@@ -289,6 +305,35 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   app.post('/auth/apikeys/revoke', requireLogin, (req, res) => {
     store.revokeApiKey(currentUser(req)!, String(req.body.prefix ?? ''));
     res.redirect('/auth/apikeys');
+  });
+
+  /* ---------- Copy/paste connection URLs: no OAuth callback required ---------- */
+  app.get('/auth/links', requireLogin, (req, res) => {
+    const userId = currentUser(req)!;
+    res.type('html').send(adminPages.connectionLinksPage(store.listConnectionLinks(userId), sessions.csrfToken(req)!));
+  });
+  app.post('/auth/links', requireLogin, (req, res) => {
+    if (!sessions.checkCsrf(req, req.body?.csrf)) return res.status(403).type('html').send(pages.messagePage('Forbidden', 'Invalid form token. Reload the links page.', false));
+    const userId = currentUser(req)!;
+    const csrf = sessions.csrfToken(req)!;
+    try {
+      if (publicUrl.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(publicUrl.hostname))
+        throw new Error('A public connection URL requires HTTPS.');
+      const name = String(req.body?.name ?? '').trim().slice(0, 80);
+      const mode = req.body?.mode === 'full' ? 'full' : req.body?.mode === 'read' ? 'read' : null;
+      const days = Number(req.body?.days);
+      if (!mode) throw new Error('Choose a valid access level.');
+      const created = store.createConnectionLink(userId, name, mode, days);
+      const url = `${cfg.publicUrl}/c/${created.key}/mcp`;
+      res.type('html').send(adminPages.connectionLinksPage(store.listConnectionLinks(userId), csrf, { name, url, expiresAt: created.expiresAt }));
+    } catch (error) {
+      res.status(400).type('html').send(adminPages.connectionLinksPage(store.listConnectionLinks(userId), csrf, undefined, error instanceof Error ? error.message : 'Invalid request'));
+    }
+  });
+  app.post('/auth/links/revoke', requireLogin, (req, res) => {
+    if (!sessions.checkCsrf(req, req.body?.csrf)) return res.status(403).type('html').send(pages.messagePage('Forbidden', 'Invalid form token. Reload the links page.', false));
+    store.revokeConnectionLink(currentUser(req)!, String(req.body?.link_id ?? ''));
+    res.redirect('/auth/links');
   });
 
   /* ---------- agent WebSocket (device token) ---------- */

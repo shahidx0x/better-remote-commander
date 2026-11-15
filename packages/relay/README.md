@@ -36,7 +36,18 @@ Recommended Easypanel settings are **Build Path `/`** with **Dockerfile `package
 
 ## Connect clients
 
-- **Claude**: Settings → Connectors → add `https://brc.example.com/mcp` → sign in → Allow
-- **ChatGPT (MCP)**: same URL as a connector
+### One-click private URL (no OAuth callback)
+1. Sign in to `https://your-relay.example/auth/links` (or click **Connect without OAuth** in the admin dashboard).
+2. Name the connection, choose **read only** or **full access**, choose 1/7/30/90-day expiry, and click **Generate private MCP URL**.
+3. Copy the generated `https://your-relay.example/c/brc_link_<random-secret>/mcp` into any client that supports a custom **Streamable HTTP MCP** server with **No authentication**.
+4. Revoke it from the same page when no longer needed. Expired links stop working automatically.
+
+This skips the OAuth login/redirect flow **but is not public anonymous access**. The URL itself is a 256-bit bearer credential: anyone holding it can use the permitted tools. The raw secret is shown once, only its SHA-256 hash is stored in the relay's operational SQLite database, and no per-call activity records are saved. Treat the URL like a password, never place it in issues/screenshots/logs, and do not expose the relay's port 3000 over unencrypted HTTP. Reverse proxies and hosting providers can independently log URL paths; configure their access-log redaction or disable access logging. New connections require the user's authenticated admin session and CSRF token.
+
+**Existing OAuth remains available** and is appropriate for clients requiring it:
+- **Claude**: Settings → Connectors → add `https://your-relay.example/mcp` → sign in → Allow
+- **ChatGPT (MCP)**: same normal OAuth endpoint.
+
+Not every MCP host supports a no-auth remote HTTP URL or suppresses OAuth. This option works in clients that support it; it cannot force unrelated AI products to bypass their own connection policies.
 
 Full docs: https://github.com/shahidx0x/better-remote-commander · License MIT.

@@ -110,3 +110,41 @@ test('device hub: hello/welcome, call/result matching, protocol + id checks, def
   assert.equal(old.closed?.code, 1002, 'protocol mismatch rejected');
   hub.close();
 });
+
+test('URL-only MCP credentials: hashed storage, owner-scoped revoke, expiry and limits', () => {
+  const s = new SqliteStore(':memory:');
+  try {
+    const first = s.upsertUser('first-user', 'test-pw');
+    const other = s.upsertUser('other-user', 'test-pw');
+    const created = s.createConnectionLink(first.id, 'my client', 'read', 1);
+    assert.match(created.key, /^brc_link_[A-Za-z0-9_-]{43}$/);
+    assert.equal(s.listConnectionLinks(first.id).length, 1);
+    assert.equal(s.listConnectionLinks(other.id).length, 0);
+    assert.equal(s.getConnectionLink(created.key)?.user_id, first.id);
+    assert.equal(s.getConnectionLink(created.key)?.mode, 'read');
+    assert.equal(s.getConnectionLink(created.key + 'x'), undefined);
+    assert.equal(s.getConnectionLink('invalid'), undefined);
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM audit').get().n, 0);
+    const record = s.db.prepare('SELECT key_hash FROM connection_links WHERE id=?').get(created.id);
+    assert.equal(record.key_hash, createHash('sha256').update(created.key).digest('hex'));
+    assert.notEqual(record.key_hash, created.key);
+    assert.equal(s.revokeConnectionLink(other.id, created.id), false, 'another account cannot revoke this URL');
+    assert.equal(s.getConnectionLink(created.key)?.id, created.id);
+    assert.equal(s.revokeConnectionLink(first.id, created.id), true);
+    assert.equal(s.getConnectionLink(created.key), undefined, 'revoke takes effect without cache');
+    assert.equal(s.revokeConnectionLink(first.id, created.id), false);
+
+    const expires = s.createConnectionLink(first.id, 'short-lived', 'full', 7);
+    s.db.prepare('UPDATE connection_links SET expires_at = ? WHERE id = ?').run(Date.now() - 5, expires.id);
+    assert.equal(s.getConnectionLink(expires.key), undefined);
+    s.vacuumExpired();
+    assert.equal(s.listConnectionLinks(first.id).length, 0);
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM connection_links').get().n, 0);
+    assert.throws(() => s.createConnectionLink(first.id, 'x', 'full', 365));
+    assert.throws(() => s.createConnectionLink(first.id, 'x', 'nope', 7));
+    assert.throws(() => s.createConnectionLink(first.id, '', 'read', 7));
+    for (let i = 0; i < 20; i++) s.createConnectionLink(first.id, 'test ' + i, 'read', 7);
+    assert.throws(() => s.createConnectionLink(first.id, 'too-many', 'read', 7), /Maximum 20/);
+    assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM audit').get().n, 0);
+  } finally { s.close(); }
+});

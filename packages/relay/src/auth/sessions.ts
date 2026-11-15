@@ -27,6 +27,20 @@ export class Sessions {
     res.clearCookie(COOKIE, { path: '/' });
   }
 
+  /** Stateless CSRF protection for security-sensitive link creation/revocation forms. */
+  csrfToken(req: Request): string | null {
+    const raw = req.cookies?.[COOKIE] as string | undefined;
+    if (!raw || !this.userId(req)) return null;
+    return this.sign('connection-link-form:' + raw);
+  }
+
+  checkCsrf(req: Request, candidate: unknown): boolean {
+    const expected = this.csrfToken(req);
+    if (!expected || typeof candidate !== 'string') return false;
+    const a = Buffer.from(expected), b = Buffer.from(candidate);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
   userId(req: Request): string | null {
     const raw = req.cookies?.[COOKIE] as string | undefined;
     if (!raw) return null;
