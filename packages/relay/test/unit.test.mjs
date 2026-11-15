@@ -148,3 +148,37 @@ test('URL-only MCP credentials: hashed storage, owner-scoped revoke, expiry and 
     assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM audit').get().n, 0);
   } finally { s.close(); }
 });
+
+test('manual OAuth recovery validates issuer, callback, PKCE and explicit owner approval', async () => {
+  const { parseAuthorizeRequest, validateRedirectUri, approveCallback } = await import('../dist/auth/client-recovery.js');
+  const base = 'https://my-relay.example';
+  const challenge = 'a'.repeat(43);
+  const make = (callback = 'https://arbitrary-wrapper.example/oauth/cb') =>
+    base + '/authorize?response_type=code&client_id=cl_oldWrapper99&redirect_uri=' + encodeURIComponent(callback)
+    + '&code_challenge=' + challenge + '&code_challenge_method=S256&resource=' + encodeURIComponent(base + '/mcp');
+  const known = make();
+  const parsed = parseAuthorizeRequest(known, base);
+  assert.equal(parsed.clientId, 'cl_oldWrapper99');
+  assert.equal(parsed.redirectUri, 'https://arbitrary-wrapper.example/oauth/cb');
+  assert.throws(() => parseAuthorizeRequest(make('https://user:pw@evil.example/cb'), base), /credentials/);
+  assert.throws(() => parseAuthorizeRequest(make('https://evil.example/cb#fragment'), base), /fragments/);
+  assert.throws(() => parseAuthorizeRequest(make('http://example.com/cb'), base), /HTTPS/);
+  assert.equal(validateRedirectUri('http://127.0.0.1:7821/callback'), 'http://127.0.0.1:7821/callback');
+  assert.throws(() => parseAuthorizeRequest(known.replace('code_challenge_method=S256', 'code_challenge_method=plain'), base), /S256/);
+  assert.throws(() => parseAuthorizeRequest(known.replace('/authorize?', '/random?'), base), /not an authorization/);
+  assert.throws(() => parseAuthorizeRequest(known.replace('/authorize?', '/authorize?client_id=duplicate&'), base), /duplicate/);
+  assert.throws(() => parseAuthorizeRequest(known.replace('my-relay.example', 'foreign.example'), base), /not an authorization/);
+  assert.throws(() => parseAuthorizeRequest(known.replace('my-relay.example%2Fmcp', 'another.example%2Fmcp'), base), /resource/);
+  const store = new SqliteStore(':memory:');
+  try {
+    assert.equal(approveCallback(store, parsed, 'Wrapper'), 'registered');
+    const row = store.getClient(parsed.clientId);
+    const metadata = JSON.parse(row.metadata);
+    assert.equal(metadata.token_endpoint_auth_method, 'none');
+    assert.deepEqual(metadata.redirect_uris, [parsed.redirectUri]);
+    assert.equal(approveCallback(store, parsed, 'Wrapper'), 'already_registered');
+    assert.equal(approveCallback(store, { clientId: parsed.clientId, redirectUri: 'https://another.example/cb' }, 'Other'), 'added_callback');
+    assert.deepEqual(JSON.parse(store.getClient(parsed.clientId).metadata).redirect_uris, [parsed.redirectUri, 'https://another.example/cb']);
+    assert.throws(() => approveCallback(store, { clientId: parsed.clientId, redirectUri: 'http://remote.example/cb' }, 'Bad'), /HTTPS/);
+  } finally { store.close(); }
+});

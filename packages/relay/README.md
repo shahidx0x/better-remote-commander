@@ -44,6 +44,32 @@ Recommended Easypanel settings are **Build Path `/`** with **Dockerfile `package
 
 This skips the OAuth login/redirect flow **but is not public anonymous access**. The URL itself is a 256-bit bearer credential: anyone holding it can use the permitted tools. The raw secret is shown once, only its SHA-256 hash is stored in the relay's operational SQLite database, and no per-call activity records are saved. Treat the URL like a password, never place it in issues/screenshots/logs, and do not expose the relay's port 3000 over unencrypted HTTP. Reverse proxies and hosting providers can independently log URL paths; configure their access-log redaction or disable access logging. New connections require the user's authenticated admin session and CSRF token.
 
+### Repair OAuth for any wrapper you trust
+
+BRC accepts dynamic OAuth client registrations from clients that implement DCR. Other
+wrappers may save a `client_id` that becomes unknown after a relay redeployment,
+or they may supply an HTTPS callback that has never been registered. Instead of
+a raw `invalid_client` error, such valid PKCE requests now show a
+**Review and approve callback** page.
+
+1. Open the wrapper's original `https://your-relay.example/authorize?...` link.
+2. Click **Review and approve callback**. Sign in to BRC.
+3. Confirm the exact callback domain and tick the trust checkbox.
+4. Click **Approve callback and continue**. BRC preserves the original client ID,
+   registers the exact callback, and continues the original OAuth request.
+
+Alternatively, open `/auth/clients` yourself and use **Option A** to paste the
+full `/authorize` URL or **Option B** to enter a client ID plus a callback URL.
+Any HTTPS callback you explicitly trust is allowed; localhost HTTP is also
+supported for native apps. OAuth still requires PKCE S256 and the normal
+authorization consent. A new callback for an existing ID needs separate approval.
+
+**Important:** Persist `/data` as an Easypanel volume. The SQLite file
+`/data/relay.sqlite` contains the registered OAuth clients, accounts,
+tokens and device pairing. Without persistent storage, Docker image recreation
+can erase those registrations. Do not disable Cloudflare HTTPS proxy or remove
+OAuth redirect validation to fix a stale client ID.
+
 **Existing OAuth remains available** and is appropriate for clients requiring it:
 - **Claude**: Settings → Connectors → add `https://your-relay.example/mcp` → sign in → Allow
 - **ChatGPT (MCP)**: same normal OAuth endpoint.

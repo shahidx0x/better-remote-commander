@@ -20,6 +20,7 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { DeviceHub } from './device-hub.js';
 import { SqliteStore, verifyPassword } from './store/sqlite.js';
 import { RelayOAuthProvider, SCOPES } from './auth/provider.js';
+import { parseAuthorizeRequest, validateClientId, validateRedirectUri, approveCallback } from './auth/client-recovery.js';
 import { Sessions } from './auth/sessions.js';
 import { createMcpServer } from './mcp/server.js';
 import * as pages from './pages/html.js';
@@ -115,6 +116,29 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata));
   app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata));
   app.get('/.well-known/oauth-protected-resource/mcp', (_req, res) => res.json(protectedResourceMetadata));
+
+  // A lost/stale client ID or a newly requested callback gets a useful recovery
+  // screen. No registration happens here: only an authenticated admin can approve it.
+  // Valid registered clients continue through the SDK's standard exact-match checks.
+  app.get('/authorize', (req, res, next) => {
+    let requested;
+    try { requested = parseAuthorizeRequest(cfg.publicUrl + req.originalUrl, cfg.publicUrl); }
+    catch { return next(); } // Let the OAuth SDK reject malformed requests normally.
+    const saved = store.getClient(requested.clientId);
+    let allowed = false;
+    if (saved) {
+      try {
+        const metadata = JSON.parse(saved.metadata) as { redirect_uris?: string[] };
+        allowed = Array.isArray(metadata.redirect_uris) && metadata.redirect_uris.includes(requested.redirectUri);
+      } catch { /* Invalid saved metadata should not authorize any redirect. */ }
+    }
+    if (allowed) return next();
+    const approve = new URL('/auth/clients', cfg.publicUrl);
+    approve.searchParams.set('authorize', requested.authorizeUrl!);
+    return res.status(400).type('html').send(
+      pages.oauthClientRecoveryPage(requested.clientId, requested.redirectUri, approve.pathname + approve.search, !saved),
+    );
+  });
 
   app.use(mcpAuthRouter({
     provider,
@@ -228,9 +252,47 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const m = JSON.parse(c.metadata) as { client_name?: string; redirect_uris?: string[] };
     return { client_id: c.client_id, name: m.client_name ?? c.client_id, redirect_uris: m.redirect_uris ?? [], hasSecret: !!c.client_secret, created_at: c.created_at };
   });
-  app.get('/auth/clients', requireLogin, (_req, res) => res.type('html').send(pages.clientsPage(clientRows())));
+  app.get('/auth/clients', requireLogin, (req, res) => {
+    const csrf = sessions.csrfToken(req)!;
+    const pasted = typeof req.query.authorize === 'string' ? req.query.authorize : '';
+    let recovery;
+    let feedback;
+    if (pasted) {
+      try {
+        const details = parseAuthorizeRequest(pasted, cfg.publicUrl);
+        recovery = { authorizeUrl: details.authorizeUrl!, clientId: details.clientId, redirectUri: details.redirectUri };
+      } catch (error) {
+        feedback = { ok: false, message: error instanceof Error ? error.message : 'Invalid authorization request' };
+      }
+    } else if (req.query.added === '1') {
+      feedback = { ok: true, message: 'OAuth callback approved. You can retry connecting your AI application.' };
+    }
+    res.type('html').send(pages.clientsPage(clientRows(), csrf, recovery, feedback));
+  });
+  app.post('/auth/clients/import', requireLogin, (req, res) => {
+    if (!sessions.checkCsrf(req, req.body?.csrf)) return res.status(403).type('html').send(pages.messagePage('Forbidden', 'Invalid form token. Reload the clients page.', false));
+    if (req.body?.trust !== 'yes') return res.status(400).type('html').send(pages.messagePage('Not approved', 'You must explicitly approve the callback destination.', false));
+    const csrf = sessions.csrfToken(req)!;
+    try {
+      const rawAuthorize = String(req.body?.authorization_url ?? '').trim();
+      const input = rawAuthorize
+        ? parseAuthorizeRequest(rawAuthorize, cfg.publicUrl)
+        : { clientId: validateClientId(String(req.body?.client_id ?? '')), redirectUri: validateRedirectUri(String(req.body?.redirect_uri ?? '')) };
+      approveCallback(store, input, String(req.body?.client_name ?? ''));
+      // Redirect only to an already validated same-issuer /authorize URL;
+      // the SDK still checks PKCE, scope and exact registered callback.
+      if (input.authorizeUrl) return res.redirect(303, input.authorizeUrl);
+      res.redirect(303, '/auth/clients?added=1');
+    } catch (error) {
+      res.status(400).type('html').send(pages.clientsPage(clientRows(), csrf, undefined, {
+        ok: false,
+        message: error instanceof Error ? error.message : 'Could not approve callback',
+      }));
+    }
+  });
   app.post('/auth/clients/delete', requireLogin, (req, res) => {
-    store.deleteClient(String(req.body.client_id ?? ''));
+    if (!sessions.checkCsrf(req, req.body?.csrf)) return res.status(403).type('html').send(pages.messagePage('Forbidden', 'Invalid form token. Reload the clients page.', false));
+    store.deleteClient(String(req.body?.client_id ?? ''));
     res.redirect('/auth/clients');
   });
 

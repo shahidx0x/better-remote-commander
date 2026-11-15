@@ -60,12 +60,52 @@ ${loggedIn ? `<p>Devices:</p>${list}<div class="row"><a href="/admin"><button cl
   : `<div class="row"><a href="/auth/login?returnTo=/"><button class="primary">Sign in</button></a></div>`}`);
 }
 
-export function clientsPage(clients: { client_id: string; name: string; redirect_uris: string[]; hasSecret: boolean; created_at: number }[]): string {
+export function clientsPage(
+  clients: { client_id: string; name: string; redirect_uris: string[]; hasSecret: boolean; created_at: number }[],
+  csrf = '',
+  recovery?: { authorizeUrl: string; clientId: string; redirectUri: string },
+  feedback?: { ok: boolean; message: string },
+): string {
   const rows = clients.length
-    ? `<ul>${clients.map((c) => `<li><strong>${esc(c.name)}</strong><br><code>${esc(c.client_id)}</code>${c.hasSecret ? ' · confidential' : ' · public (PKCE)'}<br><small>${c.redirect_uris.map(esc).join('<br>')}</small>
-<form method="post" action="/auth/clients/delete" style="display:inline"><input type="hidden" name="client_id" value="${esc(c.client_id)}"><button class="secondary danger" style="padding:4px 10px;margin-top:6px" onclick="return confirm('Delete client and revoke its tokens?')">Delete</button></form></li>`).join('')}</ul>`
-    : '<p>No OAuth clients yet. ChatGPT and Claude register automatically when you connect the MCP endpoint.</p>';
+    ? `<ul>${clients.map((c) => `<li style="margin-bottom:16px"><strong>${esc(c.name)}</strong><br><code>${esc(c.client_id)}</code>${c.hasSecret ? ' · confidential' : ' · public (PKCE)'}<br><small>${c.redirect_uris.map(esc).join('<br>')}</small>
+<form method="post" action="/auth/clients/delete" style="display:inline"><input type="hidden" name="csrf" value="${esc(csrf)}"><input type="hidden" name="client_id" value="${esc(c.client_id)}"><button class="secondary danger" style="padding:4px 10px;margin-top:6px" onclick="return confirm('Delete client and revoke its tokens?')">Delete</button></form></li>`).join('')}</ul>`
+    : '<p>No OAuth clients yet. A client must be registered before its saved client ID can authorize.</p>';
+  const recoveryPanel = recovery ? `<div class="panel section"><h2>Authorization request detected</h2>
+<p>Client ID: <code>${esc(recovery.clientId)}</code></p><p>Callback: <code>${esc(recovery.redirectUri)}</code></p>
+<p class="err"><strong>Only approve this site if you trust it to receive authorization codes.</strong></p></div>` : '';
   return layout('OAuth clients', `<h1>OAuth clients</h1>
-<p>These clients are created automatically through OAuth Dynamic Client Registration. No custom callback URL is required here.</p>
-${rows}<p><a href="/admin">Back</a></p>`);
+<p>OAuth clients with dynamic registration work automatically. For wrappers that keep a client ID after redeployments, approve their callback explicitly here.</p>
+${feedback ? `<p class="${feedback.ok ? 'ok' : 'err'}">${esc(feedback.message)}</p>` : ''}
+${recoveryPanel}
+<div class="panel section"><h2>Option A — paste an authorization URL</h2>
+<p>Copy the complete URL beginning with your relay's <code>/authorize?</code> address from the failing login. This preserves the wrapper's existing client ID.</p>
+<form action="/auth/clients/import" method="post">
+<input type="hidden" name="csrf" value="${esc(csrf)}">
+<label>Authorization URL</label><textarea name="authorization_url" rows="4" maxlength="8192" placeholder="https://your-relay.example/authorize?response_type=code&amp;client_id=..." required>${esc(recovery?.authorizeUrl ?? '')}</textarea>
+<label>Display name (optional)</label><input name="client_name" maxlength="80" placeholder="My ChatGPT wrapper">
+<label style="margin-top:18px"><input type="checkbox" name="trust" value="yes" required style="width:auto;margin-right:8px">I recognize and trust the callback destination.</label>
+<div class="row"><button class="primary" type="submit">Approve callback and continue</button></div></form></div>
+<div class="panel section"><h2>Option B — register a client manually</h2>
+<p>If your application only provides a client ID and callback URL, register them here. Its OAuth authorization request must still use PKCE S256.</p>
+<form action="/auth/clients/import" method="post">
+<input type="hidden" name="csrf" value="${esc(csrf)}">
+<label>Client ID</label><input name="client_id" maxlength="128" placeholder="cl_..." required>
+<label>Callback URL (any HTTPS website you approve)</label><input name="redirect_uri" maxlength="2048" placeholder="https://app.example.com/oauth/callback" required>
+<label>Display name (optional)</label><input name="client_name" maxlength="80" placeholder="My AI application">
+<label style="margin-top:18px"><input type="checkbox" name="trust" value="yes" required style="width:auto;margin-right:8px">I recognize and trust this callback destination.</label>
+<div class="row"><button class="primary" type="submit">Register client and callback</button></div></form></div>
+<div class="section"><h2>Approved OAuth clients</h2>${rows}</div>
+<p><a href="/auth/links">Connect without OAuth using a private URL</a> · <a href="/admin">Back to admin</a></p>`, 'wide');
+}
+
+export function oauthClientRecoveryPage(
+  clientId: string, redirectUri: string, recoveryPath: string, missing: boolean,
+): string {
+  return layout('Approve OAuth callback', `<h1>${missing ? 'Unregistered OAuth client' : 'Callback not approved'}</h1>
+<p>BRC received an authorization request from an AI application that needs your approval.</p>
+<p>Client ID: <code>${esc(clientId)}</code></p>
+<p>Requested callback: <code>${esc(redirectUri)}</code></p>
+<p>To allow this application, sign in to your BRC admin dashboard and explicitly approve the callback destination. You can use any HTTPS website you trust.</p>
+<div class="row"><a href="${esc(recoveryPath)}" class="primary" style="padding:10px 14px;border-radius:10px;color:white">Review and approve callback</a></div>
+<p class="err">Only approve a website you trust to receive authorization codes and connect to your devices.</p>`);
 }

@@ -48,7 +48,8 @@ await post('/admin/device', { device_id: deviceId, action: 'rename', name: 'Eray
 
 html = await (await fetch(`${base}/auth/clients`, { headers: { cookie } })).text();
 step('DCR client appears in admin', /admin-test/.test(html) && /https:\/\/x\/cb/.test(html));
-await post('/auth/clients/delete', { client_id: reg.client_id }, cookie);
+const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
+await post('/auth/clients/delete', { client_id: reg.client_id, csrf }, cookie);
 
 let last;
 for (let i = 0; i < 6; i++) last = await post('/auth/login', { username: 'admin', password: 'wrong-' + i, returnTo: '/' });

@@ -92,6 +92,10 @@ export class SqliteStore {
   insertClient(row: ClientRow): void {
     this.db.prepare('INSERT INTO oauth_clients VALUES (?,?,?,?)').run(row.client_id, row.client_secret, row.metadata, row.created_at);
   }
+  updateClientMetadata(clientId: string, metadata: string): void {
+    if (Number(this.db.prepare('UPDATE oauth_clients SET metadata = ? WHERE client_id = ?').run(metadata, clientId).changes) !== 1)
+      throw new Error('OAuth client was removed while its callback was being approved');
+  }
 
   /* ---------- auth codes ---------- */
   insertAuthCode(row: AuthCodeRow): void {
