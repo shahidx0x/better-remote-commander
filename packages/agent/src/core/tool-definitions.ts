@@ -91,61 +91,12 @@ export function buildToolDefinitions(): ToolDefinition[] {
     {
         name: "read_file",
         description: `
-                Read contents from files and URLs.
-                Read PDF files and extract content as markdown and images.
-                
-                Prefer this over 'execute_command' with cat/type for viewing files.
-                
-                Supports partial file reading with:
-                - 'offset' (start line, default: 0)
-                  * Positive: Start from line N (0-based indexing)
-                  * Negative: Read last N lines from end (tail behavior)
-                - 'length' (max lines to read, default: configurable via 'fileReadLineLimit' setting, initially 1000)
-                  * Used with positive offsets for range reading
-                  * Ignored when offset is negative (reads all requested tail lines)
-                
-                Examples:
-                - offset: 0, length: 10     → First 10 lines
-                - offset: 100, length: 5    → Lines 100-104
-                - offset: -20               → Last 20 lines  
-                - offset: -5, length: 10    → Last 5 lines (length ignored)
-                
-                Performance optimizations:
-                - Large files with negative offsets use reverse reading for efficiency
-                - Large files with deep positive offsets use byte estimation
-                - Small files use fast readline streaming
-                
-                When reading from the file system, only works within allowed directories.
-                Can fetch content from URLs when isUrl parameter is set to true
-                (URLs are always read in full regardless of offset/length).
-                
-                FORMAT HANDLING (by extension):
-                - Text: Uses offset/length for line-based pagination
-                - Excel (.xlsx, .xls, .xlsm): Returns JSON 2D array
-                  * sheet: "Sheet1" (name) or "0" (index as string, 0-based)
-                  * range: ALWAYS use FROM:TO format (e.g., "A1:D100", "C1:C1", "B2:B50")
-                  * offset/length work as row pagination (optional fallback)
-                - Images (PNG, JPEG, GIF, WebP): Base64 encoded viewable content
-                - PDF: Extracts text content as markdown with page structure
-                  * offset/length work as page pagination (0-based)
-                  * Includes embedded images when available
-                - DOCX (.docx): Two modes depending on parameters:
-                  * DEFAULT (no offset/length): Returns a text-bearing outline — shows paragraphs with text,
-                    tables with cell content, styles, image refs. Skips shapes/drawings/SVG noise.
-                    Each element shows its body index [0], [1], etc.
-                  * WITH offset/length: Returns raw pretty-printed XML with line pagination.
-                    Use this to drill into specific sections or see the actual XML for editing.
-                  * EDITING WORKFLOW: 1) read_file to get outline, 2) read_file with offset/length
-                    to see raw XML around what you want to edit, 3) edit_block with old_string/new_string
-                    using XML fragments copied from the read output.
-                  * IMPORTANT: offset MUST be non-zero to get raw XML (use offset=1 to start from line 1).
-                    offset=0 always returns the outline regardless of length.
-                  * For BULK changes (translation, mass replacements): use start_process with Python
-                    zipfile module to find/replace all <w:t> elements at once.
-
+                ONE FILE OR URL ONLY. If you already know 2+ paths, prefer ONE read_multiple_files call, not several read_file calls or Promise.all(read_file). For narrow code snippets across files with hashes use read_code_ranges; mixed independent reads use batch_tools.
+                Read path from allowed directories. Use isUrl=true for URLs. offset/length select lines (0-based) for text files, negative offset tails efficiently; default limit is configured. If you need a full-file SHA-256 for safe edits, use read_code_file.
+                Supported formats: text; Excel via sheet/range (A1:D100) or rows; PDF as page text/images with page offsets; DOCX outline by default (offset=0), raw XML with nonzero offset for exact edits; raster images as image content (use read_images for optimized previews/contact sheets). Use dedicated tools instead of launching a shell to cat/type files.
                 ${PATH_GUIDANCE}
                 ${CMD_PREFIX_DESCRIPTION}`,
-        inputSchema: zodToJsonSchema(ReadFileArgsSchema),
+                inputSchema: zodToJsonSchema(ReadFileArgsSchema),
         annotations: {
             title: "Read File or URL",
             readOnlyHint: true,
@@ -155,7 +106,7 @@ export function buildToolDefinitions(): ToolDefinition[] {
     {
         name: "read_multiple_files",
         description: `
-                Read the contents of multiple files simultaneously.
+                PREFERRED FOR 2 OR MORE KNOWN FILE PATHS: read_multiple_files uses ONE MCP call and reads up to 8 files concurrently. Use this instead of repeating read_file, parallel Promise.all(read_file), or batching several identical read_file calls. Read only the files needed; search first when paths are unknown. For many narrow code snippets with hashes, prefer read_code_ranges. For mixed tool types, use batch_tools. For image previews, prefer read_images.
 
                 Two ways to list files (can be combined):
                 - paths: ["/a.ts", "/b.ts"] → read each file from the start (default line limit)
@@ -171,7 +122,15 @@ export function buildToolDefinitions(): ToolDefinition[] {
                 
                 ${PATH_GUIDANCE}
                 ${CMD_PREFIX_DESCRIPTION}`,
-        inputSchema: zodToJsonSchema(ReadMultipleFilesArgsSchema),
+        // Cross-field 1+ requirement is enforced by Zod at runtime; express it
+        // in JSON Schema as well so an LLM never guesses an empty call.
+        inputSchema: {
+            ...zodToJsonSchema(ReadMultipleFilesArgsSchema),
+            anyOf: [
+                { required: ["paths"], properties: { paths: { minItems: 1 } } },
+                { required: ["files"], properties: { files: { minItems: 1 } } },
+            ],
+        },
         annotations: {
             title: "Read Multiple Files",
             readOnlyHint: true,
@@ -186,26 +145,7 @@ export function buildToolDefinitions(): ToolDefinition[] {
                 DO NOT use this tool to edit DOCX files. Use 'edit_block' with old_string/new_string instead.
                 To CREATE a new DOCX, use write_file with .docx extension — text content with markdown headings (#, ##, ###) is converted to styled DOCX paragraphs.
 
-                CHUNKING IS STANDARD PRACTICE: Always write files in chunks of 25-30 lines maximum.
-                This is the normal, recommended way to write files - not an emergency measure.
-
-                STANDARD PROCESS FOR ANY FILE:
-                1. FIRST → write_file(filePath, firstChunk, {mode: 'rewrite'})  [≤30 lines]
-                2. THEN → write_file(filePath, secondChunk, {mode: 'append'})   [≤30 lines]
-                3. CONTINUE → write_file(filePath, nextChunk, {mode: 'append'}) [≤30 lines]
-
-                ALWAYS CHUNK PROACTIVELY - don't wait for performance warnings!
-
-                WHEN TO CHUNK (always be proactive):
-                1. Any file expected to be longer than 25-30 lines
-                2. When writing multiple files in sequence
-                3. When creating documentation, code files, or configuration files
-
-                HANDLING CONTINUATION ("Continue" prompts):
-                If user asks to "Continue" after an incomplete operation:
-                1. Read the file to see what was successfully written
-                2. Continue writing ONLY the remaining content using {mode: 'append'}
-                3. Keep chunks to 25-30 lines each
+                EFFICIENCY: This tool is for one file. For 2+ known UTF-8 file edits, use workspace_batch (hash-checked changes + readback + checks) instead of repeated write_file calls. For one modest file, write the entire content in ONE call; do NOT split ordinary files into arbitrary 25–30-line chunks. Use append only when continuation is genuinely needed. For safer targeted edits use edit_block with an expected SHA-256, or workspace_batch for coordinated changes.
 
                 FORMAT HANDLING (by extension):
                 - Text files: String content
@@ -431,90 +371,13 @@ export function buildToolDefinitions(): ToolDefinition[] {
     {
         name: "start_search",
         description: `
-                Start a streaming search that can return results progressively.
-
-                BLOCKING MODE (recommended for most searches): set wait=true to get ALL results in this
-                single call, grep-style ("file" header, then "line: text", context lines as "line- text").
-                The search stops at maxResults matches (default 200) or timeout_ms (default 30000, max 110000).
-                No get_more_search_results/stop_search calls are needed in this mode.
-                
-                SEARCH STRATEGY GUIDE:
-                Choose the right search type based on what the user is looking for:
-                
-                USE searchType="files" WHEN:
-                - User asks for specific files: "find package.json", "locate config files"
-                - Pattern looks like a filename: "*.js", "README.md", "test-*.tsx" 
-                - User wants to find files by name/extension: "all TypeScript files", "Python scripts"
-                - Looking for configuration/setup files: ".env", "dockerfile", "tsconfig.json"
-                
-                USE searchType="content" WHEN:
-                - User asks about code/logic: "authentication logic", "error handling", "API calls"
-                - Looking for functions/variables: "getUserData function", "useState hook"
-                - Searching for text/comments: "TODO items", "FIXME comments", "documentation"
-                - Finding patterns in code: "console.log statements", "import statements"
-                - User describes functionality: "components that handle login", "files with database queries"
-                
-                WHEN UNSURE OR USER REQUEST IS AMBIGUOUS:
-                Run TWO searches in parallel - one for files and one for content:
-                
-                Example approach for ambiguous queries like "find authentication stuff":
-                1. Start file search: searchType="files", pattern="auth"
-                2. Simultaneously start content search: searchType="content", pattern="authentication"  
-                3. Present combined results: "Found 3 auth-related files and 8 files containing authentication code"
-                
-                SEARCH TYPES:
-                - searchType="files": Find files by name (pattern matches file names)
-                - searchType="content": Search inside files for text patterns
-                
-                PATTERN MATCHING MODES:
-                - Default (literalSearch=false): Patterns are treated as regular expressions
-                - Literal (literalSearch=true): Patterns are treated as exact strings
-                
-                WHEN TO USE literalSearch=true:
-                Use literal search when searching for code patterns with special characters:
-                - Function calls with parentheses and quotes
-                - Array access with brackets
-                - Object methods with dots and parentheses
-                - File paths with backslashes
-                - Any pattern containing: . * + ? ^ $ { } [ ] | \\ ( )
-                
-                IMPORTANT PARAMETERS:
-                - pattern: What to search for (file names OR content text)
-                - literalSearch: Use exact string matching instead of regex (default: false)
-                - filePattern: Optional filter to limit search to specific file types (e.g., "*.js", "package.json")
-                - ignoreCase: Case-insensitive search (default: true). Works for both file names and content.
-                - earlyTermination: Stop search early when exact filename match is found (optional: defaults to true for file searches, false for content searches)
-                
-                DECISION EXAMPLES:
-                - "find package.json" → searchType="files", pattern="package.json" (specific file)
-                - "find authentication components" → searchType="content", pattern="authentication" (looking for functionality)
-                - "locate all React components" → searchType="files", pattern="*.tsx" or "*.jsx" (file pattern)
-                - "find TODO comments" → searchType="content", pattern="TODO" (text in files)
-                - "show me login files" → AMBIGUOUS → run both: files with "login" AND content with "login"
-                - "find config" → AMBIGUOUS → run both: config files AND files containing config code
-                
-                COMPREHENSIVE SEARCH EXAMPLES:
-                - Find package.json files: searchType="files", pattern="package.json"
-                - Find all JS files: searchType="files", pattern="*.js"
-                - Search for TODO in code: searchType="content", pattern="TODO", filePattern="*.js|*.ts"
-                - Search for exact code: searchType="content", pattern="toast.error('test')", literalSearch=true
-                - Ambiguous request "find auth stuff": Run two searches:
-                  1. searchType="files", pattern="auth"
-                  2. searchType="content", pattern="authentication"
-                
-                PRO TIP: When user requests are ambiguous about whether they want files or content,
-                run both searches concurrently and combine results for comprehensive coverage.
-                
-                Unlike regular search tools, this starts a background search process and returns
-                immediately with a session ID. Use get_more_search_results to get results as they
-                come in, and stop_search to stop the search early if needed.
-                
-                Perfect for large directories where you want to see results immediately and
-                have the option to cancel if the search takes too long or you find what you need.
-                
+                SEARCH WHEN PATHS ARE UNKNOWN. For filename or content discovery, use ONE start_search call with wait=true and bounded maxResults; avoid unnecessary polling (get_more_search_results) unless you deliberately need streaming.
+                searchType="files" finds names; searchType="content" searches file contents. pattern is regex unless literalSearch=true. filePattern filters files; includeHidden and ignoreCase control scope; contextLines adds surrounding lines.
+                Choose wait=true for the complete bounded response in one call, wait=false only for a long-running stream. For 2+ known paths, use read_multiple_files instead. For code search with immediate surrounding fresh snippets and hashes, prefer read_code_context.
+                Set path to the project directory, narrow pattern/filePattern, and use appropriate limits. Search never edits files.
                 ${PATH_GUIDANCE}
                 ${CMD_PREFIX_DESCRIPTION}`,
-        inputSchema: zodToJsonSchema(StartSearchArgsSchema),
+                inputSchema: zodToJsonSchema(StartSearchArgsSchema),
         annotations: {
             title: "Start Search",
             readOnlyHint: true,
@@ -684,69 +547,16 @@ export function buildToolDefinitions(): ToolDefinition[] {
     {
         name: "start_process",
         description: `
-                Start a new terminal process with intelligent state detection.
-                
-                PRIMARY TOOL FOR FILE ANALYSIS AND DATA PROCESSING
-                This is the ONLY correct tool for analyzing local files (CSV, JSON, logs, etc.).
-                The analysis tool CANNOT access local files and WILL FAIL - always use processes for file-based work.
-                
-                CRITICAL RULE: For ANY local file work, ALWAYS use this tool + interact_with_process, NEVER use analysis/REPL tool.
-                
+                RUN COMMANDS OR START PROCESSES ONLY WHEN NEEDED. Use for build/test commands, execution, system inspection, or an operation with no dedicated MCP tool.
+                NOT a file-reader shortcut: use read_multiple_files for 2+ known paths, read_file for one path, start_search with wait=true for unknown paths, and batch_tools for independent mixed reads. Do not start a Python/Node REPL just to inspect code.
+                Prefer workspace_batch for coordinated code changes and checks; start_process is not part of safe read-only batches.
                 ${OS_GUIDANCE}
-                
-                REQUIRED WORKFLOW FOR LOCAL FILES:
-                1. start_process("python3 -i") - Start Python REPL for data analysis
-                2. interact_with_process(pid, "import pandas as pd, numpy as np")
-                3. interact_with_process(pid, "df = pd.read_csv('/absolute/path/file.csv')")
-                4. interact_with_process(pid, "print(df.describe())")
-                5. Continue analysis with pandas, matplotlib, seaborn, etc.
-                
-                COMMON FILE ANALYSIS PATTERNS:
-                • start_process("python3 -i") → Python REPL for data analysis (RECOMMENDED)
-                • start_process("node -i") → Node.js REPL for JSON processing
-                • start_process("node:local") → Node.js on MCP server (stateless, ES imports, all code in one call)
-                • start_process("cut -d',' -f1 file.csv | sort | uniq -c") → Quick CSV analysis
-                • start_process("wc -l /path/file.csv") → Line counting
-                • start_process("head -10 /path/file.csv") → File preview
-                
-                BINARY FILE SUPPORT:
-                For PDF, Excel, Word, archives, databases, and other binary formats, use process tools with appropriate libraries or command-line utilities.
-                
-                INTERACTIVE PROCESSES FOR DATA ANALYSIS:
-                For code/calculations, use in this priority order:
-                1. start_process("python3 -i") - Python REPL (preferred)
-                2. start_process("node -i") - Node.js REPL (when Python unavailable)
-                3. start_process("node:local") - Node.js fallback (when node -i fails)
-                4. Use interact_with_process() to send commands
-                5. Use read_process_output() to get responses
-                When Python is unavailable, prefer Node.js over shell for calculations.
-                Node.js: Always use ES import syntax (import x from 'y'), not require().
-
-                SMART DETECTION:
-                - Detects REPL prompts (>>>, >, $, etc.)
-                - Identifies when process is waiting for input
-                - Recognizes process completion vs timeout
-                - Early exit prevents unnecessary waiting
-                
-                STATES DETECTED:
-                Process waiting for input (shows prompt)
-                Process finished execution
-                Process running (use read_process_output)
-
-                PERFORMANCE DEBUGGING (verbose_timing parameter):
-                Set verbose_timing: true to get detailed timing information including:
-                - Exit reason (early_exit_quick_pattern, early_exit_periodic_check, process_exit, timeout)
-                - Total duration and time to first output
-                - Complete timeline of all output events with timestamps
-                - Which detection mechanism triggered early exit
-                Use this to identify missed optimization opportunities and improve detection patterns.
-
-                ALWAYS USE FOR: Local file analysis, CSV processing, data exploration, system commands
-                NEVER USE ANALYSIS TOOL FOR: Local file access (analysis tool is browser-only and WILL FAIL)
-
+                The command runs on the connected device, not the relay container. Choose shell syntax for that OS. A command may be destructive; do not run unrequested changes.
+                Specify a bounded timeout_ms. Inspect returned output/exit status first. Use read_process_output only when the process is still running, interact_with_process only for a genuine interactive process.
+                For performance diagnosis, verbose_timing=true includes timing breakdown. Avoid polling completed commands.
                 ${PATH_GUIDANCE}
                 ${CMD_PREFIX_DESCRIPTION}`,
-        inputSchema: zodToJsonSchema(StartProcessArgsSchema),
+                inputSchema: zodToJsonSchema(StartProcessArgsSchema),
         annotations: {
             title: "Start Terminal Process",
             readOnlyHint: false,
@@ -757,7 +567,7 @@ export function buildToolDefinitions(): ToolDefinition[] {
     {
         name: "read_process_output",
         description: `
-                Read output from a running process with file-like pagination support.
+                Use only for a process started by start_process that is still running; do not poll for commands that already returned their final output. Read output from a running process with file-like pagination support.
                 
                 Supports partial output reading with offset and length parameters (like read_file):
                 - 'offset' (start line, default: 0)
@@ -798,63 +608,11 @@ export function buildToolDefinitions(): ToolDefinition[] {
     {
         name: "interact_with_process",
         description: `
-                Send input to a running process and automatically receive the response.
-                
-                CRITICAL: THIS IS THE PRIMARY TOOL FOR ALL LOCAL FILE ANALYSIS
-                For ANY local file analysis (CSV, JSON, data processing), ALWAYS use this instead of the analysis tool.
-                The analysis tool CANNOT access local files and WILL FAIL - use processes for ALL file-based work.
-                
-                FILE ANALYSIS PRIORITY ORDER (MANDATORY):
-                1. ALWAYS FIRST: Use this tool (start_process + interact_with_process) for local data analysis
-                2. ALTERNATIVE: Use command-line tools (cut, awk, grep) for quick processing  
-                3. NEVER EVER: Use analysis tool for local file access (IT WILL FAIL)
-                
-                REQUIRED INTERACTIVE WORKFLOW FOR FILE ANALYSIS:
-                1. Start REPL: start_process("python3 -i")
-                2. Load libraries: interact_with_process(pid, "import pandas as pd, numpy as np")
-                3. Read file: interact_with_process(pid, "df = pd.read_csv('/absolute/path/file.csv')")
-                4. Analyze: interact_with_process(pid, "print(df.describe())")
-                5. Continue: interact_with_process(pid, "df.groupby('column').size()")
-                
-                BINARY FILE PROCESSING WORKFLOWS:
-                Use appropriate Python libraries (PyPDF2, pandas, docx2txt, etc.) or command-line tools for binary file analysis.
-                
-                SMART DETECTION:
-                - Automatically waits for REPL prompt (>>>, >, etc.)
-                - Detects errors and completion states
-                - Early exit prevents timeout delays
-                - Clean output formatting (removes prompts)
-                
-                SUPPORTED REPLs:
-                - Python: python3 -i (RECOMMENDED for data analysis)
-                - Node.js: node -i
-                - R: R
-                - Julia: julia
-                - Shell: bash, zsh
-                - Database: mysql, postgres
-                
-                PARAMETERS:
-                - pid: Process ID from start_process
-                - input: Code/command to execute
-                - timeout_ms: Max wait (default: 8000ms)
-                - wait_for_prompt: Auto-wait for response (default: true)
-                - verbose_timing: Enable detailed performance telemetry (default: false)
-
-                Returns execution result with status indicators.
-
-                PERFORMANCE DEBUGGING (verbose_timing parameter):
-                Set verbose_timing: true to get detailed timing information including:
-                - Exit reason (early_exit_quick_pattern, early_exit_periodic_check, process_finished, timeout, no_wait)
-                - Total duration and time to first output
-                - Complete timeline of all output events with timestamps
-                - Which detection mechanism triggered early exit
-                Use this to identify slow interactions and optimize detection patterns.
-
-                ALWAYS USE FOR: CSV analysis, JSON processing, file statistics, data visualization prep, ANY local file work
-                NEVER USE ANALYSIS TOOL FOR: Local file access (it cannot read files from disk and WILL FAIL)
-
+                Send input to an ALREADY-RUNNING interactive shell, REPL or process (pid from start_process) and receive new output. Only use when an existing process needs further input; do not use as a default file-reading, search, or editing method.
+                For several known files, use read_multiple_files; for source searches use start_search(wait=true), for batched independent reads use batch_tools, for coordinated writes use workspace_batch. This tool adds a process round trip and should not be used for ordinary one-shot file inspection.
+                Parameters: pid, input, optional timeout_ms, wait_for_prompt and verbose_timing. Confirm the program is still active and send commands deliberately.
                 ${CMD_PREFIX_DESCRIPTION}`,
-        inputSchema: zodToJsonSchema(InteractWithProcessArgsSchema),
+                inputSchema: zodToJsonSchema(InteractWithProcessArgsSchema),
         annotations: {
             title: "Send Input to Process",
             readOnlyHint: false,

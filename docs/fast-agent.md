@@ -4,12 +4,13 @@ This checkout exposes 70 agent tools plus the relay's `list_devices` (71 total i
 
 ## The short workflow
 
-1. Use `project_context` or a focused `context_pack` when conventions are unknown.
-2. Use `batch_tools` for independent reads and simple ordered coding calls.
-3. Use `workspace_batch` for coordinated file edits/creation, readback and explicitly selected checks.
-4. Inspect real infrastructure with `docker_inventory` / `docker_inspect` before proposing another container or image.
-5. Use `read_images` to list local image assets, then request selected previews.
-6. Use `sandbox_run` only when the user explicitly requests isolated execution. Ordinary trusted reads/writes do not pay container startup cost.
+1. When **two or more paths are already known**, call `read_multiple_files` **once** with `paths` or per-file `files` ranges. Avoid multiple separate `read_file` calls or Promise.all(read_file). The tool itself overlaps up to eight file reads.
+2. For **one** file/range, use `read_file`; for many narrow code ranges requiring hashes use `read_code_ranges`. If the paths are **unknown**, prefer `start_search` with `wait=true` or `read_code_context`, not repeated polling.
+3. For multiple **different independent** read/context operations use one `batch_tools` call (auto mode, up to four read calls at once); don't nest batches.
+4. For coordinated edits/creation + readback + agreed checks use `workspace_batch`. It previews by default and requires hashes to modify existing files.
+5. Load `project_context` or a focused `context_pack` only when conventions are unknown; avoid blanket context dumps.
+6. Inspect real containers with `docker_inventory` / `docker_inspect` and image assets with `read_images` only when relevant.
+7. Use `start_process` for actual commands/build/tests, never as the first choice for ordinary reading. Use `sandbox_run` only for explicitly requested isolation.
 
 Do not insist on starting a coding session, building a graph, loading parsers or opening Docker for every tiny edit. The existing specialized tools remain available.
 

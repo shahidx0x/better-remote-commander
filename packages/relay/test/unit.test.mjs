@@ -209,7 +209,8 @@ test('MCP catalog is stable before agent connects, while online, and after disco
     const online = liveTools(hub, store, owner.id);
     assert.equal(online.online, 1);
     assert.ok(online.tools.some(t => t.name === 'device_extra'));
-    assert.equal(online.tools.find(t => t.name === 'read_file').description, 'agent-specific live schema');
+    assert.match(online.tools.find(t => t.name === 'read_file').description, /ONE FILE OR URL ONLY/, 'relay overrides stale agent description with recommended multi-file routing');
+    assert.equal(online.tools.find(t => t.name === 'read_file').inputSchema.properties.path.type, 'string', 'live device input schema still wins');
     assert.ok(names.every(n => online.tools.some(t => t.name === n)), 'online does not hide stable tools');
     socket.close(1000, 'done');
     const recovered = liveTools(hub, store, owner.id);
@@ -217,4 +218,42 @@ test('MCP catalog is stable before agent connects, while online, and after disco
     assert.deepEqual(recovered.tools.map(t => t.name), names, 'offline and reconnect states keep the same base catalog');
     assert.equal(hub.resolveDefault(owner.id), null, 'advertised offline tools are not executable on an offline device');
   } finally { hub.close(); store.close(); }
+});
+
+test('LLM routing guidance chooses batches for known files and read-only batching cannot mutate', async () => {
+  const { TOOL_ROUTING_GUIDANCE, readOnlyToolAllowed } = await import('../dist/mcp/server.js');
+  const { BUNDLED_AGENT_TOOL_CATALOG } = await import('../dist/mcp/agent-tools.catalog.js');
+  const { ReadMultipleFilesArgsSchema } = await import('../../agent/dist/core/tools/schemas.js');
+  const definitions = new Map(BUNDLED_AGENT_TOOL_CATALOG.map(t => [t.name, t]));
+  assert.deepEqual(BUNDLED_AGENT_TOOL_CATALOG.slice(0, 3).map(t => t.name),
+    ['read_multiple_files', 'batch_tools', 'workspace_batch'], 'batch-first discovery order');
+  assert.match(TOOL_ROUTING_GUIDANCE, /2\+ known files.*read_multiple_files/);
+  assert.match(TOOL_ROUTING_GUIDANCE, /batch_tools/);
+  assert.match(TOOL_ROUTING_GUIDANCE, /workspace_batch/);
+  assert.match(definitions.get('read_multiple_files').description, /PREFERRED FOR 2 OR MORE KNOWN FILE PATHS/);
+  assert.match(definitions.get('read_file').description, /ONE FILE OR URL ONLY/);
+  assert.doesNotMatch(definitions.get('write_file').description, /CHUNKING IS STANDARD PRACTICE|25-30 lines/);
+  assert.doesNotMatch(definitions.get('start_process').description, /CRITICAL RULE: For ANY local file work|ALWAYS USE FOR:/);
+  assert.doesNotMatch(definitions.get('interact_with_process').description, /FILE ANALYSIS PRIORITY ORDER \(MANDATORY\)/);
+  assert.ok(definitions.get('read_multiple_files').inputSchema.anyOf?.length === 2,
+    'The cross-field one-or-more file requirement must be visible in JSON Schema');
+  assert.equal(ReadMultipleFilesArgsSchema.safeParse({}).success, false);
+  assert.equal(ReadMultipleFilesArgsSchema.safeParse({ paths: ['a.ts', 'b.rs'] }).success, true);
+  assert.equal(ReadMultipleFilesArgsSchema.safeParse({ files: [{path: 'a.ts'}] }).success, true);
+  assert.equal(ReadMultipleFilesArgsSchema.safeParse({ paths: Array(65).fill('test.txt') }).success, false);
+  assert.equal(ReadMultipleFilesArgsSchema.safeParse({ paths: Array(40).fill('a'), files: Array(25).fill({path:'b'}) }).success, false);
+
+  assert.equal(readOnlyToolAllowed('read_multiple_files', { paths: ['/a', '/b'] }), true);
+  assert.equal(readOnlyToolAllowed('batch_tools', { calls: [
+    { tool: 'read_multiple_files', arguments: { paths: ['/a', '/b'] } },
+    { tool: 'read_file', arguments: { path: '/c' } },
+  ] }), true);
+  for (const bad of [
+    {calls: [{ tool: 'write_file', arguments: {path:'/x',content:'changed'} }]},
+    {calls: [{ tool: 'start_process', arguments: {command:'echo danger'} }]},
+    {calls: [{ tool: 'batch_tools', arguments: {calls: [{tool: 'read_file'}]} }]},
+    {calls: [{ tool: 'read_file' }, { tool: 'edit_block', arguments: {} }]},
+    {calls: Array(65).fill({tool: 'read_file', arguments: {path:'/x'}})},
+    {calls: []}, {calls: [{ tool: 'read_file', arguments: 'not-an-object' }]}, null,
+  ]) assert.equal(readOnlyToolAllowed('batch_tools', bad), false);
 });

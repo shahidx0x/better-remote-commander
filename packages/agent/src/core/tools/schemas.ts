@@ -75,11 +75,11 @@ export const ReadMultipleFilesEntrySchema = z.object({
 });
 
 export const ReadMultipleFilesArgsSchema = z.object({
-  paths: z.array(z.string()).optional().default([]),
-  files: z.array(ReadMultipleFilesEntrySchema).optional().default([]),
+  paths: z.array(z.string().min(1)).max(64).optional().default([]),
+  files: z.array(ReadMultipleFilesEntrySchema).max(64).optional().default([]),
 }).refine(
-  data => data.paths.length + data.files.length > 0,
-  { message: "Provide at least one entry in paths or files" }
+  data => data.paths.length + data.files.length > 0 && data.paths.length + data.files.length <= 64,
+  { message: "Provide 1–64 total entries across paths and files" }
 );
 
 export const WriteFileArgsSchema = z.object({

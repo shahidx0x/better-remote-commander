@@ -26,19 +26,28 @@ function portableDescription(name, original) {
       + description.slice(end + pathTail.length);
   }
   if (name === 'start_process') {
-    const left = 'CRITICAL RULE: For ANY local file work, ALWAYS use this tool + interact_with_process, NEVER use analysis/REPL tool.';
-    const right = 'REQUIRED WORKFLOW FOR LOCAL FILES:';
-    const from = description.indexOf(left);
-    const to = description.indexOf(right, from + left.length);
-    if (from < 0 || to < 0) throw new Error('Unexpected start_process tool description format');
-    description = description.slice(0, from + left.length)
-      + '\n\n                Commands run on the connected device. Check its actual operating system and shell (Windows, Linux, macOS) before choosing shell syntax.\n\n                '
+    // Keep the bundled catalog deterministic on Windows, Linux and macOS.
+    // Each connected agent still supplies its own actual OS/shell at runtime.
+    const from = description.indexOf('Running on ');
+    const to = description.indexOf('The command runs on the connected device', from);
+    if (from < 0 || to < 0) throw new Error('Unexpected start_process platform guidance');
+    description = description.slice(0, from)
+      + 'Choose commands for the connected device operating system and shell.\n                '
       + description.slice(to);
   }
   return description;
 }
+const preferredOrder = [
+  'read_multiple_files', 'batch_tools', 'workspace_batch',
+  'read_code_ranges', 'read_code_context', 'read_file', 'read_code_file', 'start_search',
+  'project_context', 'context_pack', 'edit_files', 'edit_block', 'write_file',
+];
+const ranks = new Map(preferredOrder.map((name, i) => [name, i]));
+// Stable tool ordering improves discoverability of the fast multi-file workflow,
+// without hiding less-common tools or changing authorization/execution.
 const definitions = listTools().map(({ name, description, inputSchema, annotations }) =>
-  ({ name, description: portableDescription(name, description), inputSchema, ...(annotations ? { annotations } : {}) }));
+  ({ name, description: portableDescription(name, description), inputSchema, ...(annotations ? { annotations } : {}) }))
+  .sort((a, b) => (ranks.get(a.name) ?? 999) - (ranks.get(b.name) ?? 999));
 const names = new Set(definitions.map(tool => tool.name));
 if (definitions.length < 20 || names.size !== definitions.length)
   throw new Error('Refusing to generate incomplete or duplicate tool definitions');

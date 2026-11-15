@@ -76,6 +76,27 @@ OAuth redirect validation to fix a stale client ID.
 
 Not every MCP host supports a no-auth remote HTTP URL or suppresses OAuth. This option works in clients that support it; it cannot force unrelated AI products to bypass their own connection policies.
 
+### Fewer MCP calls: preferred tool choices
+
+The relay's MCP initialization instructions and the tool descriptions both
+recommend the cheapest safe operation for the task. For 2+ known file paths,
+`read_multiple_files` reads them in one MCP call (internal concurrency: 8).
+Use `read_file` for one file, `read_code_ranges` for multi-file code snippets
+with hashes, and `start_search(wait=true)` when filenames are not yet known.
+Use `batch_tools` for mixed independent read/context operations and
+`workspace_batch` for coordinated edits, readback and real checks. Avoid
+starting a shell/REPL solely to inspect files.
+
+Existing full-access MCP clients retain every tool. Read-only capability URLs
+can now also invoke `batch_tools`, but the relay checks **every nested tool**
+against its read-only allowlist before dispatch. Writes, terminal commands and
+nested batches are rejected. The model/host still makes the final tool
+selection; BRC cannot force an unsupported LLM to batch.
+
+The bundled descriptions take priority over stale hints from an older local
+agent, while live device schemas and permissions are still enforced. Refresh
+the MCP connector after deployment if your AI host has cached old tools.
+
 ### Fix for clients seeing only `list_devices`
 
 Earlier relay versions populated `tools/list` only with tools from devices that

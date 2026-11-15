@@ -1,5 +1,6 @@
 
 import assert from 'node:assert/strict';
+import path from 'node:path';
 const [base, username, password] = process.argv.slice(2);
 const step = (name, pass) => { console.log((pass ? 'PASS' : 'FAIL') + '  ' + name); assert.ok(pass, name); };
 const form = (body) => new URLSearchParams(body);
@@ -41,9 +42,28 @@ const initialize = await rpc(readUrl, 'initialize', { protocolVersion: '2025-06-
 step('URL-only MCP initialize needs no OAuth or headers', initialize.status === 200 && initialize.result?.result?.serverInfo?.name === 'brc');
 const tools = await rpc(readUrl, 'tools/list', {}, 2);
 const names = (tools.result?.result?.tools ?? []).map(t => t.name);
-step('read-only link lists only safe tools', tools.status === 200 && names.includes('read_file') && names.includes('list_devices') && !names.includes('write_file') && !names.includes('start_process') && !names.includes('batch_tools'));
+step('read-only link lists only safe tools', tools.status === 200 && names.includes('read_file') && names.includes('list_devices') && !names.includes('write_file') && !names.includes('start_process') && names.includes('batch_tools'));
 const denied = await rpc(readUrl, 'tools/call', { name: 'start_process', arguments: { command: 'echo should-not-run' } }, 3);
 step('direct write or terminal invocation is rejected on read-only link', denied.status === 200 && denied.result?.result?.isError === true);
+const knownFile = path.join(process.cwd(), 'package.json');
+const secondFile = path.join(process.cwd(), 'pnpm-workspace.yaml');
+const safeBatch = await rpc(readUrl, 'tools/call', { name: 'batch_tools', arguments: {
+  calls: [
+    { tool: 'read_multiple_files', arguments: { paths: [knownFile, secondFile] } },
+    { tool: 'get_file_info', arguments: { path: knownFile } },
+  ],
+  mode: 'auto',
+} }, 15);
+step('read-only capability can batch independent file inspection in one MCP call',
+  safeBatch.status === 200 && !safeBatch.result?.result?.isError && safeBatch.result?.result?.structuredContent?.executed === 2);
+const rejectedNested = await rpc(readUrl, 'tools/call', { name: 'batch_tools', arguments: {
+  calls: [{ tool: 'read_file', arguments: { path: knownFile } }, { tool: 'write_file', arguments: { path: knownFile, content: 'should-not-run' } }],
+} }, 16);
+step('read-only batch rejects hidden writes before dispatch', rejectedNested.status === 200 && rejectedNested.result?.result?.isError === true);
+const rejectedNestedBatch = await rpc(readUrl, 'tools/call', { name: 'batch_tools', arguments: {
+  calls: [{ tool: 'batch_tools', arguments: { calls: [{ tool: 'read_file', arguments: { path: knownFile } }] } }],
+} }, 17);
+step('read-only batch rejects recursively nested batches', rejectedNestedBatch.status === 200 && rejectedNestedBatch.result?.result?.isError === true);
 const inventory = await rpc(readUrl, 'tools/call', { name: 'list_devices', arguments: {} }, 4);
 step('read-only link can access its owner devices', inventory.status === 200 && JSON.parse(inventory.result.result.content[0].text).devices.some(d => d.online));
 
