@@ -68,6 +68,24 @@
         "panel": "dedicated",
         "clear": false
       }
+    },
+    {
+      "label": "BRC: connection settings",
+      "type": "process",
+      "command": "node",
+      "args": [
+        "packages/agent/dist/cli.js",
+        "--setup"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": false
+      }
     }
   ]
 }

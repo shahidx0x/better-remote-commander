@@ -28,6 +28,7 @@ export class ActivityLog {
     private consoleQueue: string[] = [];
     private blocked = false;
     private started = false;
+    private consolePauses = 0;
     dropped = 0;
     ioErrors = 0;
     // The legacy third argument is deliberately ignored: disk logging cannot be enabled.
@@ -61,12 +62,23 @@ export class ActivityLog {
         this.consoleQueue.push(compactLine(`[${new Date(event.timestamp).toTimeString().slice(0, 8)}] ${event.message}`, width) + '\n');
         this.drainConsole();
     }
+    /** Keep a settings prompt readable; queued live lines remain bounded and are never written to disk. */
+    pauseConsole(): () => void {
+        this.consolePauses++;
+        let resumed = false;
+        return () => {
+            if (resumed) return;
+            resumed = true;
+            this.consolePauses = Math.max(0, this.consolePauses - 1);
+            this.drainConsole();
+        };
+    }
     private drainConsole(): void {
         if (!stdoutAvailable || process.stdout.destroyed) {
             this.consoleQueue.length = 0;
             return;
         }
-        if (this.blocked)
+        if (this.blocked || this.consolePauses > 0)
             return;
         while (this.consoleQueue.length) {
             try {

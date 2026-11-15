@@ -13,6 +13,8 @@ export interface WsClientOptions {
 export class WsClient {
  private ws:WebSocket|null=null;
  private stopped=false;
+ private settingsPaused=false;
+ private callsInFlight=0;
  private backoff:number=DEFAULTS.reconnectMinMs;
  private pongTimer?:NodeJS.Timeout;
  private reconnectTimer?:NodeJS.Timeout;
@@ -32,6 +34,9 @@ export class WsClient {
  }
  start():void{if(this.ws)return;this.stopped=false;this.connect();}
  stop():void{this.stopped=true;clearTimeout(this.pongTimer);clearTimeout(this.reconnectTimer);this.scheduler.cancelAll('Agent stopping.');const ws=this.ws;this.ws=null;ws?.close(1000,'agent stopped');}
+ /** Pause only when idle: opening settings never cancels an in-flight tool call. */
+ pauseForSettings():boolean{if(this.callsInFlight>0)return false;this.settingsPaused=true;return true;}
+ resumeAfterSettings():void{this.settingsPaused=false;}
  private connect():void{
   if(this.stopped)return;
   this.log('info',`Connecting to ${this.wsUrl}`);
@@ -71,6 +76,12 @@ export class WsClient {
  }
  private async handleCall(msg:CallMessage,ws:WebSocket):Promise<void>{
   if(typeof msg.id!=='string'||msg.id.length>100||typeof msg.tool!=='string'||!msg.args||typeof msg.args!=='object'||Array.isArray(msg.args))return;
+  if(this.settingsPaused){
+   this.send({type:'result',id:msg.id,result:failure(new AgentError('SETTINGS_OPEN','Local connection settings are open; this call was not executed.',true),msg.id)},ws);
+   return;
+  }
+  this.callsInFlight++;
+  try {
   const received=performance.now();let executionStarted=received;
   let out:ToolResult;
   try{
@@ -85,6 +96,7 @@ export class WsClient {
   out={...out,_meta:{...out._meta,agentQueueMs:Math.max(0,Math.round(executionStarted-received)),agentTotalMs:Math.round(performance.now()-received)}};
   // Never route an old connection's result onto a new connection.
   if(this.ws===ws)this.send({type:'result',id:msg.id,result:out},ws);
+  } finally {this.callsInFlight--;}
  }
  private send(msg:AgentMessage,ws=this.ws):void{
   if(ws?.readyState!==WebSocket.OPEN)return;

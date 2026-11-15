@@ -19,7 +19,7 @@ const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'p
 export function installService(extraArgs: string[]): string {
   mkdirSync(home(), { recursive: true });
   const node = process.execPath;
-  const args = [cliPath(), '--no-browser', ...extraArgs];
+  const args = [cliPath(), '--no-browser', '--non-interactive', ...extraArgs];
 
   if (process.platform === 'win32') {
     // .cmd holds the real command line (no nested quoting issues); wscript runs it with a hidden window.
@@ -38,7 +38,7 @@ export function installService(extraArgs: string[]): string {
     writeFileSync(unit, `[Unit]\nDescription=Better Remote Commander (BRC) device agent\nAfter=network-online.target\n\n[Service]\nExecStart=${node} ${args.join(' ')}\nStandardOutput=null\nStandardError=null\nRestart=always\nRestartSec=5\nEnvironment=BRC_HOME=${home()}\n\n[Install]\nWantedBy=default.target\n`);
     run('systemctl', ['--user', 'daemon-reload']);
     run('systemctl', ['--user', 'enable', '--now', `${NAME}.service`]);
-    return `Installed systemd user unit ${unit}.\nTo keep it running when logged out: sudo loginctl enable-linger ${os.userInfo().username}\nLogs: journalctl --user -u ${NAME} -f`;
+    return `Installed systemd user unit ${unit}.\nTo keep it running when logged out: sudo loginctl enable-linger ${os.userInfo().username}\nOutput is discarded; use START_AGENT.cmd or the foreground CLI for live logs.`;
   }
   if (process.platform === 'darwin') {
     const dir = path.join(os.homedir(), 'Library', 'LaunchAgents');

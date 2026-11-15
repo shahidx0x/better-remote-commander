@@ -14,10 +14,12 @@ Requires Node.js 22.13+ (Windows, macOS, Linux).
 ## Pair with your relay
 
 ```bash
-brc-agent --relay https://brc.example.com --name "My PC"
+brc-agent
+# In a local source checkout on Windows: START_AGENT.cmd
 ```
-The agent prints a pairing code and opens `https://brc.example.com/device/verify`. Sign in to the relay and approve.
-Credentials are saved in `~/.brc/device.json`; later runs just need `brc-agent`.
+On a foreground terminal, first launch asks for the relay URL and device name, then displays pairing instructions. Approve the code on your relay. Credentials are saved in `~/.brc/device.json`; later foreground launches automatically connect after four seconds. Enter connects immediately; M opens settings instead. M is also available while running and idle, without waiting for another log or restarting. Change keeps the old pairing until approval succeeds. Forget confirms before deleting only the local pairing; it does not revoke the old relay device.
+
+Use `SETUP_AGENT.cmd` or `--setup` to open settings directly without the auto-connect timer. The live menu can return to the same connection; active tool calls are not interrupted. Scripted `--relay <base-url>` startup still works. Stop an existing foreground agent/service before opening another instance.
 
 ## Start at login
 
@@ -34,7 +36,10 @@ brc-agent --uninstall-service
 | `--name <name>` / `BRC_NAME` | device name shown in clients (default: hostname) |
 | `--allow-dir <path>` (repeatable) | restrict file tools to these directories |
 | `--no-browser` | print the pairing URL instead of opening it |
-| `--logout` | remove saved credentials |
+| `--auto-connect` | foreground launcher default: four-second saved reconnect, with M settings shortcut |
+| `--setup` | open the URL/connect/change/forget menu; ignore connection overrides for this run |
+| `--forget-relay` / `--logout` | forget only the locally saved URL/token and exit |
+| `--non-interactive` | never prompt; use saved pairing or explicit connection arguments |
 | `--debug` / `BRC_DEBUG=1` | extra live diagnostics; tool status is already visible by default |
 | `BRC_TOOL_PROFILE=coding` | hide document/transfer/history tools from discovery |
 | `BRC_HOME` | state directory (default `~/.brc`) |

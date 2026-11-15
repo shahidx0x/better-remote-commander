@@ -121,3 +121,9 @@ Logs remain compact live START/OK/ERROR lines, with no persisted activity/transc
 - [sharp resource controls](https://sharp.pixelplumbing.com/api-utility/): bounded decoder concurrency and cache configuration.
 
 The lessons do not establish a measured speedup for this implementation. Use the actual benchmark and integration tests. Persistent task tracing/progress files from other harness patterns are deliberately not adopted because this project requires live-only diagnostics.
+
+## Startup connection menu and cleanup boundary
+
+`START_AGENT.cmd` with no arguments asks for a URL only on first use. Saved connections auto-start after four seconds; Enter connects now and M opens settings. M remains available during idle live operation, even after new logs. Active tool calls are never interrupted by opening settings. See [the launch guide](coding-agent.md#run-your-checkout). The menu has no file-operation hot-path work and adds no dependency.
+
+Automatic cleanup removes only disposable graph/index/parser memory, known legacy BRC log files, and marked BRC sandbox input copies. No disk graph database exists. Source projects, Docker images, active credentials, and operational relay accounts are not targets. Forget is a separate explicit action: it removes only this agent's saved relay URL/token, not the old server's device entry.

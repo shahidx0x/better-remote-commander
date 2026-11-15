@@ -9,16 +9,33 @@ From the repository root on Windows:
 ```powershell
 pnpm install
 pnpm build
-.\START_AGENT.cmd --relay https://YOUR-RELAY.example --name "My Windows PC" --no-browser
-```
-
-Use your actual BRC relay base URL, not the example, and not its `/mcp` endpoint. Approve the pairing code. After pairing, simply run:
-
-```powershell
 .\START_AGENT.cmd
 ```
 
-The launcher runs `node packages/agent/dist/cli.js`. No globally published `brc-agent` package is necessary. Rebuild and restart this local process after changing its source. Rebuild/redeploy the relay too when changing relay code; a local build does not update a VPS.
+The foreground launcher connects automatically when a pairing is saved. On first use, paste the relay URL and enter a device name (or accept the hostname). Approve the displayed pairing code on the relay. A pasted `/mcp` or `/ws` endpoint is normalized to its relay base; existing reverse-proxy path prefixes are preserved. Bare public hostnames default to HTTPS. Remote HTTP needs an interactive warning confirmation. URL credentials, token query strings, fragments, and non-HTTP schemes are rejected.
+
+Later launches need no menu selection:
+
+```text
+Saved relay: https://your-relay.example
+Auto-connect in 4s. Enter = connect now | M = settings | Ctrl+C = exit
+```
+
+Do nothing and the saved connection starts after four seconds. Enter skips the delay. M cancels that timer and opens Connect/Change/Forget settings. `SETUP_AGENT.cmd` or `--setup` opens the same menu immediately without a timer. The no-argument Windows launcher uses `--auto-connect`; explicit `--relay`, manual credentials, and noninteractive services keep their existing behavior.
+
+While the foreground agent is running, M remains available even after new live logs. The live menu's `0` option returns to the same connection without reconnecting. Opening settings only succeeds when there are no in-flight tool calls; otherwise it asks you to press M again when idle and leaves current work running. While a menu is open, new calls return retryable `SETTINGS_OPEN` without executing, while the WebSocket heartbeat stays active. Log rendering is held in the existing bounded queue until the menu closes, never written to a file.
+
+In a real CMD/PowerShell/VS Code terminal M is a single key. An explicitly enabled foreground launch with piped input uses M + Enter. A closed input stream disables shortcuts rather than stopping a connected agent. Ctrl+C still stops the agent outside menus; cancelling a live menu returns to logs unless the saved pairing was explicitly forgotten.
+
+Change pairs with the new relay and atomically replaces `device.json` only after success. A failed or cancelled change retains the old pairing. Forget asks for confirmation, removes only the locally saved relay and device token, then asks for a new URL; `q` exits without saving another one. It does not delete project files, settings, or accounts and does not revoke the old relay's device entry. Revoke that entry from the old relay when appropriate.
+
+After connection, normal live tool logs continue. Only a small keyboard event listener remains; there is no input-polling loop or repeating countdown/status redraw. Runtime settings close their readline reader before returning to logs. Forget followed by quitting stops this foreground connection rather than silently reconnecting with a forgotten token. Do not open another instance against an already-running service pairing.
+
+The launcher uses this checkout's compiled `packages/agent/dist/cli.js`; no global package is necessary. For scripts/services, `--relay <base-url>` and the existing environment variables still work, and `--non-interactive` skips both the menu and the startup delay. Generated service launchers include `--non-interactive` and `--no-browser`; they are not reinstalled automatically. A noninteractive process with neither a saved pairing nor an explicit relay fails clearly instead of hanging.
+
+`--forget-relay` (alias `--logout`) removes the local pairing and exits. Environment variables are not edited: `--setup` ignores connection overrides only for that run; otherwise explicitly configured `BRC_RELAY`/`BRC_TOKEN` remain authoritative. No credentials are printed by the menu, and no prompt history or new log file is saved.
+
+Rebuild/restart the agent after changing its source. This startup UI update does not require a relay redeployment; other relay-source changes still do.
 
 Optional: `BRC_TOOL_PROFILE=coding` hides six document/transfer/history tools from discovery. The default advertises the full compatible set. This is not a security boundary or per-tool authorization system.
 
