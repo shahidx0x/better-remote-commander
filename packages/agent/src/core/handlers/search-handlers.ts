@@ -1,3 +1,4 @@
+import { checkCancelled } from '../../context.js';
 import { searchManager } from '../search-manager.js';
 import {
   StartSearchArgsSchema,
@@ -105,7 +106,7 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
       searchType: args.searchType,
       filePattern: args.filePattern,
       ignoreCase: args.ignoreCase,
-      maxResults: args.maxResults,
+      maxResults: cap,
       includeHidden: args.includeHidden,
       contextLines: args.contextLines,
       timeout: timeoutMs,
@@ -121,6 +122,7 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
   const deadline = Date.now() + timeoutMs;
   let stoppedReason: 'complete' | 'cap' | 'timeout' = 'complete';
   for (;;) {
+    checkCancelled();
     const s = searchManager.readSearchResults(sessionId, 0, 0);
     if (s.isComplete) { stoppedReason = 'complete'; break; }
     if (s.totalMatches >= cap) { stoppedReason = 'cap'; break; }
@@ -130,6 +132,8 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
   if (stoppedReason !== 'complete') searchManager.terminateSearch(sessionId);
 
   const all = searchManager.readSearchResults(sessionId, 0, Number.MAX_SAFE_INTEGER);
+  if (all.stopReason === 'limit') stoppedReason = 'cap';
+  if (all.stopReason === 'timeout') stoppedReason = 'timeout';
   if (all.isError && all.totalResults === 0 && all.error?.trim()) {
     return { content: [{ type: "text", text: `Search failed: ${all.error}` }], isError: true };
   }
@@ -163,7 +167,8 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
   let header = `${matches} ${kind} for "${args.pattern}" in ${args.path} (${Math.round(all.runtime)}ms)`;
   if (stoppedReason === 'cap' || truncated) header += ` — stopped at maxResults=${cap}; narrow the pattern/filePattern or raise maxResults`;
   if (stoppedReason === 'timeout') header += ` — timed out after ${timeoutMs}ms, results may be incomplete`;
-  if (all.wasIncomplete) header += ` — some paths were inaccessible`;
+  if (all.stopReason === 'output_limit') header += ' [output limit reached; narrow the query]';
+  if (all.wasIncomplete && !all.stopReason) header += ` — some paths were inaccessible`;
 
   const body = lines.length ? lines.join('\n') : 'No matches found.';
   return { content: [{ type: "text", text: `${header}\n\n${body}` }] };
@@ -246,7 +251,8 @@ export async function handleGetMoreSearchResults(args: unknown): Promise<ServerR
       output += `\n✅ Search completed.`;
       
       // Warn users if search was incomplete due to permission issues
-      if (results.wasIncomplete) {
+      if (results.stopReason) output += `\nSearch stopped: ${results.stopReason}; results are partial.`;
+      if (results.wasIncomplete && !results.stopReason) {
         output += `\n⚠️  Warning: Some files were inaccessible due to permissions. Results may be incomplete.`;
       }
     }

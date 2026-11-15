@@ -945,19 +945,13 @@ export function buildToolDefinitions(): ToolDefinition[] {
     {
         name: "get_recent_tool_calls",
         description: `
-                Get recent local tool call history with arguments and outputs.
-                Returns a chronological list of recent calls loaded from the local history file.
-                
-                Useful for:
-                - Onboarding new chats about work already done
-                - Recovering context after chat history loss
-                - Debugging tool call sequences
-                
-                Note: Does not track its own calls or track_ui_event.
-                History is persisted locally in tool-history.jsonl, keeps up to the last 1000
-                calls in memory, and trims older on-disk history. Stored outputs over 4 KiB
-                are replaced with an omission marker.
-                
+                Get recent local tool-call metadata: tool name, timestamp, status and duration.
+                Arguments, source code and command output are not stored or returned.
+                Uses the bounded activity history (up to 1000 recent metadata events,
+                maximum age 48 hours; older diagnostics are removed by maintenance).
+                Useful for inspecting execution status and debugging call sequences.
+                This is not a source-code or conversation-context archive.
+
                 ${CMD_PREFIX_DESCRIPTION}`,
         inputSchema: zodToJsonSchema(GetRecentToolCallsArgsSchema),
         annotations: {

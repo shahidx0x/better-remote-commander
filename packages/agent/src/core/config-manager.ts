@@ -282,6 +282,14 @@ class ConfigManager {
     await this.writeChain;
   }
 
+  /** Release filesystem watching and persist queued state on orderly shutdown. */
+  async close(): Promise<void> {
+    this.watcher?.close();
+    this.watcher = null;
+    if (this.reloadTimer) { clearTimeout(this.reloadTimer); this.reloadTimer = null; }
+    await this.flush();
+  }
+
   /** Non-blocking, coalesced persistence for high-frequency state updates. */
   scheduleSave(): void {
     if (this.saveScheduled) return;

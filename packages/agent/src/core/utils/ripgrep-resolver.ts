@@ -14,6 +14,27 @@ export async function getRipgrepPath(): Promise<string> {
     return cachedRgPath;
   }
 
+  // Prefer an explicit override, then the system-installed ripgrep.
+  // The packaged binary remains a portable fallback for other devices.
+  const override = process.env.BRC_RG_PATH;
+  if (override && existsSync(override)) {
+    cachedRgPath = override;
+    return override;
+  }
+
+  try {
+    const locator = process.platform === 'win32' ? 'where.exe' : 'which';
+    const executable = process.platform === 'win32' ? 'rg.exe' : 'rg';
+    const found = execSync(`${locator} ${executable}`, { encoding: 'utf-8', windowsHide: true })
+      .trim().split(/\r?\n/)[0];
+    if (found && existsSync(found)) {
+      cachedRgPath = found;
+      return found;
+    }
+  } catch {
+    // Fall back to the bundled binary or known installation locations.
+  }
+
   // Strategy 1: Try @vscode/ripgrep package
   try {
     const { rgPath } = await import('@vscode/ripgrep');

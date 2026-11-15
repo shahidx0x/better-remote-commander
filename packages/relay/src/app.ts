@@ -308,7 +308,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     });
   });
 
-  const housekeeping = setInterval(() => store.vacuumExpired(), 10 * 60_000);
+  const housekeeping = setInterval(() => { try { store.vacuumExpired(); } catch { log('warn', 'Audit cleanup failed; will retry next minute'); } }, 60_000);
   housekeeping.unref();
 
   log('info', `admin user "${admin.username}" ready; db ${cfg.dbFile}`);

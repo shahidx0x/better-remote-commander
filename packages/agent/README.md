@@ -2,7 +2,7 @@
 
 Device agent for **Better Remote Commander** — self-hosted remote control of your computers from Claude and ChatGPT.
 Runs on the machine you want to control and connects *outbound* to your own `brc-relay`. Exposes files, terminal and
-processes (24 tools, same tool set as Desktop Commander) to any AI client authorized on the relay.
+processes and coding workflows (67 tools, including BRC-native tools) to any AI client authorized on the relay.
 
 ## Install
 
@@ -35,7 +35,8 @@ brc-agent --uninstall-service
 | `--allow-dir <path>` (repeatable) | restrict file tools to these directories |
 | `--no-browser` | print the pairing URL instead of opening it |
 | `--logout` | remove saved credentials |
-| `--debug` / `BRC_DEBUG=1` | log every tool call |
+| `--debug` / `BRC_DEBUG=1` | extra live diagnostics; tool status is already visible by default |
+| `BRC_TOOL_PROFILE=coding` | hide document/transfer/history tools from discovery |
 | `BRC_HOME` | state directory (default `~/.brc`) |
 
 ## Docs
@@ -44,3 +45,11 @@ Full project, relay setup (Docker, Cloudflare Tunnel, VPS) and security notes:
 https://github.com/shahidx0x/better-remote-commander
 
 License MIT. Tool core derived from [Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP) (MIT).
+
+## Local source build and diagnostics
+
+From the repository root, run `pnpm install`, `pnpm build`, then `START_AGENT.cmd` on Windows or `node packages/agent/dist/cli.js`. No global install is needed. Tool status is visible by default and diagnostics are never persisted. See `docs/coding-agent.md` in the repository for the new coding tools, live-only logging, limits and service migration.
+
+## Faster batches, infrastructure and images
+
+See [the fast-agent guide](../../docs/fast-agent.md) for 64-call read waves/write barriers, combined workspace edits/readback/checks, Docker observation, actual image previews, optional restricted execution, automatic cache eviction and `pnpm bench:io`. Diagnostics remain live-only. These tools do not add another model or a graph database.

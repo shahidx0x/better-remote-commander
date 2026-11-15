@@ -1,7 +1,6 @@
 /**
  * Tool-invocation path for /mcp: device resolution, pause check, and audit.
  */
-import { createHash } from 'node:crypto';
 import type { DeviceHub } from '../device-hub.js';
 import type { SqliteStore } from '../store/sqlite.js';
 import type { ToolResult } from 'brc-shared';
@@ -11,7 +10,6 @@ export type InvokeOutcome =
   | { ok: true; deviceId: string; deviceName: string; result: ToolResult; ms: number }
   | { ok: false; status: number; message: string };
 
-const argsHash = (args: unknown) => createHash('sha256').update(JSON.stringify(args ?? {})).digest('hex').slice(0, 16);
 
 export function listUserDevices(hub: DeviceHub, store: SqliteStore, userId: string) {
   const online = new Set(hub.list(userId).map((d) => d.deviceId));
@@ -22,7 +20,7 @@ export function listUserDevices(hub: DeviceHub, store: SqliteStore, userId: stri
 
 export async function invokeTool(
   hub: DeviceHub, store: SqliteStore, ctx: InvokeContext,
-  tool: string, rawArgs: Record<string, unknown> | undefined, opts: { timeoutMs?: number } = {},
+  tool: string, rawArgs: Record<string, unknown> | undefined, opts: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<InvokeOutcome> {
   const args = { ...(rawArgs ?? {}) };
   const requested = typeof args.deviceId === 'string' && args.deviceId ? args.deviceId : undefined;
@@ -38,15 +36,23 @@ export async function invokeTool(
 
   const started = Date.now();
   try {
-    const result = await hub.call(deviceId, tool, args, { client: { name: ctx.clientId }, timeoutMs: opts.timeoutMs });
+    const result = await hub.call(deviceId, tool, args, { client: { name: ctx.clientId }, timeoutMs: opts.timeoutMs, signal: opts.signal });
     const ms = Date.now() - started;
-    store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: argsHash(args), ok: result.isError ? 0 : 1, ms, error: null });
-    store.touchDevice(deviceId);
+    result._meta = {...result._meta, auditPersisted:false, activityStorage:"memory-only"};
+    try {
+      store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: null, ok: result.isError ? 0 : 1, ms, error: null });
+      store.touchDevice(deviceId);
+    } catch {
+      // The command may already have changed files. Never invite a blind replay.
+      result._meta = {...result._meta, auditPersisted:false, auditWarning:'Live activity update failed; tool result is still valid.'};
+    }
     return { ok: true, deviceId, deviceName: dev.info.name, result, ms };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: argsHash(args), ok: 0, ms: Date.now() - started, error: message });
-    const status = message.startsWith('UNKNOWN_TOOL') ? 404 : message.startsWith('CALL_TIMEOUT') ? 504 : 502;
+    try {
+    store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: null, ok: 0, ms: Date.now() - started, error: /^[A-Z_]+/.exec(message)?.[0] ?? 'RELAY_ERROR' });
+    } catch { /* Preserve the original execution error if diagnostic storage also fails. */ }
+    const status = message.startsWith('UNKNOWN_TOOL') ? 404 : message.startsWith('CALL_TIMEOUT') ? 504 : /^(?:RELAY_BUSY|DEVICE_BUSY|RELAY_BACKPRESSURE)/.test(message) ? 503 : message.startsWith('CALL_TOO_LARGE') ? 413 : 502;
     return { ok: false, status, message: `Relay error: ${message}` };
   }
 }

@@ -2,7 +2,7 @@
  * BRC relay store on node:sqlite (Node >= 22.13, no native build).
  * Tables: users, oauth_clients, auth_codes, tokens, devices, device_codes, audit.
  */
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
@@ -42,12 +42,25 @@ CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts);
 
 export class SqliteStore {
   readonly db: DatabaseSync;
+  readonly auditRetentionMs = 0;
+  private liveAudit: AuditRow[] = [];
+  private auditSequence = 0;
+  private apiKeysReady = false;
+  private statements = new Map<string, StatementSync>();
+  // Cache compiled SQL, never authorization results. Every lookup executes against current rows.
+  private statement(sql: string): StatementSync {
+    let s=this.statements.get(sql);
+    if(!s){s=this.db.prepare(sql);this.statements.set(sql,s);}
+    return s;
+  }
+  private lastTouches = new Map<string,number>();
 
   constructor(file: string) {
     if (file !== ':memory:') mkdirSync(path.dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA busy_timeout = 1000;');
     this.db.exec(SCHEMA);
+    this.pruneAudit();
   }
 
   /* ---------- users ---------- */
@@ -98,7 +111,7 @@ export class SqliteStore {
       .run(row.token_hash, row.kind, row.client_id, row.user_id, row.scopes, row.resource, row.expires_at, row.created_at, row.revoked);
   }
   getToken(raw: string, kind: 'access' | 'refresh'): TokenRow | undefined {
-    const row = this.db.prepare('SELECT * FROM tokens WHERE token_hash = ? AND kind = ? AND revoked = 0').get(sha256(raw), kind) as TokenRow | undefined;
+    const row = this.statement('SELECT * FROM tokens WHERE token_hash = ? AND kind = ? AND revoked = 0').get(sha256(raw), kind) as TokenRow | undefined;
     if (!row) return undefined;
     if (row.expires_at && row.expires_at < Date.now()) return undefined;
     return row;
@@ -113,13 +126,13 @@ export class SqliteStore {
 
   /* ---------- devices ---------- */
   getDeviceByToken(raw: string): DeviceRow | undefined {
-    return this.db.prepare('SELECT * FROM devices WHERE token_hash = ?').get(sha256(raw)) as DeviceRow | undefined;
+    return this.statement('SELECT * FROM devices WHERE token_hash = ?').get(sha256(raw)) as DeviceRow | undefined;
   }
   getDevice(deviceId: string): DeviceRow | undefined {
-    return this.db.prepare('SELECT * FROM devices WHERE device_id = ?').get(deviceId) as DeviceRow | undefined;
+    return this.statement('SELECT * FROM devices WHERE device_id = ?').get(deviceId) as DeviceRow | undefined;
   }
   listDevices(userId: string): DeviceRow[] {
-    return this.db.prepare('SELECT * FROM devices WHERE user_id = ? ORDER BY created_at').all(userId) as unknown as DeviceRow[];
+    return this.statement('SELECT * FROM devices WHERE user_id = ? ORDER BY created_at').all(userId) as unknown as DeviceRow[];
   }
   /** Creates (or re-keys) a device and returns the raw token once. */
   issueDeviceToken(deviceId: string, userId: string, name: string, platform: string | null): string {
@@ -134,12 +147,16 @@ export class SqliteStore {
     return raw;
   }
   touchDevice(deviceId: string): void {
-    this.db.prepare('UPDATE devices SET last_seen = ? WHERE device_id = ?').run(Date.now(), deviceId);
+    const now=Date.now();if(now-(this.lastTouches.get(deviceId)??0)<5000)return;
+    this.db.prepare('UPDATE devices SET last_seen = ? WHERE device_id = ?').run(now, deviceId);
+    this.lastTouches.delete(deviceId);this.lastTouches.set(deviceId,now);
+    while(this.lastTouches.size>1024)this.lastTouches.delete(this.lastTouches.keys().next().value!);
   }
   setDevicePaused(deviceId: string, paused: boolean): void {
     this.db.prepare('UPDATE devices SET paused = ? WHERE device_id = ?').run(paused ? 1 : 0, deviceId);
   }
   deleteDevice(deviceId: string): void {
+    this.lastTouches.delete(deviceId);
     this.db.prepare('DELETE FROM devices WHERE device_id = ?').run(deviceId);
   }
 
@@ -176,17 +193,24 @@ export class SqliteStore {
   }
 
   /* ---------- audit ---------- */
+  // Volatile dashboard metadata only. No SQL INSERT for tool-call activity.
   audit(row: Omit<AuditRow, 'id'>): void {
-    this.db.prepare('INSERT INTO audit (ts,user_id,device_id,client,tool,args_hash,ok,ms,error) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(row.ts, row.user_id, row.device_id, row.client, row.tool, row.args_hash, row.ok, row.ms, row.error);
+    this.liveAudit.push({...row,id:++this.auditSequence,args_hash:null,error:row.ok?null:'TOOL_FAILED'});
+    if(this.liveAudit.length>1000)this.liveAudit.shift();
   }
-  recentAudit(userId: string, limit = 100): AuditRow[] {
-    return this.db.prepare('SELECT * FROM audit WHERE user_id = ? ORDER BY id DESC LIMIT ?').all(userId, limit) as unknown as AuditRow[];
+  recentAudit(userId:string,limit=100):AuditRow[]{
+    return this.liveAudit.filter(r=>r.user_id===userId).slice(-Math.min(1000,Math.max(1,limit))).reverse().map(r=>({...r}));
   }
-
+  pruneAudit(_now=Date.now()):number{
+    // Secure-delete legacy rows on upgrade, preserving authentication/device state.
+    const removed=Number(this.db.prepare('DELETE FROM audit').run().changes);
+    if(removed)this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    return removed;
+  }
   /** Housekeeping: drop expired codes/tokens. */
   vacuumExpired(): void {
     const now = Date.now();
+    this.pruneAudit(now);
     this.db.prepare('DELETE FROM auth_codes WHERE expires_at < ?').run(now);
     this.db.prepare('DELETE FROM device_codes WHERE expires_at < ?').run(now);
     this.db.prepare('DELETE FROM tokens WHERE expires_at IS NOT NULL AND expires_at < ?').run(now - 7 * 86_400_000);
@@ -204,14 +228,16 @@ export class SqliteStore {
   renameDevice(deviceId: string, name: string): void {
     this.db.prepare('UPDATE devices SET name = ? WHERE device_id = ?').run(name, deviceId);
   }
-  auditStats(userId: string): { total: number; failed: number; last24h: number } {
-    const row = this.db.prepare('SELECT COUNT(*) AS total, SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failed, SUM(CASE WHEN ts > ? THEN 1 ELSE 0 END) AS last24h FROM audit WHERE user_id = ?').get(Date.now() - 86_400_000, userId) as { total: number; failed: number | null; last24h: number | null };
-    return { total: row.total, failed: row.failed ?? 0, last24h: row.last24h ?? 0 };
+  auditStats(userId:string):{total:number;failed:number;last24h:number}{
+    const rows=this.liveAudit.filter(r=>r.user_id===userId);
+    return {total:rows.length,failed:rows.filter(r=>!r.ok).length,last24h:rows.filter(r=>r.ts>Date.now()-86400000).length};
   }
 
   /* ---------- API keys (static bearer tokens) ---------- */
   private ensureApiKeys(): void {
+    if(this.apiKeysReady)return;
     this.db.exec('CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, prefix TEXT NOT NULL, created_at INTEGER NOT NULL, last_used INTEGER, revoked INTEGER NOT NULL DEFAULT 0)');
+    this.apiKeysReady=true;
   }
   createApiKey(userId: string, name: string): { raw: string; prefix: string } {
     this.ensureApiKeys();
@@ -222,9 +248,12 @@ export class SqliteStore {
   }
   getApiKey(raw: string): { user_id: string; name: string; prefix: string } | undefined {
     this.ensureApiKeys();
-    const row = this.db.prepare('SELECT user_id, name, prefix FROM api_keys WHERE key_hash = ? AND revoked = 0').get(sha256(raw)) as { user_id: string; name: string; prefix: string } | undefined;
-    if (row) this.db.prepare('UPDATE api_keys SET last_used = ? WHERE key_hash = ?').run(Date.now(), sha256(raw));
-    return row;
+    const keyHash=sha256(raw);
+    const row = this.statement('SELECT user_id, name, prefix, last_used FROM api_keys WHERE key_hash = ? AND revoked = 0').get(keyHash) as { user_id: string; name: string; prefix: string; last_used: number | null } | undefined;
+    if (!row) return undefined;
+    const now=Date.now();
+    if(row.last_used===null || now-row.last_used>=30000) this.statement('UPDATE api_keys SET last_used = ? WHERE key_hash = ?').run(now,keyHash);
+    return {user_id:row.user_id,name:row.name,prefix:row.prefix};
   }
   listApiKeys(userId: string): { prefix: string; name: string; created_at: number; last_used: number | null }[] {
     this.ensureApiKeys();
@@ -235,5 +264,5 @@ export class SqliteStore {
     this.db.prepare('UPDATE api_keys SET revoked = 1 WHERE user_id = ? AND prefix = ?').run(userId, prefix);
   }
 
-  close(): void { this.db.close(); }
+  close(): void { this.liveAudit=[]; this.statements.clear(); this.lastTouches.clear(); this.db.close(); }
 }

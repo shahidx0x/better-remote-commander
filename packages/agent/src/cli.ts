@@ -7,6 +7,7 @@
  * Env: BRC_RELAY, BRC_NAME, BRC_TOKEN, BRC_DEVICE_ID, BRC_HOME, BRC_DEBUG
  */
 import os from 'node:os';
+import { startResourceMaintenance, stopResourceMaintenance } from './runtime/resource-limits.js';
 import { applyLegacyEnv } from 'brc-shared';
 applyLegacyEnv();
 import { WsClient } from './transport/ws-client.js';
@@ -14,6 +15,11 @@ import { pairDevice, loadCredentials, clearCredentials, saveCredentials, type De
 import { callTool, listTools } from './dispatcher.js';
 import { VERSION as CORE_VERSION } from './core/version.js';
 import { setCurrentClient } from './context.js';
+import { activity } from './runtime/activity.js';
+import { operationStatus } from './runtime/operations.js';
+import { projectIndex } from './runtime/project-index.js';
+import { codeGraph } from './runtime/code-graph.js';
+import { clearCodeCache } from './runtime/code-structure.js';
 
 const AGENT_VERSION = '2.0.5';
 
@@ -25,11 +31,12 @@ function arg(name: string, env?: string, def?: string): string | undefined {
 const flag = (name: string) => process.argv.includes(`--${name}`);
 
 const debug = flag('debug') || process.env.BRC_DEBUG === '1';
-const ts = () => new Date().toISOString();
-const log = (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => {
-  if (level === 'debug' && !debug) return;
-  (level === 'error' ? console.error : console.log)(`[${ts()}] [${level}] ${msg}`);
-};
+if (debug) process.env.BRC_DEBUG = '1';
+const log = (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => activity.log(level, msg);
+if (flag('help')) {
+  console.log('Local agent: node packages/agent/dist/cli.js --relay <base-url> --name <device> --no-browser\nLater: node packages/agent/dist/cli.js (uses saved pairing)\nFlags: --allow-dir <path> (repeatable), --debug, --install-service, --uninstall-service, --logout\nTool START/OK/ERROR status is visible by default. Live-only logging: no log files or persisted tool history.');
+  process.exit(0);
+}
 
 if (flag('logout')) {
   console.log(clearCredentials() ? 'Credentials removed.' : 'No saved credentials.');
@@ -85,6 +92,8 @@ async function resolveCredentials(): Promise<DeviceCredentials> {
   return pairDevice({ relayUrl: relayArg, name, deviceId, openBrowser: !flag('no-browser'), log: (m) => console.log(m) });
 }
 
+await activity.start().catch(() => console.error('Could not remove an old diagnostic file; live logging remains enabled.'));
+await startResourceMaintenance();
 const creds = await resolveCredentials();
 setCurrentClient({ name: 'brc-agent', version: AGENT_VERSION });
 const tools = listTools();
@@ -111,12 +120,16 @@ start(creds);
 
 const shutdown = (sig: string) => {
   console.log(`\n${sig} received, stopping agent`);
+  stopResourceMaintenance();
   client.stop();
+  projectIndex.close();
+  codeGraph.clear();
+  clearCodeCache();
   // Persist debounced background config writes (usage stats), bounded wait.
   const exit = () => process.exit(0);
   const timer = setTimeout(exit, 1500);
   import('./core/config-manager.js')
-    .then(({ configManager }) => configManager.flush())
+    .then(({ configManager }) => Promise.all([configManager.close(), activity.close()]))
     .catch(() => {})
     .finally(() => { clearTimeout(timer); setTimeout(exit, 50); });
 };

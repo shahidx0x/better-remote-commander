@@ -8,6 +8,7 @@
  * all commands through commandManager.validateCommand() (blockedCommands).
  */
 import { spawn, execFile } from 'node:child_process';
+import { getCallContext, checkCancelled } from '../context.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,7 +91,9 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
   const parsed = RunCommandArgsSchema.safeParse(args);
   if (!parsed.success) return text(`Invalid arguments for run_command: ${parsed.error.message}`, true);
   const { command, shell, maxOutputChars } = parsed.data;
-  const timeoutMs = Math.min(parsed.data.timeout_ms, MAX_TIMEOUT_MS);
+  checkCancelled();
+  const abortSignal = getCallContext()?.signal;
+  const timeoutMs = Math.max(1, Math.min(parsed.data.timeout_ms, MAX_TIMEOUT_MS, (getCallContext()?.deadline ?? (Date.now()+MAX_TIMEOUT_MS))-Date.now()));
 
   if (!(await commandManager.validateCommand(command))) {
     return text(`Error: Command not allowed: ${command}`, true);
@@ -117,6 +120,10 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
     : command;
   const cfg = getShellSpawnArgs(shellPath, wrapped);
   const env: NodeJS.ProcessEnv = { ...process.env };
+  // A user command is independent of the agent's test-runner process.
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_REPORTER;
+  env.COREPACK_ENABLE_NETWORK = '0';
   if (isWindows) env.PATHEXT = getRepairedPathExt();
 
   const started = Date.now();
@@ -141,6 +148,10 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
     }
 
     let timedOut = false;
+    let cancelled = false;
+    const abort = () => { cancelled = true; killTree(child.pid); };
+    abortSignal?.addEventListener('abort', abort, {once:true});
+    if (abortSignal?.aborted) abort();
     let settled = false;
     const timer = setTimeout(() => { timedOut = true; killTree(child.pid); }, timeoutMs);
 
@@ -153,12 +164,13 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      abortSignal?.removeEventListener('abort', abort);
       const ms = Date.now() - started;
       if (spawnError) {
         resolve(text(`Failed to start command with shell "${shellPath}": ${spawnError.message}`, true));
         return;
       }
-      const status = timedOut
+      const status = cancelled ? 'CANCELLED (process-tree termination requested)' : timedOut
         ? `TIMED OUT after ${timeoutMs}ms (process killed)`
         : `exit code ${exitCode ?? 'null'}${signal ? ` (signal ${signal})` : ''}`;
       const out = stdout.toString();
@@ -166,7 +178,8 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
       let body = `$ ${command}\n[${status} · ${ms}ms${cwd ? ` · cwd ${cwd}` : ''}]\n`;
       body += out ? `\n--- stdout ---\n${out.replace(/\s+$/, '')}\n` : '\n(no stdout)\n';
       if (err) body += `\n--- stderr ---\n${err.replace(/\s+$/, '')}\n`;
-      resolve(text(body));
+      const failed = cancelled || timedOut || exitCode !== 0;
+      resolve({ ...text(body, failed), structuredContent: { exitCode, signal, durationMs:ms, timedOut, cancelled, ...(failed ? {error:{code:cancelled?'CANCELLED':timedOut?'TIMEOUT':'COMMAND_FAILED',retryable:false}} : {}) } });
     };
 
     child.on('error', (e) => finish(null, null, e));

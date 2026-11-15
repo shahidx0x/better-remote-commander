@@ -14,6 +14,7 @@
  */
 
 import fs from "fs/promises";
+import { atomicWrite } from "../../../runtime/file-safety.js";
 import path from "path";
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
@@ -77,7 +78,7 @@ export class TextFileHandler implements FileHandler {
         if (mode === 'append') {
             await fs.appendFile(path, content);
         } else {
-            await fs.writeFile(path, content);
+            await atomicWrite(path, content);
         }
     }
 
@@ -273,7 +274,7 @@ export class TextFileHandler implements FileHandler {
                 return await this.readFromStartWithReadline(filePath, offset, length, mimeType, includeStatusMessage, totalLines, signal);
             } else {
                 if (offset > READ_PERFORMANCE_THRESHOLDS.DEEP_OFFSET_THRESHOLD) {
-                    return await this.readFromEstimatedPosition(filePath, offset, length, mimeType, includeStatusMessage, totalLines, signal);
+                    return await this.readFromStartWithReadline(filePath, offset, length, mimeType, includeStatusMessage, totalLines, signal);
                 } else {
                     return await this.readFromStartWithReadline(filePath, offset, length, mimeType, includeStatusMessage, totalLines, signal);
                 }
@@ -397,23 +398,22 @@ export class TextFileHandler implements FileHandler {
         encoding?: BufferEncoding,
         start?: number
     ): Promise<FileResult> {
-        const rl = createInterface({
-            input: createReadStream(filePath, { signal, encoding, start }),
-            crlfDelay: Infinity
-        });
+        const input = createReadStream(filePath, { signal, encoding, start });
+        const rl = createInterface({ input, crlfDelay: Infinity });
 
         const result: string[] = [];
         let lineNumber = 0;
 
-        for await (const line of rl) {
-            if (lineNumber >= offset && result.length < length) {
-                result.push(line);
+        try {
+            for await (const line of rl) {
+                if (lineNumber >= offset && result.length < length) result.push(line);
+                if (result.length >= length) break;
+                lineNumber++;
             }
-            if (result.length >= length) break;
-            lineNumber++;
+        } finally {
+            rl.close();
+            input.destroy(); // A ranged read must not leave a paused file stream open.
         }
-
-        rl.close();
 
         if (includeStatusMessage) {
             const statusMessage = this.generateEnhancedStatusMessage(result.length, offset, fileTotalLines, false);

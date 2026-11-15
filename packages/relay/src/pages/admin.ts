@@ -1,4 +1,4 @@
-/** Admin dashboard pages: devices (pause/rename/delete), audit log, client edit. */
+/** Admin dashboard pages: devices (pause/rename/delete), live activity (not saved), client edit. */
 import { layout, esc } from './html.js';
 
 export interface DeviceView { device_id: string; name: string; platform: string | null; online: boolean; paused: number; last_seen: number | null; created_at: number }

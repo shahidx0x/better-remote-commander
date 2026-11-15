@@ -1,3 +1,4 @@
+import {createServer as createProbe} from 'node:net';
 // One-shot e2e runner: boots relay + agent on a scratch port/db, auto-pairs, runs all suites, tears down.
 // pnpm test:e2e     (needs `pnpm build` first)
 import { spawn } from 'node:child_process';
@@ -5,8 +6,11 @@ import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-const PORT = Number(process.env.E2E_PORT ?? 3555);
-const base = `http://localhost:${PORT}`;
+// Select an unused loopback port. Refuse an occupied explicit override instead of touching another service.
+const PORT = await new Promise((resolve,reject)=>{
+ const probe=createProbe();probe.once('error',reject);probe.listen(Number(process.env.E2E_PORT??0),'127.0.0.1',()=>{const port=probe.address().port;probe.close(error=>error?reject(error):resolve(port));});
+});
+const base = `http://127.0.0.1:${PORT}`;
 const pass = 'e2e-pass-' + Math.random().toString(36).slice(2, 8);
 // realpath: Windows runners hand out 8.3 short paths (RUNNER~1) which crash libuv's fs.watch
 const scratch = mkdtempSync(path.join(realpathSync.native(tmpdir()), 'brc-e2e-'));
@@ -42,7 +46,7 @@ function runScript(script, ...args) {
 
 let failed = 0;
 try {
-  start('relay', [relayCli], { PORT: String(PORT), PUBLIC_URL: base, BRC_ADMIN_PASSWORD: pass, BRC_SESSION_SECRET: 'e2e', BRC_DB: path.join(scratch, 'relay.sqlite'), LOG_LEVEL: 'warn' });
+  start('relay', [relayCli], { PORT: String(PORT), HOST: '127.0.0.1', PUBLIC_URL: base, BRC_ADMIN_PASSWORD: pass, BRC_SESSION_SECRET: 'e2e', BRC_DB: path.join(scratch, 'relay.sqlite'), LOG_LEVEL: 'warn' });
   await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay');
 
   const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { BRC_HOME: path.join(scratch, 'agent-home') });

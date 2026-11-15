@@ -33,6 +33,8 @@ export interface ContentBlock {
 export interface ToolResult {
   content: ContentBlock[];
   isError?: boolean;
+  structuredContent?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
 }
 
 /* ---------- agent -> relay ---------- */
@@ -80,7 +82,8 @@ export interface ErrorMessage {
   fatal?: boolean;
 }
 
-export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage;
+export interface CancelMessage { type: 'cancel'; id: string; reason?: string }
+export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage | CancelMessage;
 
 export const DEFAULTS = {
   pingIntervalMs: 20_000,

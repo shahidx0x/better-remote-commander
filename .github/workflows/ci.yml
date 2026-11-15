@@ -19,6 +19,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test:unit
+      - run: pnpm test:agent
       - run: pnpm test:e2e
         env: { E2E_PORT: '3555', BRC_DEBUG: '1' }
       - name: pack npm tarballs

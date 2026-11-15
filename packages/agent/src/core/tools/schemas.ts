@@ -83,6 +83,7 @@ export const ReadMultipleFilesArgsSchema = z.object({
 );
 
 export const WriteFileArgsSchema = z.object({
+  expected_sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   path: z.string(),
   content: z.string(),
   mode: z.enum(['rewrite', 'append']).default('rewrite'),
@@ -183,6 +184,7 @@ export const EditBlockEditSchema = z.object({
 });
 
 export const EditBlockArgsSchema = z.object({
+  expected_sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   file_path: z.string(),
   // Text file string replacement
   old_string: z.string().optional(),

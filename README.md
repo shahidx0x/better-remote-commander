@@ -11,7 +11,7 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 - **ChatGPT**: add the relay as a remote MCP connector.
 - **Your infrastructure**: run the relay on a VPS, or on your PC behind a Cloudflare Tunnel / ngrok. SQLite, one container, no third-party service.
 - **Many machines**: pair Windows, macOS, Linux boxes and containers to one relay; agents only connect outbound.
-- **Control**: browser dashboard to pair, pause, rename and remove devices, manage OAuth clients and see an audit log.
+- **Control**: browser dashboard to pair, pause, rename and remove devices, manage OAuth clients and see bounded live activity.
 
 ## Features
 
@@ -19,9 +19,9 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 - **Device pairing**: the agent shows a code, you approve it in the browser. Device tokens are stored hashed.
 - **Multi-device**: every tool takes an optional `deviceId`. With one device online it is picked automatically.
 - **Outbound-only agents**: no open ports on your machines. Automatic reconnect, heartbeat and re-pairing.
-- **Admin dashboard** (`/admin`): rename, pause, resume and delete devices, view the audit log and stats.
+- **Admin dashboard** (`/admin`): rename, pause, resume and delete devices, view current-process activity and stats.
   `/auth/clients` manages OAuth clients and `/auth/apikeys` manages API keys.
-- **Audit log** of every tool call, and per-device pause switch.
+- **Live-only diagnostics**: concise tool activity in the console and bounded RAM-only dashboard metadata. No persisted tool-call logs.
 - **Encrypted file transfer** between devices (see below).
 - **One-shot commands** (`run_command`): run a command and get exit code, stdout and stderr in a single call,
   with timeout and process-tree kill.
@@ -30,8 +30,8 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 - **Ranged multi-file reads**: `read_multiple_files` accepts per-file line ranges.
 - **Safe delete** (`delete_file`) and **git helpers** (`git_status`, `git_diff`, `git_log`).
 - **Fast agent**: heavy document libraries (Excel, PDF, DOCX) load on demand, system info is cached,
-  telemetry work is skipped when disabled and usage stats are saved in batches. Startup is ~3x faster with
-  ~70% less memory, and per-call overhead dropped from ~160 ms to a few ms.
+  parser libraries load lazily, diagnostic telemetry is disabled, and activity metrics stay in memory.
+  Performance depends on workload and network; no fixed speedup is claimed.
 - **OS service install** (`--install-service`) so the agent starts at login.
 - **Security**: login rate limiting, signed session cookies, security headers, blocked-command list and
   `allowedDirectories` on the agent. See `SECURITY.md`.
@@ -40,9 +40,17 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
   (accessibility automation, screenshots, notifications, contacts, SMS, location, camera/mic capture, screen
   recording, app install, automation jobs, Shizuku/Device Owner modes). See [docs/android-agent.md](docs/android-agent.md).
 
+## Coding-agent reliability and diagnostics
+
+The source build includes batched coding operations, hash-checked atomic file edits, search-and-read context, explicit build/test verification, an optional watched filename index, request isolation, bounded execution/cancellation, structured errors and latency metrics. Tool START/OK/ERROR lines are visible by default. Diagnostics are live-only: no agent log writer and no SQLite audit inserts. Credentials and settings are preserved. Project context, parser-backed navigation and RAM-only coding sessions help the AI inspect, edit and verify changes.
+
+See [the coding harness and local launch guide](docs/coding-agent.md) for limits, cleanup timing, Windows startup instructions and service migration. On Windows, `START_AGENT.cmd` runs this checkout's compiled agent without a global install.
+
+Set `BRC_TOOL_PROFILE=coding` before starting the agent to hide document/transfer/history tools from discovery. The default preserves the full tool set. This is an advertisement filter, not an access-control boundary.
+
 ## Tools available to the AI
 
-The relay adds `list_devices`. The agent provides 32 tools, derived from Desktop Commander plus BRC additions.
+The relay adds `list_devices`. The agent provides 67 tools, derived from Desktop Commander plus BRC additions.
 
 | Category | Tools |
 | --- | --- |
@@ -55,7 +63,12 @@ The relay adds `list_devices`. The agent provides 32 tools, derived from Desktop
 | Processes | `start_process`, `read_process_output`, `interact_with_process`, `force_terminate`, `list_sessions`, `list_processes`, `kill_process` |
 | Git | `git_status`, `git_diff`, `git_log` |
 | File transfer | `prepare_file_transfer`, `send_file_transfer`, `receive_file_transfer` |
-| Diagnostics | `get_usage_stats`, `get_recent_tool_calls` |
+| Coding workflows | `read_code_file`, `read_code_context`, `edit_files`, `batch_tools`, `verify_project`, `project_index`, `agent_status`, `cancel_operation` |
+| Project context | `project_context`, `project_preferences`, `project_map`, `vscode_tasks` |
+| Code navigation | `read_code_ranges`, `code_outline`, `find_symbols`, `read_symbol`, `find_references`, `related_files` |
+| Refactoring | `replace_symbol`, `edit_code_ranges`, `code_diagnostics` |
+| Verification/harness | `discover_checks`, `run_project_checks`, `test_impact`, `coding_session`, `review_changes` |
+| Live diagnostics | `get_usage_stats`, `get_recent_tool_calls` |
 
 Note: `write_pdf` downloads Chrome on first use.
 
@@ -103,7 +116,7 @@ docker compose --profile local up -d                            # localhost only
 Images are published to `ghcr.io/shahidx0x/better-remote-commander/relay` and `/agent`.
 
 **Without Docker**
-```ash
+```bash
 npm i -g brc-relay
 PUBLIC_URL=https://rdp.example.com BRC_ADMIN_PASSWORD=... BRC_SESSION_SECRET=... brc-relay
 ```
@@ -111,7 +124,7 @@ Put it behind any HTTPS reverse proxy (Caddy, nginx, Cloudflare Tunnel) that for
 
 ### 2. Agent (on every machine you want to control)
 
-```ash
+```bash
 npm i -g brc-agent          # any OS with Node 22.13+
 brc-agent --relay https://rdp.example.com --name "My PC"
 ```
@@ -128,7 +141,7 @@ URL and approve the pairing. Full guide, tool list and permissions: [docs/androi
 - **Claude**: Settings → Connectors → Add custom connector → URL `https://rdp.example.com/mcp` → Add → Connect → sign in → Allow.
 - **ChatGPT (MCP)**: Settings → Connectors → add `https://rdp.example.com/mcp`.
 
-Useful URLs on your relay: `/admin` (devices, audit), `/device/verify` (pairing), `/auth/clients`, `/health`.
+Useful URLs on your relay: `/admin` (devices, live activity), `/device/verify` (pairing), `/auth/clients`, `/health`.
 
 ## Build from source
 ```bash
@@ -148,3 +161,11 @@ The agent's tool implementation (`packages/agent/src/core`) is derived from
 [Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP) by Eduard Ruzga and contributors (MIT).
 Desktop Commander's hosted remote relay is proprietary; this project provides an open, self-hostable relay with the same
 device-agent model, plus OAuth for Claude/ChatGPT, device pairing, and a browser dashboard. See [NOTICE](NOTICE).
+
+## Multilingual coding harness
+
+Code navigation and `related_files` are no longer JS/TS-only. C#, Rust, Python, Go, Java, C/C++ and additional portable grammars provide syntax-aware support; unknown text languages retain explicit generic fallback. An agent-local RAM graph, budgeted `context_pack`, scoped Claude/Codex-style guidance and manifest-backed checks improve context retrieval without another model or a graph database. Relay schema reuse preserves live permission checks and bounds per-device load. See [the multilingual guide](docs/polyglot-harness.md) for precise limits and validation.
+
+## Faster batches, infrastructure and images
+
+See [the fast-agent guide](docs/fast-agent.md) for 64-call read waves/write barriers, combined workspace edits/readback/checks, Docker observation, actual image previews, optional restricted execution, automatic cache eviction and `pnpm bench:io`. Diagnostics remain live-only. These tools do not add another model or a graph database.
