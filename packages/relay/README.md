@@ -79,7 +79,14 @@ Not every MCP host supports a no-auth remote HTTP URL or suppresses OAuth. This 
 ### Fewer MCP calls: preferred tool choices
 
 The relay's MCP initialization instructions and the tool descriptions both
-recommend the cheapest safe operation for the task. For 2+ known file paths,
+recommend the cheapest safe operation for the task. The source of truth is
+`packages/agent/src/tool-routing.ts`: every agent tool has a concise,
+explicit `USE WHEN` and `USE INSTEAD` rule plus any critical evidence caveat.
+The relay uses these reviewed rules for all 70 tools even if an older local
+agent reconnects with misleading descriptions. JSON input schemas, permissions,
+and execution remain unchanged. Tests fail if any advertised tool lacks a
+routing rule.
+ For 2+ known file paths,
 `read_multiple_files` reads them in one MCP call (internal concurrency: 8).
 Use `read_file` for one file, `read_code_ranges` for multi-file code snippets
 with hashes, and `start_search(wait=true)` when filenames are not yet known.

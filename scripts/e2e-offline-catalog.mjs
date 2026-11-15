@@ -50,7 +50,13 @@ const tok = await (await fetch(base + '/token', { method: 'POST', headers: { 'co
 step('token exchange works without agent', !!tok.access_token);
 const H = { authorization: 'Bearer ' + tok.access_token };
 const listed = await rpc(base + '/mcp', H, 'tools/list', {}, 1);
-const names = (listed.msg?.result?.tools ?? []).map(t => t.name);
+const publishedTools = listed.msg?.result?.tools ?? [];
+const names = publishedTools.map(t => t.name);
+step('all 71 tools describe WHEN to use them and WHAT to use instead',
+  publishedTools.length === 71 && publishedTools.every(t => t.description.startsWith('USE WHEN: ') && t.description.includes('USE INSTEAD: ')));
+step('a single-run command is not confused with an interactive process',
+  publishedTools.find(t => t.name === 'run_command')?.description.includes('ONE-SHOT command')
+  && publishedTools.find(t => t.name === 'start_process')?.description.includes('run_command'));
 step('first connection advertises file and terminal tools while agent is offline',
   listed.status === 200 && names.length >= 60 && names.includes('list_devices') && names.includes('read_file') && names.includes('write_file') && names.includes('start_process') && names.includes('workspace_batch'));
 const offline = await rpc(base + '/mcp', H, 'tools/call', { name: 'read_file', arguments: { path: '/fake/offline/path' } }, 2);

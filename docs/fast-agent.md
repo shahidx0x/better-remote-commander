@@ -10,7 +10,11 @@ This checkout exposes 70 agent tools plus the relay's `list_devices` (71 total i
 4. For coordinated edits/creation + readback + agreed checks use `workspace_batch`. It previews by default and requires hashes to modify existing files.
 5. Load `project_context` or a focused `context_pack` only when conventions are unknown; avoid blanket context dumps.
 6. Inspect real containers with `docker_inventory` / `docker_inspect` and image assets with `read_images` only when relevant.
-7. Use `start_process` for actual commands/build/tests, never as the first choice for ordinary reading. Use `sandbox_run` only for explicitly requested isolation.
+7. Use `run_command` for one-shot commands with a final exit code; use `start_process` only for interactive or long-running processes. Use `sandbox_run` only for explicitly requested isolation.
+
+Every one of the 70 agent tools has an explicit `USE WHEN` and `USE INSTEAD` decision rule in `packages/agent/src/tool-routing.ts`. These rules are prepended to the local agent's tool definitions and the relay's stable catalog, including when an older agent reconnects. CI tests verify that every tool has a rule and that schemas/permissions are unchanged. The relay's additional `list_devices` tool has its own decision rule. The catalog adds no model call, network hop, persistent data, or project index.
+
+**Ground claims in tool output:** lexical matches are not semantic references, syntax checks are not compiler passes, Docker errors are not empty inventories, and starting a command is not completing it. Only report executed checks, edits, service status and worker results that the actual tools verified. A model/host still chooses the tools; these rules are guidance, not a way to force third-party models to obey.
 
 Do not insist on starting a coding session, building a graph, loading parsers or opening Docker for every tiny edit. The existing specialized tools remain available.
 

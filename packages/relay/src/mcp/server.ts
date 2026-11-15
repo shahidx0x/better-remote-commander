@@ -56,7 +56,7 @@ export function readOnlyToolAllowed(name: string, args: unknown): boolean {
 
 export const LIST_DEVICES_TOOL = {
   name: 'list_devices',
-  description: 'List devices paired to this relay, with online state and ids. Call this first when more than one device may be connected.',
+  description: 'USE WHEN: identify your paired PCs and their real online state/device IDs, especially with multiple devices. USE INSTEAD: for files on a known device use the file/code tools; for agent operations use agent_status. IMPORTANT: an online device is not proof files are accessible or tests passed.',
   inputSchema: { type: 'object', properties: {} },
   annotations: { title: 'List devices', readOnlyHint: true },
 };
@@ -65,12 +65,11 @@ export const LIST_DEVICES_TOOL = {
 // Device objects change on reconnect/hello; pause state is read freshly for every tools/list.
 type ToolCache = {devices:object[];definitions:unknown[];tools:{name:string;description:string;inputSchema:unknown;annotations?:Record<string,unknown>}[]};
 const schemaCaches = new WeakMap<DeviceHub,Map<string,ToolCache>>();
-// Preserve the improved routing descriptions when an older connected agent sends
-// its legacy prompts. Live agent INPUT SCHEMAS still win, not their outdated hints.
-const ROUTING_DESCRIPTIONS = new Map(BUNDLED_AGENT_TOOL_CATALOG
-  .filter(t => ['read_file','read_multiple_files','read_code_ranges','write_file','start_search','start_process',
-    'interact_with_process','batch_tools','workspace_batch'].includes(t.name))
-  .map(t => [t.name, t.description] as const));
+// Advertise reviewed guidance for ALL known tools, even when an older agent
+// reconnects with verbose or contradictory legacy descriptions. The live INPUT
+// SCHEMA still wins for every tool except the explicitly strengthened
+// read_multiple_files cross-field schema.
+const ROUTING_DESCRIPTIONS = new Map(BUNDLED_AGENT_TOOL_CATALOG.map(t => [t.name, t.description] as const));
 // Keep multi-file JSON Schema's cross-field rule visible even when the online
 // agent has not yet been restarted with its updated tool definitions.
 const MULTI_FILE_INPUT_SCHEMA = BUNDLED_AGENT_TOOL_CATALOG.find(t => t.name === 'read_multiple_files')?.inputSchema;
@@ -109,11 +108,12 @@ export const TOOL_ROUTING_GUIDANCE = [
   'Unknown files -> start_search(wait=true) or read_code_context; do not poll start_search unless a streaming search is necessary.',
   'Multiple DIFFERENT independent read/context operations -> ONE batch_tools call (mode=auto, bounded concurrency); do not nest batches or make unrelated work depend on results not yet known.',
   'Multiple code writes + readback/checks -> ONE workspace_batch (hash-checked, dryRun defaults true; execute only when user authorized). Single tiny edit -> edit_block with precondition.',
-  'Terminal start_process is for actual commands/build/tests/interactive processes, not ordinary file reading. Avoid repeated REPL or shell calls for file inspection.',
+  'One-shot build/test/git/system command -> run_command (final exit code in one call); only long-running or interactive commands -> start_process then read_process_output/interact_with_process when needed.',
+  'Syntax/lexical candidates (code_diagnostics, find_references, related_files, test_impact) are NOT typecheck, semantic references, full impact, or passing tests. Use discover_checks/run_project_checks or verify_project for executed evidence.',
   'Discover project patterns with project_context/context_pack when needed; use scoped source and real tests, not blanket repository dumps.',
   'Inspect Docker/images with docker_inventory/read_images only when relevant; never assume a missing image/container.',
   'Subagents only if host natively supports them with BRC access; otherwise use existing batches. The relay does not spawn models.',
-  'Tool descriptions are guidance, not permission. Authorized device, scope, privacy, safe edit checks and verification always apply.'
+  'Never invent a tool name, path, file contents, running service, test result, subagent or successful edit. If a tool is unavailable or fails, say so and use the observed output. Tool descriptions are guidance, not permission; device ownership, scope and safe edit checks still apply.'
 ].join(' ');
 
 export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full'): Server {

@@ -40,7 +40,9 @@ function portableDescription(name, original) {
 const preferredOrder = [
   'read_multiple_files', 'batch_tools', 'workspace_batch',
   'read_code_ranges', 'read_code_context', 'read_file', 'read_code_file', 'start_search',
-  'project_context', 'context_pack', 'edit_files', 'edit_block', 'write_file',
+  'project_context', 'context_pack', 'project_map', 'code_outline',
+  'edit_files', 'edit_block', 'write_file',
+  'run_command', 'discover_checks', 'run_project_checks', 'git_status', 'git_diff',
 ];
 const ranks = new Map(preferredOrder.map((name, i) => [name, i]));
 // Stable tool ordering improves discoverability of the fast multi-file workflow,

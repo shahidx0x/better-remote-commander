@@ -204,6 +204,7 @@ test('MCP catalog is stable before agent connects, while online, and after disco
     store.issueDeviceToken('device', owner.id, 'PC', 'win32');
     socket.recv(hello('device', [
       { name: 'read_file', description: 'agent-specific live schema', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
+      { name: 'find_references', description: 'WRONG: this is a guaranteed semantic language-server reference search', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
       { name: 'device_extra', description: 'newer agent extra', inputSchema: { type: 'object', properties: {} } },
     ]));
     const online = liveTools(hub, store, owner.id);
@@ -211,6 +212,8 @@ test('MCP catalog is stable before agent connects, while online, and after disco
     assert.ok(online.tools.some(t => t.name === 'device_extra'));
     assert.match(online.tools.find(t => t.name === 'read_file').description, /ONE FILE OR URL ONLY/, 'relay overrides stale agent description with recommended multi-file routing');
     assert.equal(online.tools.find(t => t.name === 'read_file').inputSchema.properties.path.type, 'string', 'live device input schema still wins');
+    assert.match(online.tools.find(t => t.name === 'find_references').description, /^USE WHEN: /, 'older agents cannot override reviewed tool-choice rules');
+    assert.doesNotMatch(online.tools.find(t => t.name === 'find_references').description, /WRONG: this is a guaranteed semantic/, 'incorrect claims from older agents are not advertised');
     assert.ok(names.every(n => online.tools.some(t => t.name === n)), 'online does not hide stable tools');
     socket.close(1000, 'done');
     const recovered = liveTools(hub, store, owner.id);

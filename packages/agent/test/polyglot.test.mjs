@@ -133,7 +133,11 @@ test('relay schema cache preserves stable discovery while device pause and recon
  const next=new Sock();h.attach(next,'u','pc');next.emit('message',hello('pc','read_code_file'));
  const reconnected=liveTools(h,store,'u');assert.equal(reconnected.online,1);
  assert.deepEqual(reconnected.tools.map(t=>t.name),stable);
- assert.equal(reconnected.tools.find(t=>t.name==='read_code_file').description,'test','reconnected agent overrides that schema');
+ const selected=reconnected.tools.find(t=>t.name==='read_code_file');
+ assert.match(selected.description,/^USE WHEN: /,'reviewed tool-choice guidance must survive an older agent reconnecting');
+ assert.notEqual(selected.description,'test','do not let stale agent descriptions override reviewed choices');
+ assert.equal(selected.inputSchema.type,'object','live agent schema remains authoritative');
+ assert.ok(selected.inputSchema.properties.deviceId,'device targeting remains available');
  const other=liveTools(h,store,'other');assert.equal(other.online,0);
  assert.deepEqual(other.tools.map(t=>t.name),stable,'static catalog is public schema; device ownership is still enforced by invocation');
  h.close();

@@ -6,6 +6,7 @@ import * as handlers from './core/handlers/index.js';
 import { getConfig, setConfigValue } from './core/tools/config.js';
 import { getUsageStats } from './core/tools/usage.js';
 import { buildToolDefinitions, EXCLUDED_TOOLS, type ToolDefinition } from './core/tool-definitions.js';
+import { addToolChoice } from './tool-routing.js';
 import { BRC_TOOL_HANDLERS, buildBrcToolDefinitions } from './tools/brc-tools.js';
 import type { ToolResult } from 'brc-shared';
 import { randomUUID } from 'node:crypto';
@@ -71,7 +72,8 @@ export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
     cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildCodingToolDefinitions(), ...buildExpertToolDefinitions(), ...buildPolyglotToolDefinitions(), ...buildDeveloperToolDefinitions(), ...buildWorkerToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name))
-      .filter(t => process.env.BRC_TOOL_PROFILE !== 'coding' || !['write_pdf','prepare_file_transfer','send_file_transfer','receive_file_transfer','get_recent_tool_calls','get_usage_stats'].includes(t.name));
+      .filter(t => process.env.BRC_TOOL_PROFILE !== 'coding' || !['write_pdf','prepare_file_transfer','send_file_transfer','receive_file_transfer','get_recent_tool_calls','get_usage_stats'].includes(t.name))
+      .map(addToolChoice);
   }
   return cachedDefs;
 }
