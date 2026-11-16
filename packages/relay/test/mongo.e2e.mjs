@@ -50,6 +50,23 @@ try {
   assert.equal((await store.getDeviceCodeByUserCode(pairing.user_code.toLowerCase().replace('-', ''))).device_code, pairing.device_code);
   await store.approveDeviceCode(pairing.device_code, user.id, 'workstation');
   assert.equal((await store.getDeviceCode(pairing.device_code)).approved, 1);
+  // Automatic MCP estimates are account-scoped aggregates, separate from provider usage.
+  const estimateDay = new Date().toISOString().slice(0,10);
+  await store.recordMcpEstimates([
+    {user_id:user.id,day:estimateDay,input_tokens:230,output_tokens:35,calls:2,partial_calls:0,
+      to_agent_bytes:160,from_agent_bytes:240,matched_calls:1,universal_calls:1},
+    {user_id:user.id,day:estimateDay,input_tokens:20,output_tokens:5,calls:1,partial_calls:1,
+      to_agent_bytes:16,from_agent_bytes:38,matched_calls:0,universal_calls:1},
+  ]);
+  const estimates = await store.mcpEstimateDays(user.id,estimateDay);
+  assert.equal(estimates[0].input_tokens,250);
+  assert.equal(estimates[0].output_tokens,40);
+  assert.equal(estimates[0].reports,3);
+  assert.equal(estimates[0].partial_calls,1);
+  assert.equal(estimates[0].to_agent_bytes,176);
+  assert.equal(estimates[0].from_agent_bytes,278);
+  assert.equal(estimates[0].matched_calls,1);
+  assert.equal(estimates[0].universal_calls,2);
   const key = await store.createApiKey(user.id, 'coding-client');
   assert.equal((await store.getApiKey(key.raw)).user_id, user.id);
   const link = await store.createConnectionLink(user.id, 'Coding MCP', 'full', 7);
@@ -72,6 +89,11 @@ try {
   assert.equal((await store.getToken(access, 'access')).user_id, user.id);
   assert.equal((await store.getDeviceByToken(originalDeviceToken)).device_id, 'workstation');
   assert.ok(await store.getApiKey(key.raw));
+  const restoredEstimates = await store.mcpEstimateDays(user.id,estimateDay);
+  assert.equal(restoredEstimates[0].input_tokens,250,'Mongo MCP daily estimates persist across process restart');
+  assert.equal(restoredEstimates[0].partial_calls,1);
+  assert.equal(restoredEstimates[0].to_agent_bytes,176);
+  assert.equal(restoredEstimates[0].universal_calls,2);
   assert.ok(await store.getConnectionLink(link.key));
   assert.equal((await store.getConnectionLink(annual.key)).expires_at, annual.expiresAt);
   assert.equal((await store.getConnectionLink(biennial.key)).expires_at, biennial.expiresAt);

@@ -1,6 +1,20 @@
-/** Provider-reported LLM usage, never inferred from MCP tool payload sizes. */
+/** Provider-reported model totals and separate, labeled local MCP-text estimates. */
 export interface UsageRecord { id:string; user_id:string; ts:number; day:string; provider:string; model:string; input_tokens:number; output_tokens:number }
 export interface UsageDay { day:string; input_tokens:number; output_tokens:number; reports:number }
+/** Estimated MCP tool payload tokens, never claims full LLM usage. Direction is from
+ * the model's perspective: tool results -> model input; tool arguments -> model output. */
+export interface McpEstimateDelta {
+  user_id:string; day:string; input_tokens:number; output_tokens:number;
+  calls:number; partial_calls:number;
+  /** Agent WebSocket tool frames: exact serialized payload bytes, excludes transport framing. */
+  to_agent_bytes:number; from_agent_bytes:number;
+  /** "Matched" only means a known text encoding, never full model/billing usage. */
+  matched_calls:number; universal_calls:number;
+}
+export interface McpEstimateDay extends UsageDay {
+  partial_calls:number; to_agent_bytes:number; from_agent_bytes:number;
+  matched_calls:number; universal_calls:number;
+}
 export type UsagePeriod = 'day'|'week'|'month';
 export interface UsageBucket { key:string; label:string; input:number; output:number; total:number; reports:number }
 const DAY=86_400_000;
@@ -21,7 +35,7 @@ export function validateUsageReport(x:unknown, user:string, now=Date.now()):Usag
 const monday=(t:number)=>dayStart(t)-((new Date(t).getUTCDay()+6)%7)*DAY;
 const start=(t:number,p:UsagePeriod)=>p==='day'?dayStart(t):p==='week'?monday(t):Date.UTC(new Date(t).getUTCFullYear(),new Date(t).getUTCMonth(),1);
 const step=(t:number,p:UsagePeriod,i:number)=>p==='day'?t+i*DAY:p==='week'?t+i*7*DAY:Date.UTC(new Date(t).getUTCFullYear(),new Date(t).getUTCMonth()+i,1);
-export function usageView(days:UsageDay[],period:UsagePeriod,now=Date.now()){
+export function usageView(days:UsageDay[],period:UsagePeriod,now=Date.now(),source:'provider-reported'|'mcp-estimated'='provider-reported'){
   const p:UsagePeriod=['day','week','month'].includes(period)?period:'day',today=start(now,p),len=p==='day'?14:12;
   const buckets:UsageBucket[]=[];const map=new Map<string,UsageBucket>();
   for(let i=len-1;i>=0;i--){
@@ -31,6 +45,6 @@ export function usageView(days:UsageDay[],period:UsagePeriod,now=Date.now()){
   }
   for(const d of days){if(!/^\d{4}-\d{2}-\d{2}$/.test(d.day))continue;const key=new Date(start(Date.parse(d.day+'T00:00:00Z'),p)).toISOString().slice(0,10);const b=map.get(key);if(!b)continue;b.input+=d.input_tokens;b.output+=d.output_tokens;b.total+=d.input_tokens+d.output_tokens;b.reports+=d.reports}
   const totals=buckets.reduce((a,b)=>({input:a.input+b.input,output:a.output+b.output,total:a.total+b.total,reports:a.reports+b.reports}),{input:0,output:0,total:0,reports:0});
-  return {period:p,buckets,totals,source:'provider-reported' as const};
+  return {period:p,buckets,totals,source};
 }
 export function formatTokens(n:number){return n>=1e9?(n/1e9).toFixed(2).replace(/\.?0+$/,'')+'B':n>=1e6?(n/1e6).toFixed(2).replace(/\.?0+$/,'')+'M':n>=1e3?(n/1e3).toFixed(1).replace(/\.0$/,'')+'K':n.toLocaleString('en-US')}

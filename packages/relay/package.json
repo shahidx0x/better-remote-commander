@@ -22,6 +22,7 @@
         "brc-shared": "workspace:*",
         "cookie-parser": "^1.4.7",
         "express": "^5.1.0",
+        "gpt-tokenizer": "4.1.2",
         "mongodb": "7.9.0",
         "ws": "^8.18.0",
         "zod": "^3.24.1"

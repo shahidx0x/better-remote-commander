@@ -123,7 +123,8 @@ export const TOOL_ROUTING_GUIDANCE = [
   'Never invent a tool name, path, file contents, running service, test result, subagent or successful edit. If a tool is unavailable or fails, say so and use the observed output. Tool descriptions are guidance, not permission; device ownership, scope and safe edit checks still apply.'
 ].join(' ');
 
-export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full', plugins?: { registry: RegistryClient; publicUrl: string; skills?: SkillsCatalog }): Server {
+export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full', plugins?: { registry: RegistryClient; publicUrl: string; skills?: SkillsCatalog },
+  onToolTraffic?: (userId:string,tool:string,args:unknown,result:unknown)=>void): Server {
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} },
     instructions: TOOL_ROUTING_GUIDANCE + (access === 'read' ? ' THIS CONNECTION IS READ-ONLY: batch_tools accepts only read tools; do not attempt terminal or file mutations.' : '') });
 
@@ -137,6 +138,7 @@ export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpConte
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
+    const execute = async () => {
     if (name === 'list_devices') {
       return { content: [{ type: 'text', text: JSON.stringify({ ...await connectionStatus(hub, store, ctx.userId), relayInstance: hub.instanceId }, null, 2) }] };
     }
@@ -154,6 +156,19 @@ export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpConte
     const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined, {signal:extra.signal});
     if (!out.ok) return { content: [{ type: 'text', text: out.message }], isError: true };
     return { ...out.result, isError: out.result.isError ?? false, _meta: { ...out.result._meta, deviceId: out.deviceId, deviceName: out.deviceName, relayDurationMs: out.ms } } as never;
+    };
+    let result: Awaited<ReturnType<typeof execute>>;
+    try { result = await execute(); }
+    catch (error) {
+      // Even if no tool result was delivered, model-generated call arguments
+      // still reached the relay; record that incomplete event without awaiting.
+      try { onToolTraffic?.(ctx.userId,name,args,undefined); } catch { /* non-critical */ }
+      throw error;
+    }
+    // No tokenization, copying of payloads or database I/O in this handler.
+    // The collector schedules work in a separate worker AFTER this result.
+    try { onToolTraffic?.(ctx.userId,name,args,result); } catch { /* diagnostics never break calls */ }
+    return result;
   });
 
   return server;

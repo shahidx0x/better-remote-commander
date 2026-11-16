@@ -68,8 +68,8 @@ try {
   console.log(`relay + agent up on ${base} (pairing code ${code})\n`);
 
   // rate-limit test must run last: it locks the admin login for 5 minutes.
-  const extraArgs = { 'scripts/e2e-plugins.mjs': [path.join(scratch, 'relay.sqlite')] };
-  for (const s of ['scripts/e2e-oauth.mjs', 'scripts/e2e-links.mjs', 'scripts/e2e-client-recovery.mjs', 'scripts/e2e-plugins.mjs', 'scripts/e2e-usage-skills.mjs', 'scripts/e2e-admin.mjs']) {
+  const extraArgs = { 'scripts/e2e-plugins.mjs': [path.join(scratch, 'relay.sqlite')], 'scripts/e2e-mcp-estimates.mjs': [path.join(scratch, 'relay.sqlite')] };
+  for (const s of ['scripts/e2e-oauth.mjs', 'scripts/e2e-links.mjs', 'scripts/e2e-client-recovery.mjs', 'scripts/e2e-plugins.mjs', 'scripts/e2e-usage-skills.mjs', 'scripts/e2e-mcp-estimates.mjs', 'scripts/e2e-admin.mjs']) {
     console.log(`== ${s}`);
     const out = await runScript(s, base, 'admin', pass, ...(extraArgs[s] ?? []));
     process.stdout.write(out.split('\n').filter((l) => /^(PASS|FAIL)/.test(l)).map((l) => '  ' + l.slice(0, 110)).join('\n') + '\n');

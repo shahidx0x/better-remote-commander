@@ -9,7 +9,7 @@ import { hashPassword, randomToken, sha256, type UserRow, type ClientRow, type A
   type DeviceRow, type DeviceCodeRow, type AuditRow, type ConnectionLinkRow } from './sqlite.js';
 import type { RelayStore } from './types.js';
 import { MAX_PENDING_PLUGIN_REQUESTS, type PluginRequestStatus, type PluginRequestRow } from './sqlite.js';
-import type { UsageRecord, UsageDay } from '../features/usage.js';
+import type { UsageRecord, UsageDay, McpEstimateDelta, McpEstimateDay } from '../features/usage.js';
 import type { SkillRow, SkillRequest } from '../features/skills.js';
 
 export class MongoStore implements RelayStore {
@@ -60,6 +60,8 @@ export class MongoStore implements RelayStore {
       this.col('device_plugins').createIndex({ updated_at: -1 }),
       this.col('model_usage').createIndex({ user_id: 1, day: 1 }),
       this.col('model_usage').createIndex({ expire_on: 1 }, { expireAfterSeconds: 0 }),
+      this.col('mcp_estimate_daily').createIndex({ user_id: 1, day: 1 }),
+      this.col('mcp_estimate_daily').createIndex({ expire_on: 1 }, { expireAfterSeconds: 0 }),
       this.col('skills').createIndex({ user_id: 1, name: 1 }),
       this.col('skill_requests').createIndex({ user_id: 1, skill_id: 1 }, { unique: true }),
     ];
@@ -351,6 +353,38 @@ export class MongoStore implements RelayStore {
       { $sort: { _id:1 } }
     ]).toArray();
     return rows.map(r=>({day:String(r._id),input_tokens:Number(r.input_tokens),output_tokens:Number(r.output_tokens),reports:Number(r.reports)}));
+  }
+
+  /* ---------- batched estimated MCP traffic: daily totals only ---------- */
+  async recordMcpEstimates(rows: McpEstimateDelta[]): Promise<void> {
+    if (!rows.length) return;
+    await this.col('mcp_estimate_daily').bulkWrite(rows.map(r => ({
+      updateOne: {
+        filter: { _id: r.user_id + '/' + r.day },
+        update: {
+          $setOnInsert: {
+            user_id:r.user_id,day:r.day,
+            expire_on:new Date(Date.parse(r.day+'T00:00:00Z')+401*86_400_000)
+          },
+          $inc: {
+            input_tokens:r.input_tokens,output_tokens:r.output_tokens,
+            calls:r.calls,partial_calls:r.partial_calls,
+            to_agent_bytes:r.to_agent_bytes,from_agent_bytes:r.from_agent_bytes,
+            matched_calls:r.matched_calls,universal_calls:r.universal_calls
+          }
+        },
+        upsert:true
+      }
+    })),{ordered:false});
+  }
+  async mcpEstimateDays(userId:string,sinceDay:string):Promise<McpEstimateDay[]> {
+    const rows=await this.col('mcp_estimate_daily').find({user_id:userId,day:{$gte:sinceDay}}).sort({day:1}).toArray();
+    return rows.map(r=>({
+      day:String(r.day),input_tokens:Number(r.input_tokens),output_tokens:Number(r.output_tokens),
+      reports:Number(r.calls),partial_calls:Number(r.partial_calls),
+      to_agent_bytes:Number(r.to_agent_bytes ?? 0),from_agent_bytes:Number(r.from_agent_bytes ?? 0),
+      matched_calls:Number(r.matched_calls ?? 0),universal_calls:Number(r.universal_calls ?? 0)
+    }));
   }
 
   /* ---------- owner-approved skills, stored per account ---------- */

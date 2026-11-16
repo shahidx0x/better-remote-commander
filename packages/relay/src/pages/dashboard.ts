@@ -1,6 +1,6 @@
 /** Functional, accessible relay overview. No fabricated metrics or client-side polling. */
 import { layout, esc } from './html.js';
-import { formatTokens, type UsagePeriod, type UsageBucket } from '../features/usage.js';
+import { formatTokens, type UsagePeriod, type UsageBucket, type McpEstimateDay } from '../features/usage.js';
 import type { DeviceView, AuditView } from './admin.js';
 import type { usageView } from '../features/usage.js';
 
@@ -22,9 +22,9 @@ const ICONS = {
 const metric = (title: string, value: string, hint: string, icon: keyof typeof ICONS) =>
   `<div class="panel stat"><span>${esc(title)}</span><span class="stat-icon">${ICONS[icon]}</span>
     <strong>${esc(value)}</strong><small>${esc(hint)}</small></div>`;
-function tokenChart(buckets: UsageBucket[]): string {
+function tokenChart(buckets: UsageBucket[], description = 'Input and output model tokens by selected period'): string {
   const max = Math.max(...buckets.map(b => b.total), 1);
-  return `<div class="chart" role="img" aria-label="Input and output model tokens by selected period">${buckets.map(b => {
+  return `<div class="chart" role="img" aria-label="${esc(description)}">${buckets.map(b => {
     const input = b.input ? Math.max(2, 100 * b.input / max) : 0;
     const output = b.output ? Math.max(2, 100 * b.output / max) : 0;
     return `<div class="chart-col" title="${esc(b.label)}: input ${b.input.toLocaleString('en-US')}, output ${b.output.toLocaleString('en-US')}">
@@ -35,11 +35,15 @@ function tokenChart(buckets: UsageBucket[]): string {
 function usageSection(view: View): string {
   const period = view.period, t = view.totals, has = t.reports > 0;
   const tabs = (['day', 'week', 'month'] as UsagePeriod[]).map(p =>
-    `<a href="/admin?period=${p}#tokens" class="${p === period ? 'active' : ''}" ${p === period ? 'aria-current="page"' : ''}>
+    `<a href="/admin?period=${p}#provider-tokens" class="${p === period ? 'active' : ''}" ${p === period ? 'aria-current="page"' : ''}>
     ${p === 'day' ? 'Daily' : p === 'week' ? 'Weekly' : 'Monthly'}</a>`).join('');
-  return `<section class="section" id="tokens">
+  return `<details class="section" id="provider-tokens" ${has?'open':''}>
+    <summary class="panel" style="cursor:pointer;font-size:12px;font-weight:760;color:#40646b">
+      Provider-reported model tokens (optional) · ${has?formatTokens(t.total):'No reports received'} · Expand for details
+    </summary>
+    <section class="section">
     <div class="section-head"><div><span class="brand">MODEL INSIGHTS</span><h2>Model token analytics</h2>
-      <p>Only provider-reported tokens · UTC dates · no prompt or response content stored</p></div>
+      <p>Optional usage submitted by a connected model client. Not inferred from MCP tools.</p></div>
       <div class="period-tabs" aria-label="Usage period">${tabs}</div></div>
     <div class="analytics-grid">
       <div class="panel"><div class="section-head" style="margin-bottom:0"><div>
@@ -56,13 +60,66 @@ function usageSection(view: View): string {
           <small>${has ? t.reports + ' provider reports received' : 'Waiting for real provider reports'}</small></div>
       </div>
     </div>
-    <p style="font-size:11px;margin:12px 0 0">Analytics are based only on submitted model usage, never estimated from tool calls. No usage processing runs in the MCP execution path.</p>
+    <p style="font-size:11px;margin:12px 0 0">These provider-reported counts are separate from MCP estimates. Do not add the two totals together.</p>
+  </section></details>`;
+}
+function formatPayloadBytes(n:number):string {
+  return n >= 1e9 ? (n/1e9).toFixed(2)+' GB' : n>=1e6 ? (n/1e6).toFixed(2)+' MB'
+    : n>=1e3 ? (n/1e3).toFixed(1)+' KB' : n.toLocaleString('en-US')+' B';
+}
+function automaticUsageSection(view: View | undefined, days: McpEstimateDay[], enabled: boolean, period: UsagePeriod): string {
+  const activePeriod = view?.period ?? period;
+  const totals = view?.totals ?? { input:0,output:0,total:0,reports:0 };
+  const has = totals.reports > 0;
+  const startKey = view?.buckets[0]?.key ?? '9999-12-31';
+  const selected=days.filter(d=>d.day>=startKey);
+  const partial = selected.reduce((sum,d)=>sum+d.partial_calls,0);
+  const sentBytes=selected.reduce((sum,d)=>sum+(d.to_agent_bytes??0),0);
+  const receivedBytes=selected.reduce((sum,d)=>sum+(d.from_agent_bytes??0),0);
+  const matched=selected.reduce((sum,d)=>sum+(d.matched_calls??0),0);
+  const fallback=selected.reduce((sum,d)=>sum+(d.universal_calls??0),0);
+  const tabs = (['day','week','month'] as UsagePeriod[]).map(p=>
+    `<a href="/admin?period=${p}#tokens" class="${p===activePeriod?'active':''}" ${p===activePeriod?'aria-current="page"':''}>
+      ${p==='day'?'Daily':p==='week'?'Weekly':'Monthly'}</a>`).join('');
+  return `<section class="section" id="tokens">
+    <div class="section-head"><div><span class="brand">AUTOMATIC ESTIMATION</span>
+      <h2>Estimated MCP token traffic</h2>
+      <p>Locally counted from text passing through BRC tools. No token report needed from ChatGPT.</p></div>
+      <div class="period-tabs" aria-label="Estimated MCP usage period">${tabs}</div></div>
+    <div class="analytics-grid">
+      <div class="panel"><div class="section-head" style="margin-bottom:0"><div>
+        <h3>Tool traffic volume</h3>
+        <p style="font-size:12px">${activePeriod==='day'?'Last 14 days':activePeriod==='week'?'Last 12 weeks':'Last 12 months'} · UTC</p>
+        </div><span class="pill ${enabled?'ok':'err'}">${enabled?'Local BPE estimates':'Tracking disabled'}</span></div>
+        ${has&&view?tokenChart(view.buckets,'Locally estimated MCP tool-result and tool-call tokens'):
+          '<div class="empty" style="margin-top:20px"><strong>No MCP traffic counted yet</strong><p>Once a connected AI client calls a BRC tool, its visible text will be estimated automatically. Dashboard totals may lag by a few seconds.</p></div>'}
+        <p class="muted" style="font-size:11px;margin-top:20px">Only MCP tool-call traffic is visible here. Chat messages, hidden prompts/reasoning and non-text image/audio tokens cannot be counted by this relay.</p>
+      </div>
+      <div class="panel token-summary"><span class="brand">ESTIMATED TOOL TOKENS</span><h2>Input / output breakdown</h2>
+        <p style="font-size:12px;margin:0 0 12px">Model perspective; not complete model token usage.</p>
+        <div class="breakdown-row"><span><i class="mini-dot"></i>Input · tool results</span>
+          <strong>${has?formatTokens(totals.input):'—'}</strong></div>
+        <div class="breakdown-row output"><span><i class="mini-dot"></i>Output · tool arguments</span>
+          <strong>${has?formatTokens(totals.output):'—'}</strong></div>
+        <div class="token-total"><span>TOTAL ESTIMATED MCP TOKENS</span>
+          <strong>${has?formatTokens(totals.total):'—'}</strong>
+          <small>${has?totals.reports.toLocaleString('en-US')+' MCP tool calls':'Waiting for BRC tool calls'}</small></div>
+        <p style="font-size:11px;margin-top:16px">Tokenizer: local OpenAI encoding when identified, otherwise universal o200k_base estimate. Neither measures full chat tokens.</p>
+        <div class="breakdown-row"><span>GPT encoding matched</span><strong>${matched.toLocaleString('en-US')} calls</strong></div>
+        <div class="breakdown-row"><span>Universal fallback</span><strong>${fallback.toLocaleString('en-US')} calls</strong></div>
+        <div class="breakdown-row"><span>Sent to agent</span><strong>${formatPayloadBytes(sentBytes)}</strong></div>
+        <div class="breakdown-row"><span>Returned from agent</span><strong>${formatPayloadBytes(receivedBytes)}</strong></div>
+        <p style="font-size:11px;margin-top:8px">Byte values are exact serialized tool WebSocket payload sizes, excluding protocol framing. Relay-only tools have no agent traffic. Matched encoding uses an optional client-provided model hint (not verified).</p>
+        ${partial?`<p class="err" style="font-size:11px">${partial.toLocaleString('en-US')} call(s) included non-text, truncated or skipped content. Totals are incomplete.</p>`:''}
+      </div>
+    </div>
   </section>`;
 }
+
 export function dashboardPage(
   publicUrl: string, devices: DeviceView[], audit: AuditView[],
   stats: { total: number; failed: number; last24h: number },
-  usage: View, pluginHtml = '', flash = '',
+  usage: View, pluginHtml = '', flash = '', estimate?: View, estimateDays: McpEstimateDay[] = [], estimateEnabled = true,
 ): string {
   const online = devices.filter(device => device.online && !device.paused).length;
   const percent = devices.length ? Math.round(online / devices.length * 100) : 0;
@@ -123,5 +180,5 @@ export function dashboardPage(
     <div class="panel table-wrap" style="padding:0"><table><thead><tr>
       <th>Time</th><th>Device</th><th>Tool</th><th>Status</th><th>Duration</th>
     </tr></thead><tbody>${activityRows}</tbody></table></div></section>`;
-  return layout('Admin', hero + statsBlock + usageSection(usage) + deviceSection + flash + pluginHtml + activitySection, 'wide');
+  return layout('Admin', hero + statsBlock + automaticUsageSection(estimate, estimateDays, estimateEnabled,usage.period) + usageSection(usage) + deviceSection + flash + pluginHtml + activitySection, 'wide');
 }

@@ -53,6 +53,10 @@ export class DeviceHub {
   private heartbeat: NodeJS.Timeout;
 
   onHello?: (device: DeviceInfo, tools: ToolDefinition[]) => void;
+  /** Exact UTF-8 WebSocket message payload byte counts for tool call/result frames.
+   * No extra serialization, network request, or database write on tool execution.
+   */
+  onWireTraffic?: (ownerId:string,direction:'to-agent'|'from-agent',bytes:number)=>void;
   /** Called with every (sanitised) plugin report, e.g. to persist the last-known list. */
   onPlugins?: (deviceId: string, plugins: PluginStatusSummary[]) => void;
 
@@ -108,6 +112,9 @@ export class DeviceHub {
         this.pending.delete(msg.id);
         clearTimeout(p.timer);
         p.cleanup();
+        const resultBytes=Buffer.isBuffer(raw)?raw.length:
+          Array.isArray(raw)?raw.reduce((total,b)=>total+b.length,0):raw.byteLength;
+        try { this.onWireTraffic?.(dev.ownerId,'from-agent',resultBytes); } catch { /* telemetry must not alter tools */ }
         if (msg.error) p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
         else p.resolve(msg.result ?? { content: [] });
         return;
@@ -177,7 +184,9 @@ export class DeviceHub {
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, socket:dev.socket, cleanup });
       opts.signal?.addEventListener('abort', abort, {once:true});
-      this.sendTo(dev.socket, { type: 'call', id, tool, args, client: opts.client, timeoutMs });
+      const sentBytes=this.sendTo(dev.socket,{ type:'call',id,tool,args,client:opts.client,timeoutMs });
+      if(sentBytes) try { this.onWireTraffic?.(dev.ownerId,'to-agent',sentBytes); }
+      catch { /* no observer failure should interrupt execution */ }
     });
   }
 
@@ -235,8 +244,13 @@ export class DeviceHub {
     }
   }
 
-  private sendTo(socket: WebSocket, msg: RelayMessage): void {
-    if (socket.readyState === socket.OPEN) { try { socket.send(JSON.stringify(msg)); } catch { socket.terminate(); } }
+  private sendTo(socket: WebSocket, msg: RelayMessage): number {
+    if (socket.readyState !== socket.OPEN) return 0;
+    try {
+      const encoded=JSON.stringify(msg);
+      socket.send(encoded);
+      return Buffer.byteLength(encoded);
+    } catch { socket.terminate(); return 0; }
   }
 
   close(): void {

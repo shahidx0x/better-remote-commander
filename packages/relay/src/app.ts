@@ -37,6 +37,7 @@ import { SKILL_RELAY_TOOLS } from './mcp/skill-tools.js';
 import { SkillsCatalog } from './features/skills.js';
 import { registerSkillsRoutes } from './features/skills-routes.js';
 import { validateUsageReport, usageView, type UsagePeriod } from './features/usage.js';
+import { McpTrafficEstimator } from './features/mcp-estimates.js';
 import { dashboardPage } from './pages/dashboard.js';
 
 export interface RelayConfig {
@@ -86,6 +87,8 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   const hub = new DeviceHub(cfg.relayVersion, log);
   const registry = RegistryClient.fromEnv();
   const skills = new SkillsCatalog();
+  const mcpEstimates = new McpTrafficEstimator(store, log);
+  hub.onWireTraffic=(owner,direction,bytes)=>mcpEstimates.trackWireBytes(owner,direction,bytes);
   const publicUrl = new URL(cfg.publicUrl);
 
   const app = express();
@@ -375,7 +378,9 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
   const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
-    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access, { registry, publicUrl: cfg.publicUrl, skills });
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access, { registry, publicUrl: cfg.publicUrl, skills },
+      (owner, tool, args, result) => mcpEstimates.track(owner,tool,args,result,
+        typeof req.headers['x-brc-model'] === 'string' ? req.headers['x-brc-model'] : undefined));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {
@@ -453,8 +458,10 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
     const audit = (await store.recentAudit(userId, 100)).map((a) => ({ ts: a.ts, device: names.get(a.device_id ?? '') ?? (a.device_id ?? '?').slice(0, 8), client: a.client, tool: a.tool, ok: a.ok, ms: a.ms, error: a.error }));
     const period: UsagePeriod = req.query.period === 'week' ? 'week' : req.query.period === 'month' ? 'month' : 'day';
     const since = new Date(Date.now()-366*86_400_000).toISOString().slice(0,10);
-    const days = await store.usageDays(userId, since);
-    res.type('html').send(dashboardPage(cfg.publicUrl, devices, audit, await store.auditStats(userId), usageView(days,period), await pluginUi.adminSections(req,userId),pluginUi.flash(req)));
+    const [days, automatic] = await Promise.all([store.usageDays(userId,since),store.mcpEstimateDays(userId,since)]);
+    res.type('html').send(dashboardPage(cfg.publicUrl, devices, audit, await store.auditStats(userId),
+      usageView(days,period), await pluginUi.adminSections(req,userId),pluginUi.flash(req),
+      usageView(automatic,period,Date.now(),'mcp-estimated'),automatic, mcpEstimates.active));
   });
   app.post('/admin/device', requireLogin, requireCsrf, async (req, res) => {
     const userId = currentUser(req)!;
@@ -547,6 +554,6 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
 
   return {
     http, hub, store,
-    close: async () => { clearInterval(housekeeping); hub.close(); wss.close(); await new Promise<void>((r) => http.close(() => r())); await store.close(); },
+    close: async () => { clearInterval(housekeeping); hub.close(); wss.close(); await new Promise<void>((r) => http.close(() => r())); await mcpEstimates.close(); await store.close(); },
   };
 }

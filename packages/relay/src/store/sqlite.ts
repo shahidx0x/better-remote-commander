@@ -6,7 +6,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
-import type { UsageRecord, UsageDay } from '../features/usage.js';
+import type { UsageRecord, UsageDay, McpEstimateDelta, McpEstimateDay } from '../features/usage.js';
 import type { SkillRow, SkillRequest } from '../features/skills.js';
 
 export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -56,6 +56,19 @@ CREATE TABLE IF NOT EXISTS device_plugins (device_id TEXT PRIMARY KEY, plugins T
 const FEATURE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS model_usage (id TEXT NOT NULL, user_id TEXT NOT NULL, day TEXT NOT NULL, ts INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, PRIMARY KEY (user_id,id));
 CREATE INDEX IF NOT EXISTS model_usage_user_day ON model_usage(user_id,day);
+-- Only anonymous aggregate counters: no prompts, code, paths or tool transcripts.
+CREATE TABLE IF NOT EXISTS mcp_estimate_daily (
+ user_id TEXT NOT NULL, day TEXT NOT NULL,
+ input_tokens INTEGER NOT NULL DEFAULT 0,
+ output_tokens INTEGER NOT NULL DEFAULT 0,
+ calls INTEGER NOT NULL DEFAULT 0,
+ partial_calls INTEGER NOT NULL DEFAULT 0,
+ to_agent_bytes INTEGER NOT NULL DEFAULT 0,
+ from_agent_bytes INTEGER NOT NULL DEFAULT 0,
+ matched_calls INTEGER NOT NULL DEFAULT 0,
+ universal_calls INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY (user_id,day));
+CREATE INDEX IF NOT EXISTS mcp_estimate_day ON mcp_estimate_daily(day);
 CREATE TABLE IF NOT EXISTS skills (user_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL, source TEXT NOT NULL, files_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id,id));
 CREATE TABLE IF NOT EXISTS skill_requests (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, skill_id TEXT NOT NULL, client TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS skill_requests_user ON skill_requests(user_id,created_at);
@@ -91,6 +104,11 @@ export class SqliteStore {
     this.db.exec(SCHEMA);
     this.db.exec(PLUGIN_SCHEMA);
     this.db.exec(FEATURE_SCHEMA);
+    // Additive schema migration: preserves previously aggregated token history.
+    const cols = new Set((this.db.prepare('PRAGMA table_info(mcp_estimate_daily)').all() as {name:string}[]).map(c=>c.name));
+    for (const name of ['to_agent_bytes','from_agent_bytes','matched_calls','universal_calls']) {
+      if (!cols.has(name)) this.db.exec('ALTER TABLE mcp_estimate_daily ADD COLUMN '+name+' INTEGER NOT NULL DEFAULT 0');
+    }
     this.pruneAudit();
   }
 
@@ -248,6 +266,7 @@ export class SqliteStore {
     const now = Date.now();
     this.pruneAudit(now);
     this.statement('DELETE FROM model_usage WHERE day < ?').run(new Date(now - 400*86_400_000).toISOString().slice(0,10));
+    this.statement('DELETE FROM mcp_estimate_daily WHERE day < ?').run(new Date(now - 400*86_400_000).toISOString().slice(0,10));
     this.db.prepare('DELETE FROM auth_codes WHERE expires_at < ?').run(now);
     this.db.prepare('DELETE FROM device_codes WHERE expires_at < ?').run(now);
     this.statement('DELETE FROM connection_links WHERE expires_at <= ?').run(now);
@@ -381,6 +400,37 @@ export class SqliteStore {
   usageDays(userId: string, sinceDay: string): UsageDay[] {
     return this.statement('SELECT day,SUM(input_tokens) AS input_tokens,SUM(output_tokens) AS output_tokens,COUNT(*) AS reports FROM model_usage WHERE user_id = ? AND day >= ? GROUP BY day ORDER BY day')
       .all(userId,sinceDay).map(v => ({ day:String(v.day), input_tokens:Number(v.input_tokens), output_tokens:Number(v.output_tokens), reports:Number(v.reports) }));
+  }
+
+  /* ---------- batched estimated MCP traffic: daily totals, no payload storage ---------- */
+  recordMcpEstimates(rows: McpEstimateDelta[]): void {
+    if (!rows.length) return;
+    const statement = this.statement(
+      'INSERT INTO mcp_estimate_daily (user_id,day,input_tokens,output_tokens,calls,partial_calls,to_agent_bytes,from_agent_bytes,matched_calls,universal_calls) VALUES (?,?,?,?,?,?,?,?,?,?) ' +
+      'ON CONFLICT(user_id,day) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens, ' +
+      'output_tokens=output_tokens+excluded.output_tokens, calls=calls+excluded.calls, partial_calls=partial_calls+excluded.partial_calls, ' +
+      'to_agent_bytes=to_agent_bytes+excluded.to_agent_bytes,from_agent_bytes=from_agent_bytes+excluded.from_agent_bytes, ' +
+      'matched_calls=matched_calls+excluded.matched_calls,universal_calls=universal_calls+excluded.universal_calls'
+    );
+    this.db.exec('BEGIN');
+    try {
+      for (const r of rows) statement.run(r.user_id,r.day,r.input_tokens,r.output_tokens,r.calls,r.partial_calls,r.to_agent_bytes,r.from_agent_bytes,r.matched_calls,r.universal_calls);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  mcpEstimateDays(userId: string, sinceDay: string): McpEstimateDay[] {
+    return this.statement(
+      'SELECT day,input_tokens,output_tokens,calls AS reports,partial_calls,to_agent_bytes,from_agent_bytes,matched_calls,universal_calls FROM mcp_estimate_daily ' +
+      'WHERE user_id = ? AND day >= ? ORDER BY day'
+    ).all(userId,sinceDay).map(v => ({
+      day:String(v.day), input_tokens:Number(v.input_tokens),output_tokens:Number(v.output_tokens),
+      reports:Number(v.reports),partial_calls:Number(v.partial_calls),
+      to_agent_bytes:Number(v.to_agent_bytes),from_agent_bytes:Number(v.from_agent_bytes),
+      matched_calls:Number(v.matched_calls),universal_calls:Number(v.universal_calls)
+    }));
   }
 
   /* ---------- owner-controlled skill library and review queue ---------- */

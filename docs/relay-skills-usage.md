@@ -1,6 +1,29 @@
-# Relay admin, approved skills and actual model-token reporting
+# Relay admin, approved skills, automatic MCP estimates, and optional provider reports
 
 The relay has a responsive self-hosted admin dashboard at **/admin** with a left sidebar. All styles are served locally. Navigation includes Overview, Devices, Activity, Pairing, MCP Marketplace, Agent Skills, Private MCP links, OAuth clients and API keys. Existing pairing, private URL, OAuth, device pause/resume and plugin approval endpoints remain unchanged.
+
+## Automatic MCP traffic estimates (no ChatGPT usage API needed)
+
+BRC can now estimate **only text that actually crosses its own MCP tools**, without asking ChatGPT to report usage.
+
+- **Estimated model input:** text of MCP tool **results returned to the AI client** (including failures and owner-approved skill content).
+- **Estimated model output:** tool name and structured **arguments received from the AI client**.
+- **One offline tokenizer package for any MCP client:** `gpt-tokenizer` defaults to `o200k_base` for a universal **approximation**. When a client deliberately sets `X-BRC-Model: gpt-4-turbo`, `gpt-4.1`, `gpt-5`, `gpt-oss-120b` etc., BRC selects the corresponding supported OpenAI encoding (`cl100k_base`, `o200k_base`, `o200k_harmony`) inside the worker. Unknown/Claude/Gemini/DeepSeek/Llama/Qwen names fall back to `o200k_base` without any provider claim. Model hints are not verified; a matching encoding still does **not** equal actual model billing tokens. No cloud counting call, tokenizer download, or additional dependency is required.
+- **Automatic:** enabled by default for both OAuth MCP and private capability URLs. Uses the authenticated owning account, including read-only connections.
+- **Dashboard:** `/admin` displays estimated input/output, combined text traffic, actual MCP call count, matched-vs-universal encoding call counts, and exact **agent WebSocket tool payload bytes sent/received** (frames only, excluding WS framing and relay-only tools), organized daily (14 days), weekly (12 weeks), monthly (12 months). The separate optional actual provider-reported section is not summed with MCP estimates.
+- **Persistence:** SQLite `mcp_estimate_daily` / MongoDB `mcp_estimate_daily` contain **only** per-account, per-UTC-day aggregated numeric counts (`input_tokens`, `output_tokens`, `calls`, `partial_calls`, `to_agent_bytes`, `from_agent_bytes`, `matched_calls`, `universal_calls`). An additive SQLite migration preserves existing counters. No prompts, file paths, tool arguments/results, chat messages, model IDs or passwords are stored in this table. Data expires after roughly 400 days.
+- **Performance:** token estimation is deferred and BPE executes in a single worker thread. Exact tool-call/result WebSocket frame byte lengths are captured from frames already serialized by BRC, with only an extra local byte-length check/counter update. Database increments are batched every ~4 seconds, **never awaited by tool responses**. Nonzero CPU, event-loop scheduling and memory overhead remain possible; this is not a zero-latency guarantee.
+- **Backpressure:** at most 64 outstanding events are sent to the worker. At most 524,288 characters of text per direction are processed for one event. Excess, image/video/audio/base64 and other non-text payloads are **marked incomplete**, never treated as fake text tokens. The dashboard reports incomplete call counts. No retries of the original tool operation are made.
+- **Optional opt-out:** set `BRC_MCP_TOKEN_ESTIMATES=0` on the relay (not the agent) to disable the worker and its automatic accounting, without affecting existing stored totals.
+- **What it cannot count:** ordinary ChatGPT messages, system/developer prompts, hidden reasoning, unseen tool schemas reused internally by ChatGPT, model-specific overhead, or full images/audio. It cannot infer actual billable ChatGPT tokens or historical conversations. Do not add these estimates to actual provider usage; they overlap when a provider reports the same tool traffic.
+
+No plugin, API key, ChatGPT configuration, or additional MCP tool is required. Counts begin only after a call crosses the **updated relay**. Restart/redeploy the relay to activate this feature. This does not report or estimate full conversational/model usage.
+
+### Optional model selection for clients that support HTTP headers
+
+A client which actually knows its model may add the **optional** HTTP header `X-BRC-Model: gpt-4-turbo` (or `gpt-4.1`, `gpt-5`, `gpt-oss-120b`, etc.) to each authenticated MCP request. BRC then chooses the supported matching **OpenAI text encoding** offline. Clients which cannot add the header, or use Claude/Gemini/DeepSeek/Qwen/Llama/unknown models, are still counted with the universal fallback. The header is untrusted client metadata, not proof of model use; model-matched tokens are still **estimated MCP text tokens**, not the complete model usage. Never infer the model from an agent/device name.
+
+If an instrumented **model host** (including an OpenAI/Anthropic/Gemini API backend or a local inference engine) exposes actual request usage, submit it via the existing authenticated `POST /api/usage/report` endpoint. Actual reports remain separate on the dashboard; do not sum them with MCP estimates or attempt a token-counting provider API call inside MCP execution.
 
 ## Actual model token counts (not estimated)
 
@@ -46,7 +69,7 @@ Example body (replace these example counts with real provider usage, **never** a
 - **SQLite:** dedicated `model_usage` table, indexed by account/day, unique account/event IDs. **MongoDB:** collection with unique `_id`, account/day index and TTL cleanup. Both retain up to 400 days of reported records, and only the selected 14 days / 12 weeks / 12 months are shown.
 - If no events were received, the UI says **No model usage reported yet**. Values shown as M/B are display formatting, not estimates.
 
-**ChatGPT limitation:** The ChatGPT hosted chat interface does not send full model input/output token usage to arbitrary MCP relays. Without an instrumented client/provider integration, the dashboard remains empty. A direct OpenAI API client that receives `usage` could submit it; the relay alone cannot retrieve historical ChatGPT chat tokens.
+**ChatGPT limitation:** The ChatGPT hosted chat interface does not send full model input/output token usage to arbitrary MCP relays. Without an instrumented model client, the **provider-reported** section remains empty, while the **automatic MCP traffic estimates** section still updates when tools are called. A direct OpenAI API client that receives `usage` may submit it; the relay alone cannot retrieve historical ChatGPT chat tokens.
 
 ## Approved agent Skills
 
@@ -67,11 +90,11 @@ When MongoDB is selected with `MONGODB_URI`, the relay does not switch to SQLite
 
 ## Performance boundaries
 
-- Tool calls do **not** write token-usage rows or read skill catalog entries automatically.
+- Tool calls do **not** await token counting, database writes or external analytics calls. A minimal notification schedules background BPE work; daily aggregate DB updates occur every ~4 seconds.
 - The previous private MCP connection path looked up the same capability key **twice** in storage. The updated route does one fresh, uncached lookup **per HTTP request**; the next request after revocation is still denied.
 - Device ownership/pause-state checks remain mandatory and awaited. Device last-seen writes after a completed call are background housekeeping and no longer hold up the returned result.
 - There are no new external fonts, CDNs, frontend frameworks, analytics beacons or live polling in admin UI. The chart is plain server-rendered HTML/CSS, and only visiting the admin dashboard queries usage aggregates.
-- **Zero model-usage DB I/O on tool execution is an architectural property**; zero total network latency is not possible. Client scheduling, model inference, WebSocket RTT and command execution still take time.
+- **No awaited token-usage DB I/O on tool execution** is an architectural property. Background capture and worker/DB activity still use finite CPU and memory resources, so absolute zero overhead is impossible. Client scheduling, model inference, WebSocket RTT and command execution still take time.
 
 ## Verification
 

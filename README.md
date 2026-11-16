@@ -49,7 +49,7 @@ ChatGPT / Claude / other MCP client
 - **Run background jobs.** Launch commands or sequential tool steps, wait for completion, inspect results and cancel jobs without keeping one MCP request open.
 - **Connect more MCP servers to a device.** Use Playwright, computer-use, Serena, MarkItDown or another supported server *when actually installed and configured*.
 - **Owner-approved reusable skills.** Import SKILL.md text from reviewed sources, browse the optional skills.sh catalog, and allow AI clients to discover/read approved skills without automatic code execution.
-- **Understand model usage when reported.** A dedicated authenticated reporting endpoint accepts provider-supplied input/output token counts. View daily, weekly and monthly totals on the dashboard; MCP tools themselves cannot know ChatGPT model token counts.
+- **Count visible MCP traffic automatically.** The relay estimates text tokens for AI tool arguments and tool results using a local o200k_base tokenizer in a worker thread. Daily, weekly and monthly estimates are stored in SQLite or MongoDB without waiting on tool calls. These are **not** ChatGPT's full model tokens. The existing provider-reported usage endpoint remains separate and optional.
 - **Keep your existing custom relay features.** This fork retains MongoDB support, private MCP URLs, OAuth recovery/reconnection logic and scoped worker coordination alongside the upstream additions.
 
 ## MCP tool catalog
@@ -133,7 +133,7 @@ Plugin secrets are kept on the device, not persisted by the relay's plugin-reque
 
 The self-hosted admin at `/admin` now has a fixed responsive sidebar, device cards, plugin controls, and daily / weekly / monthly model token charts. `/admin/skills` stores explicitly approved `SKILL.md` instruction packs for MCP clients; `list_skills` and `read_skill` expose them. A third-party skill is never executed or installed automatically.
 
-**Actual LLM tokens cannot be intercepted from ChatGPT by MCP.** An instrumented model client must report input/output token counts to `POST /api/usage/report` using a dedicated existing API key from `/auth/apikeys`; otherwise the chart explicitly shows no usage data. Tool calls do not perform token accounting or DB writes. SQLite and MongoDB both persist user-scoped, deduplicated usage events and approved skills. See [complete setup and privacy notes](docs/relay-skills-usage.md).
+**Automatic MCP-visible estimates:** one offline `gpt-tokenizer` package estimates text for all AI clients; it selects a matching OpenAI encoding when a client opts to send a `X-BRC-Model` hint and otherwise uses a universal fallback. Exact, already-serialized agent tool-message bytes are counted separately. The relay counts tool-result text (estimated model input) and tool-call arguments (estimated model output) using a separate BPE worker. It aggregates only per-account/day counts every ~4 seconds in SQLite or MongoDB; no prompt, response or tool-content archive is stored, and no tool call awaits counting. **These are not full ChatGPT or billable model tokens.** Actual provider-reported counts, when available, remain separately available via `POST /api/usage/report`; do not add the two sources together. [Scope, accuracy and setup](docs/relay-skills-usage.md).
 
 ## Authentication, connections and persistence
 
@@ -224,6 +224,7 @@ Local test profiles use HTTP on loopback; public deployments need HTTPS and corr
 | `BRC_PARSER_WORKERS` | Configure optional parser-worker pool size |
 | `BRC_IMAGE_WORKERS` | Concurrent native image decodes per preview request (default 2; 1-3 supported) |
 | `BRC_SKILLS_API_TOKEN` | Optional short-lived Vercel OIDC JWT for skills.sh catalog search; manual skills import needs no token |
+| `BRC_MCP_TOKEN_ESTIMATES` | `1` (default) automatically estimates MCP-visible text tokens in a worker; set `0` to disable |
 
 See [`.env.example`](.env.example) for relay and tunnel variables. Do not commit a real `.env`, pairing tokens or plugin secrets.
 
@@ -259,7 +260,7 @@ pnpm bench:context
 ## More documentation
 
 - [Architecture and protocol](docs/architecture.md)
-- [Relay dashboard, approved Skills and provider-reported token analytics](docs/relay-skills-usage.md)
+- [Relay dashboard, automatic MCP token estimates and provider reports](docs/relay-skills-usage.md)
 - [Compact code context and portable Windows agent console](docs/agent-context-and-terminal.md)
 - [Coding-agent setup and diagnostics](docs/coding-agent.md)
 - [Fast batches, images and sandbox](docs/fast-agent.md)
