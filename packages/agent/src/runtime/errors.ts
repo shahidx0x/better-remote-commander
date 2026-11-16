@@ -18,7 +18,11 @@ export function failure(err: unknown, callId?: string): ToolResult {
   // Model-facing recovery is metadata, not an automatic retry. In particular,
   // an interrupted mutation must never be replayed without checking its result.
   const guidance: Record<string,string> = {
-    WRITE_LINE_LIMIT:'No file was changed. Split content into smaller chunks; start new file with rewrite, then append subsequent chunks, or use hash-checked workspace_batch.',
+    SHELL_SYNTAX:'Windows PowerShell 5.1 does not support && or ||. For simple native chains specify shell:"cmd.exe", or use valid PowerShell sequencing; nothing executed.',
+    INVALID_CWD:'Specify an absolute working directory that exists and is allowed; no command ran.',
+    COMMAND_BLOCKED:'The command was rejected by agent policy. Do not work around restrictions; request an authorized alternative.',
+    SHELL_START_FAILED:'Check shell executable, installation and PATH. The command did not start.',
+    WRITE_LINE_LIMIT:'No file was changed. Split content into smaller chunks; start new file with rewrite, then append subsequent chunks, or use precise edit_block changes.',
     WRITE_SIZE_LIMIT:'No file was changed. Write a smaller <=1 MiB chunk, then append only unwritten content; avoid blind retries.',
     WRITE_MODE_REQUIRED:'No file was changed. State mode=rewrite or mode=append explicitly.',
     BUSY:'The agent queue is full. Wait briefly, retry the read-only operation once; for writes inspect state before retrying.',

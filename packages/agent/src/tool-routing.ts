@@ -146,7 +146,7 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   run_command: {
     use: 'Run a ONE-SHOT command (git, build, test, package manager) and get its final exit code and bounded output.',
     instead: 'For interactive or long-running sessions use start_process; for discovered project checks use run_project_checks; for ordinary reads use read_multiple_files.',
-    caveat: 'A claimed build or test pass requires actual exit code 0, not merely a command being started.',
+    caveat: 'Default Windows shell is PowerShell 5.1: no && or ||. For a native git/node/pnpm chain, run_command safely selects cmd.exe if shell omitted; explicit CMD syntax requires shell:"cmd.exe". Give absolute cwd, use raw:true for debugging, distinguish COMMAND_FAILED vs TIMEOUT vs SHELL_SYNTAX and inspect exit code before success.',
   },
   delete_file: {
     use: 'Delete an explicitly named file, empty directory or approved recursive directory.',
@@ -411,7 +411,7 @@ export const TOOL_WORKFLOWS: Record<string,string> = {
   edit_block: 'START: read the current file and provide an exact old_string/new_string; prefer expected_sha256 or expected replacement counts. NEXT: inspect changed content/diff; on conflict reread source, never force an uncertain edit.',
   workspace_batch: 'START: hash-checked changes with dryRun=true; inspect validation. APPLY: dryRun=false only with user authorization. NEXT: inspect per-file hashes and actual check results. Rollback is best effort; never replay an uncertain commit.',
   batch_tools: 'START: group INDEPENDENT reads in mode=auto; use maxChars. Writes are ordered barriers; a prior successful write is not rolled back if a later step fails. NEXT: read skipped/truncated results separately.',
-  run_command: 'START: one-shot command and cwd. Check the actual exitCode before calling tests successful. NEXT: output may truncate; narrow logs. Use start_process for interactive or long-running sessions.',
+  run_command: 'START: one-shot command, preferably absolute cwd; default Windows shell is PowerShell 5.1 (cannot parse &&/||). Safe native chains auto-select cmd.exe when shell is omitted; for CMD syntax pass shell:"cmd.exe", and raw:true for diagnostics. NEXT: inspect structuredContent.exitCode/error.code/recovery; COMMAND_FAILED is a real nonzero exit, TIMEOUT exceeded execution time, SHELL_SYNTAX changed nothing. Never retry identically without correction. Use start_process for interactive/long-running work.',
   start_process: 'START: long-running/interactive command. Returned PID means STARTED, not successful. NEXT: read_process_output, then interact_with_process if waiting for input; inspect final exit code.',
   read_process_output: 'START: known PID, offset=0 for new output; positive absolute offset or negative tail. NEXT: follow remaining output, or stop polling when process has exited.',
   run_parallel: 'START: independent operations only, default concurrency=4. NEXT: MORE PARALLEL RESULTS => wait_jobs({group}) or get_job(id); never replay a completed mutation just to retrieve its output.',
