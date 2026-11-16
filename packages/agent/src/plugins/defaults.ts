@@ -5,9 +5,9 @@
  *   computer-use  npm computer-use-mcp 1.8.0 (MIT, nut.js fork)      screen/mouse/keyboard; disabled on macOS,
  *                                                                    unsupported on Linux without a display
  *   ast-grep      binary via npm @ast-grep/cli 0.51.2 (MIT)          used by BRC's ast-grep tool
- *   rtk           binary rtk 1.2.0 from github.com/rtk-ai/rtk        used by BRC's rtk tool (MIT/Apache CLI;
- *                                                                    the bundled engine is BSL-1.1 with a free
- *                                                                    production-use grant)
+ *   rtk           binary rtk-oss 1.2.0 from github.com/rtk-ai/rtk    used by BRC's rtk tool. The rtk-oss build is
+ *                                                                    fully open source (Apache-2.0/MIT); the standard
+ *                                                                    rtk build bundles a BSL-1.1 engine, so we avoid it
  *   serena        pypi serena-agent 2.1.0 (oraios, GPL-3.0+)         symbol-level code navigation/editing
  *   markitdown    pypi markitdown-mcp 0.0.1a8 (Microsoft, MIT)       Office/PDF/HTML -> Markdown
  *
@@ -49,19 +49,21 @@ export const PINNED = {
   rtk: { version: '1.2.0' },
 };
 
+// rtk-oss: the fully open-source (Apache-2.0/MIT) build. Archives contain rtk(.exe) + LICENSE.
 const RTK_ASSETS: Record<string, string> = {
-  'win32-x64': 'rtk-x86_64-pc-windows-msvc.zip',
-  'darwin-x64': 'rtk-x86_64-apple-darwin.tar.gz',
-  'darwin-arm64': 'rtk-aarch64-apple-darwin.tar.gz',
-  'linux-x64': 'rtk-x86_64-unknown-linux-musl.tar.gz', // static musl build (the only x64 Linux build)
-  'linux-arm64': 'rtk-aarch64-unknown-linux-musl.tar.gz',
+  'win32-x64': 'rtk-oss-x86_64-pc-windows-msvc.zip',
+  'darwin-x64': 'rtk-oss-x86_64-apple-darwin.tar.gz',
+  'darwin-arm64': 'rtk-oss-aarch64-apple-darwin.tar.gz',
+  'linux-x64': 'rtk-oss-x86_64-unknown-linux-musl.tar.gz', // static musl build
+  'linux-arm64': 'rtk-oss-aarch64-unknown-linux-musl.tar.gz',
 };
+// sha256 from the v1.2.0 release's checksums.txt; win32-x64 and linux-x64 re-hashed after download.
 const RTK_SHA256: Record<string, string> = {
-  'win32-x64': 'b291b4e53d37f84b7f1696bc20559207396fb0190f20ed3c949db1b7e1c0c378',
-  'darwin-x64': '1484ae6fffd0da180d65434eeca32e014a86a6e21dcfc7a0004fe82b7bb0a9b9',
-  'darwin-arm64': 'a2c411ffa49a8595b408c151ea47c9a812268924a76eaeecbc3a5065b02207ff',
-  'linux-x64': '70fee7b4a548c43dde94c77e2335550981b0bc2fb013691d8c8109b5bd0eda37',
-  'linux-arm64': 'f91a06e94e5fad7dfa87946c811a4bcbc500e6da119fd47033f2a8940bf64f93',
+  'win32-x64': 'd105aaaa55822252f04ac28989e9069c1ea61755ca561940d887cb0b89c785fc',
+  'darwin-x64': '48f8cee63ae0b4853f9a77d7839e62ffcca18ef88c408f8a93d4e69986b1ab82',
+  'darwin-arm64': '1959bd6d89a729ccdee176b7141490bbe750820f032c74f29a752576f2495254',
+  'linux-x64': 'a28407dc13038bdc9c2a1f5a047b0c636e0c1d495b15523576e2adb992a06a17',
+  'linux-arm64': '9786c61dbbea704e1468ee7060930d3b45b67f79ba2babfb73463e85340628d9',
 };
 
 type Downloads = Extract<PluginSource, { type: 'binary' }>['downloads'];

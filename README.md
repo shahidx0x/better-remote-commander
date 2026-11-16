@@ -140,7 +140,7 @@ The agent can run other MCP servers on the device and pass their tools to your A
 | `playwright` ([Playwright MCP](https://github.com/microsoft/playwright-mcp)) | Control a real browser (uses your Chrome/Edge if installed) | on |
 | `computer-use` ([computer-use-mcp](https://github.com/domdomegg/computer-use-mcp)) | Screenshots, mouse and keyboard | on for Windows and Linux (skipped without a display), **off on macOS** |
 | `ast-grep` | Powers `ast_search` / `ast_rewrite` | on |
-| `rtk` ([rtk](https://github.com/rtk-ai/rtk)) | Shorter command output in `run_command` (`raw=true` for full output) | on |
+| `rtk` ([rtk](https://github.com/rtk-ai/rtk), open-source `rtk-oss` build) | Shorter command output in `run_command` (`raw=true` for full output) | on |
 | `serena` ([Serena](https://github.com/oraios/serena), GPL-3.0) | Go to definition, find references, symbol edits | on, needs Python |
 | `markitdown` ([MarkItDown MCP](https://github.com/microsoft/markitdown)) | PDF, Word, Excel, PowerPoint to Markdown | on, needs Python |
 
