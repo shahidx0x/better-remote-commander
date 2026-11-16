@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
+import { DEFAULT_WORKFLOW } from '../runtime/browser-workflow.js';
 import type { ToolResult } from 'brc-shared';
 import type { ToolDefinition } from '../core/tool-definitions.js';
 import { validatePath } from '../core/tools/filesystem.js';
@@ -214,7 +215,11 @@ async function impact(raw: unknown) {
     return result({ recommendations, projectChecks: checks.defaultChecks, heuristic: true, note: 'Filename-based candidates, not a proven coverage graph. No matches does not mean no tests are needed; run the agreed project checks.' });
 }
 export const EXPERT_TOOL_HANDLERS: Record<string, (a: Record<string, unknown>) => Promise<ToolResult>> = {
-    project_context: async (raw) => { const a = ContextSchema.parse(raw); return result(await gatherContext(a.path, a.focus, a.maxChars)); },
+    project_context: async (raw) => { const a = ContextSchema.parse(raw); const context=await gatherContext(a.path, a.focus, a.maxChars);
+      return result({...context,agentWorkflow:{mode:DEFAULT_WORKFLOW.mode,
+        priorities:['file tools','run_command','Serena where useful','Playwright only for necessary browser/visual work'],
+        browserRule:'Before browser_click obtain a fresh browser_snapshot; use target, never name. After navigation/DOM changes refresh snapshot; never restart for stale refs.',
+        scope:DEFAULT_WORKFLOW.scope}}); },
     project_preferences: async (raw) => {
         const a = PrefSchema.parse(raw);
         if (a.action === 'get')
