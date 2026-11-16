@@ -6,6 +6,8 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
+import type { UsageRecord, UsageDay } from '../features/usage.js';
+import type { SkillRow, SkillRequest } from '../features/skills.js';
 
 export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 export const randomToken = (bytes = 32) => randomBytes(bytes).toString('base64url');
@@ -51,6 +53,14 @@ CREATE INDEX IF NOT EXISTS plugin_requests_user ON plugin_requests(user_id, stat
 CREATE TABLE IF NOT EXISTS device_plugins (device_id TEXT PRIMARY KEY, plugins TEXT NOT NULL, updated_at INTEGER NOT NULL);
 `;
 
+const FEATURE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS model_usage (id TEXT NOT NULL, user_id TEXT NOT NULL, day TEXT NOT NULL, ts INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, PRIMARY KEY (user_id,id));
+CREATE INDEX IF NOT EXISTS model_usage_user_day ON model_usage(user_id,day);
+CREATE TABLE IF NOT EXISTS skills (user_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL, source TEXT NOT NULL, files_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id,id));
+CREATE TABLE IF NOT EXISTS skill_requests (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, skill_id TEXT NOT NULL, client TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS skill_requests_user ON skill_requests(user_id,created_at);
+`;
+
 export type PluginRequestStatus = 'pending' | 'approved' | 'installed' | 'failed' | 'rejected';
 export interface PluginRequestRow {
   id: string; user_id: string; device_id: string | null; client: string | null;
@@ -80,6 +90,7 @@ export class SqliteStore {
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA busy_timeout = 1000;');
     this.db.exec(SCHEMA);
     this.db.exec(PLUGIN_SCHEMA);
+    this.db.exec(FEATURE_SCHEMA);
     this.pruneAudit();
   }
 
@@ -236,6 +247,7 @@ export class SqliteStore {
   vacuumExpired(): void {
     const now = Date.now();
     this.pruneAudit(now);
+    this.statement('DELETE FROM model_usage WHERE day < ?').run(new Date(now - 400*86_400_000).toISOString().slice(0,10));
     this.db.prepare('DELETE FROM auth_codes WHERE expires_at < ?').run(now);
     this.db.prepare('DELETE FROM device_codes WHERE expires_at < ?').run(now);
     this.statement('DELETE FROM connection_links WHERE expires_at <= ?').run(now);
@@ -359,6 +371,47 @@ export class SqliteStore {
     const row = this.db.prepare('SELECT plugins, updated_at FROM device_plugins WHERE device_id = ?').get(deviceId) as { plugins: string; updated_at: number } | undefined;
     if (!row) return undefined;
     try { return { plugins: JSON.parse(row.plugins) as unknown[], updated_at: row.updated_at }; } catch { return undefined; }
+  }
+
+  /* ---------- explicitly reported model tokens: never sampled from MCP calls ---------- */
+  recordTokenUsage(r: UsageRecord): boolean {
+    return Number(this.statement('INSERT OR IGNORE INTO model_usage (id,user_id,day,ts,provider,model,input_tokens,output_tokens) VALUES (?,?,?,?,?,?,?,?)')
+      .run(r.id,r.user_id,r.day,r.ts,r.provider,r.model,r.input_tokens,r.output_tokens).changes) === 1;
+  }
+  usageDays(userId: string, sinceDay: string): UsageDay[] {
+    return this.statement('SELECT day,SUM(input_tokens) AS input_tokens,SUM(output_tokens) AS output_tokens,COUNT(*) AS reports FROM model_usage WHERE user_id = ? AND day >= ? GROUP BY day ORDER BY day')
+      .all(userId,sinceDay).map(v => ({ day:String(v.day), input_tokens:Number(v.input_tokens), output_tokens:Number(v.output_tokens), reports:Number(v.reports) }));
+  }
+
+  /* ---------- owner-controlled skill library and review queue ---------- */
+  saveSkill(r: SkillRow): void {
+    this.statement('INSERT INTO skills (user_id,id,name,description,source,files_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id,id) DO UPDATE SET name=excluded.name,description=excluded.description,source=excluded.source,files_json=excluded.files_json,updated_at=excluded.updated_at')
+      .run(r.user_id,r.id,r.name,r.description,r.source,r.files_json,r.created_at,r.updated_at);
+    this.statement('DELETE FROM skill_requests WHERE user_id = ? AND skill_id = ?').run(r.user_id,r.id);
+  }
+  listSkills(userId: string): SkillRow[] {
+    return this.statement('SELECT * FROM skills WHERE user_id = ? ORDER BY name COLLATE NOCASE').all(userId) as unknown as SkillRow[];
+  }
+  getSkill(userId: string, id: string): SkillRow | undefined {
+    return this.statement('SELECT * FROM skills WHERE user_id = ? AND id = ?').get(userId,id) as SkillRow | undefined;
+  }
+  deleteSkill(userId: string, id: string): boolean {
+    return Number(this.statement('DELETE FROM skills WHERE user_id = ? AND id = ?').run(userId,id).changes)>0;
+  }
+  createSkillRequest(userId:string,skillId:string,client:string,reason:string): SkillRequest {
+    const prior=this.statement('SELECT * FROM skill_requests WHERE user_id=? AND skill_id=?').get(userId,skillId) as SkillRequest|undefined;
+    if(prior)return prior;
+    const pending=this.statement('SELECT COUNT(*) AS n FROM skill_requests WHERE user_id=?').get(userId) as {n:number};
+    if(pending.n>=20)throw Error('Maximum 20 pending skill requests');
+    const r:SkillRequest={id:'sr_'+randomToken(9),user_id:userId,skill_id:skillId,client:client.slice(0,120),reason:reason.slice(0,500),created_at:Date.now()};
+    this.statement('INSERT INTO skill_requests VALUES (?,?,?,?,?,?)').run(r.id,r.user_id,r.skill_id,r.client,r.reason,r.created_at);
+    return r;
+  }
+  listSkillRequests(userId:string):SkillRequest[] {
+    return this.statement('SELECT * FROM skill_requests WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(userId) as unknown as SkillRequest[];
+  }
+  deleteSkillRequest(userId:string,id:string):boolean {
+    return Number(this.statement('DELETE FROM skill_requests WHERE user_id=? AND id=?').run(userId,id).changes)>0;
   }
 
   close(): void { this.liveAudit=[]; this.statements.clear(); this.lastTouches.clear(); this.db.close(); }

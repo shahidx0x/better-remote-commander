@@ -9,6 +9,8 @@ import { hashPassword, randomToken, sha256, type UserRow, type ClientRow, type A
   type DeviceRow, type DeviceCodeRow, type AuditRow, type ConnectionLinkRow } from './sqlite.js';
 import type { RelayStore } from './types.js';
 import { MAX_PENDING_PLUGIN_REQUESTS, type PluginRequestStatus, type PluginRequestRow } from './sqlite.js';
+import type { UsageRecord, UsageDay } from '../features/usage.js';
+import type { SkillRow, SkillRequest } from '../features/skills.js';
 
 export class MongoStore implements RelayStore {
   readonly auditRetentionMs = 0;
@@ -56,6 +58,10 @@ export class MongoStore implements RelayStore {
       this.col('tokens').createIndex({ client_id: 1, user_id: 1 }),
       this.col('plugin_requests').createIndex({ user_id: 1, status: 1, created_at: -1 }),
       this.col('device_plugins').createIndex({ updated_at: -1 }),
+      this.col('model_usage').createIndex({ user_id: 1, day: 1 }),
+      this.col('model_usage').createIndex({ expire_on: 1 }, { expireAfterSeconds: 0 }),
+      this.col('skills').createIndex({ user_id: 1, name: 1 }),
+      this.col('skill_requests').createIndex({ user_id: 1, skill_id: 1 }, { unique: true }),
     ];
     // TTL indexes remove expired records without a background relay database process.
     for (const name of ['auth_codes', 'device_codes', 'connection_links', 'tokens']) {
@@ -325,6 +331,61 @@ export class MongoStore implements RelayStore {
     const row = await this.col('device_plugins').findOne({ _id: deviceId });
     if (!row) return undefined;
     return { plugins: Array.isArray(row.plugins) ? row.plugins : [], updated_at: Number(row.updated_at || 0) };
+  }
+
+  /* ---------- provider-reported model usage: never in MCP hot path ---------- */
+  async recordTokenUsage(r: UsageRecord): Promise<boolean> {
+    try {
+      await this.col('model_usage').insertOne({ _id: r.user_id + '/' + r.id, ...r,
+        expire_on: new Date(r.ts + 400*86_400_000) });
+      return true;
+    } catch(e) {
+      if((e as {code?:number}).code===11000)return false;
+      throw e;
+    }
+  }
+  async usageDays(userId:string,sinceDay:string):Promise<UsageDay[]> {
+    const rows=await this.col('model_usage').aggregate([
+      { $match: { user_id:userId, day:{ $gte:sinceDay } } },
+      { $group: { _id:'$day', input_tokens:{ $sum:'$input_tokens' }, output_tokens:{ $sum:'$output_tokens' }, reports:{ $sum:1 } } },
+      { $sort: { _id:1 } }
+    ]).toArray();
+    return rows.map(r=>({day:String(r._id),input_tokens:Number(r.input_tokens),output_tokens:Number(r.output_tokens),reports:Number(r.reports)}));
+  }
+
+  /* ---------- owner-approved skills, stored per account ---------- */
+  async saveSkill(r:SkillRow):Promise<void> {
+    await this.col('skills').updateOne({_id:r.user_id+'/'+r.id},
+      {$set:{...r}},{upsert:true});
+    await this.col('skill_requests').deleteMany({user_id:r.user_id,skill_id:r.id});
+  }
+  async listSkills(userId:string):Promise<SkillRow[]> {
+    return (await this.col('skills').find({user_id:userId}).sort({name:1}).toArray()).map(r=>MongoStore.row<SkillRow>(r)!);
+  }
+  async getSkill(userId:string,id:string):Promise<SkillRow|undefined> {
+    return MongoStore.row<SkillRow>(await this.col('skills').findOne({_id:userId+'/'+id,user_id:userId}));
+  }
+  async deleteSkill(userId:string,id:string):Promise<boolean> {
+    return (await this.col('skills').deleteOne({_id:userId+'/'+id,user_id:userId})).deletedCount>0;
+  }
+  async createSkillRequest(userId:string,skillId:string,client:string,reason:string):Promise<SkillRequest> {
+    const prior=MongoStore.row<SkillRequest>(await this.col('skill_requests').findOne({user_id:userId,skill_id:skillId}));
+    if(prior)return prior;
+    const n=await this.col('skill_requests').countDocuments({user_id:userId},{limit:21});
+    if(n>=20)throw Error('Maximum 20 pending skill requests');
+    const r:SkillRequest={id:'sr_'+randomToken(9),user_id:userId,skill_id:skillId,client:client.slice(0,120),reason:reason.slice(0,500),created_at:Date.now()};
+    try {await this.col('skill_requests').insertOne({_id:r.id,...r});return r}
+    catch(e){if((e as {code?:number}).code===11000){
+      const existing=MongoStore.row<SkillRequest>(await this.col('skill_requests').findOne({user_id:userId,skill_id:skillId}));
+      if(existing)return existing;
+    }throw e}
+  }
+  async listSkillRequests(userId:string):Promise<SkillRequest[]> {
+    return (await this.col('skill_requests').find({user_id:userId}).sort({created_at:-1}).limit(50).toArray())
+      .map(d=>MongoStore.row<SkillRequest>(d)!);
+  }
+  async deleteSkillRequest(userId:string,id:string):Promise<boolean> {
+    return (await this.col('skill_requests').deleteOne({_id:id,user_id:userId})).deletedCount>0;
   }
 
   async close(): Promise<void> {

@@ -211,7 +211,7 @@ ${opt.inputs.map(inputField).join('')}
   } else {
     body = '<h1>Install plugin</h1>';
   }
-  return layout('Install plugin', `${STYLE}${v.error ? `<p class="err">${esc(v.error)}</p>` : ''}${body}`);
+  return layout('Install plugin', `${STYLE}${v.error ? `<p class="err">${esc(v.error)}</p>` : ''}${body}`, 'wide');
 }
 
 export interface InstallOutcomeView { device: string; ok: boolean; message: string }
@@ -219,5 +219,5 @@ export interface InstallOutcomeView { device: string; ok: boolean; message: stri
 export function installResultPage(title: string, outcomes: InstallOutcomeView[], error?: string): string {
   const rows = outcomes.map((o) => `<li><strong>${esc(o.device)}</strong>: <span class="${o.ok ? 'ok' : 'err'}">${esc(o.message)}</span></li>`).join('');
   return layout('Plugin install', `${STYLE}<h1>${esc(title)}</h1>${error ? `<p class="err">${esc(error)}</p>` : ''}${rows ? `<ul>${rows}</ul>` : ''}
-<div class="row"><a href="/admin#plugins"><button class="primary">Back to admin</button></a><a href="/admin/marketplace"><button class="secondary">Marketplace</button></a></div>`);
+<div class="row"><a href="/admin#plugins"><button class="primary">Back to admin</button></a><a href="/admin/marketplace"><button class="secondary">Marketplace</button></a></div>`, 'wide');
 }

@@ -14,7 +14,7 @@ let html = await r.text();
 const deviceId = html.match(/name="device_id" value="([^"]+)"/)?.[1];
 const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
 step('admin forms carry a csrf token', !!csrf);
-step('admin page', r.status === 200 && !!deviceId && /Recent MCP calls/.test(html), `device=${deviceId}`);
+step('admin page', r.status === 200 && !!deviceId && /Recent activity/.test(html), `device=${deviceId}`);
 r = await post('/admin/device', { device_id: deviceId, action: 'pause' }, cookie);
 step('POST without csrf token is refused', r.status === 403, `status ${r.status}`);
 

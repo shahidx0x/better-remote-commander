@@ -33,6 +33,11 @@ import { LoginLimiter } from './auth/rate-limit.js';
 import { RegistryClient } from './plugins/registry.js';
 import { registerPluginRoutes } from './plugins/admin-routes.js';
 import { PLUGIN_RELAY_TOOLS } from './mcp/plugin-tools.js';
+import { SKILL_RELAY_TOOLS } from './mcp/skill-tools.js';
+import { SkillsCatalog } from './features/skills.js';
+import { registerSkillsRoutes } from './features/skills-routes.js';
+import { validateUsageReport, usageView, type UsagePeriod } from './features/usage.js';
+import { dashboardPage } from './pages/dashboard.js';
 
 export interface RelayConfig {
   port: number;
@@ -80,6 +85,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   const sessions = new Sessions(cfg.sessionSecret, cfg.publicUrl.startsWith('https://'));
   const hub = new DeviceHub(cfg.relayVersion, log);
   const registry = RegistryClient.fromEnv();
+  const skills = new SkillsCatalog();
   const publicUrl = new URL(cfg.publicUrl);
 
   const app = express();
@@ -221,7 +227,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
       catch { return res.status(503).json({ ok: false, storage: 'mongodb', error: 'database_unavailable' }); }
     }
     res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl,
-      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1 + PLUGIN_RELAY_TOOLS.length, storage: cfg.mongoUri ? 'mongodb' : 'sqlite', relayInstance: hub.instanceId });
+      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1 + PLUGIN_RELAY_TOOLS.length + SKILL_RELAY_TOOLS.length, storage: cfg.mongoUri ? 'mongodb' : 'sqlite', relayInstance: hub.instanceId });
   });
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */
@@ -350,7 +356,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
   const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
-    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access, { registry, publicUrl: cfg.publicUrl });
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access, { registry, publicUrl: cfg.publicUrl, skills });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {
@@ -372,17 +378,52 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
 
   // OAuth-free capability URLs: no redirect_uri, no Authorization header, no public anonymous access.
   // A fresh SQLite token-hash lookup is required for every request, including after revocation.
+  // One FRESH authorization lookup per request. Reuse the verified row only
+  // within this HTTP request; never cache a private credential across requests.
+  // This removes a redundant MongoDB RTT without weakening next-request revocation.
   app.all('/c/:key/mcp', async (req, res, next) => {
-    if (!await store.getConnectionLink(String(req.params.key ?? ''))) return res.status(404).json({ error: 'invalid_connection' });
+    const link = await store.getConnectionLink(String(req.params.key ?? ''));
+    if (!link) return res.status(404).json({ error: 'invalid_connection' });
+    res.locals.connectionLink = link;
     next();
   }, express.json({ limit: '32mb' }), async (req, res) => {
-    const link = await store.getConnectionLink(String(req.params.key ?? ''));
+    const link = res.locals.connectionLink as Awaited<ReturnType<RelayStore['getConnectionLink']>>;
     if (!link) return res.status(404).json({ error: 'invalid_connection' });
     await handleMcp(req, res, link.user_id, `link:${link.id}`, link.mode);
   });
 
   /* ---------- plugins: marketplace, per-device plugin admin, AI install requests ---------- */
   const pluginUi = registerPluginRoutes({ app, hub, store, sessions, registry, requireLogin, log });
+  registerSkillsRoutes(app, store, sessions, skills, requireLogin);
+
+  /* ---------- provider-reported token events (not part of MCP execution) ---------- */
+  const usageRate = new Map<string, { at: number; count: number }>();
+  app.post('/api/usage/report', express.json({ limit: '8kb' }), async (req, res) => {
+    // Only an existing, revocable owner API key may submit usage. A private MCP
+    // capability URL or agent token does NOT grant access to this endpoint.
+    const auth = req.get('authorization') ?? '';
+    if (!/^Bearer brc_ak_[A-Za-z0-9_-]{43}$/.test(auth))
+      return res.status(401).json({ error: 'api_key_required' });
+    const key = await store.getApiKey(auth.slice(7));
+    if (!key) return res.status(401).json({ error: 'invalid_api_key' });
+    const now = Date.now();
+    const old = usageRate.get(key.prefix);
+    const rate = old && now - old.at < 60_000 ? old : { at: now, count: 0 };
+    if (++rate.count > 120) return res.status(429).json({ error: 'rate_limited' });
+    usageRate.set(key.prefix, rate);
+    if (usageRate.size > 1000) for (const [id,v] of usageRate)
+      if (now - v.at > 60_000) usageRate.delete(id);
+    try {
+      const usage = validateUsageReport(req.body, key.user_id, now);
+      const recorded = await store.recordTokenUsage(usage);
+      return res.status(recorded ? 201 : 200).json({
+        recorded, duplicate: !recorded, source: 'provider-reported', utc_day: usage.day
+      });
+    } catch(e) {
+      return res.status(400).json({ error: 'invalid_usage_report',
+        message: e instanceof Error ? e.message.slice(0,200) : 'Invalid report' });
+    }
+  });
 
   /* ---------- admin dashboard ---------- */
   app.get('/admin', requireLogin, async (req, res) => {
@@ -391,7 +432,10 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
     const devices = (await store.listDevices(userId)).map((d) => ({ ...d, online: online.has(d.device_id) }));
     const names = new Map(devices.map((d) => [d.device_id, d.name]));
     const audit = (await store.recentAudit(userId, 100)).map((a) => ({ ts: a.ts, device: names.get(a.device_id ?? '') ?? (a.device_id ?? '?').slice(0, 8), client: a.client, tool: a.tool, ok: a.ok, ms: a.ms, error: a.error }));
-    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, await store.auditStats(userId), await pluginUi.adminSections(req, userId), pluginUi.flash(req)));
+    const period: UsagePeriod = req.query.period === 'week' ? 'week' : req.query.period === 'month' ? 'month' : 'day';
+    const since = new Date(Date.now()-366*86_400_000).toISOString().slice(0,10);
+    const days = await store.usageDays(userId, since);
+    res.type('html').send(dashboardPage(cfg.publicUrl, devices, audit, await store.auditStats(userId), usageView(days,period), await pluginUi.adminSections(req,userId),pluginUi.flash(req)));
   });
   app.post('/admin/device', requireLogin, requireCsrf, async (req, res) => {
     const userId = currentUser(req)!;

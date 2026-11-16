@@ -30,14 +30,14 @@ ChatGPT / Claude / other MCP client
 | --- | --- |
 | Remote access | OAuth with PKCE, device-code pairing, outbound WebSockets, multiple devices, reconnect/re-pairing, stable tool discovery |
 | Connection options | Standard `/mcp` OAuth, API keys, and revocable private MCP URLs with read-only/full access |
-| Persistence | SQLite by default; optional MongoDB for persistent relay accounts, pairings and plugin metadata |
+| Persistence | SQLite by default; optional MongoDB for relay accounts, pairings, plugin metadata, approved skills and model token aggregates |
 | Coding tools | File inspection, hash-checked edits, source navigation, project checks, multi-file batches and live diagnostics |
 | Performance | Fast command-start paths, optimized searches/reads, lazy dependencies, bounded outputs and RTK compression when installed |
 | Jobs | Concurrent tool/command execution and persistent finished background-job history |
 | Coordination | Optional scoped patch submission from real host-native subagents; no built-in LLM spawning |
 | MCP extensions | Extra per-device MCP servers, default plugin setup, marketplace, owner-approved installs and admin controls |
-| Administration | Device controls, OAuth clients, API keys, connection links, plugin requests, plugin status and live activity |
-| Security | Session CSRF protection, rate limits, device token revocation, scoped built-in filesystem tools and explicitly gated plugin installs |
+| Administration | Modern responsive left-sidebar dashboard, device controls, OAuth clients, API keys, private links, skill approvals, MCP marketplace, token analytics and live activity |
+| Security | Session CSRF protection, rate limits, device token revocation, scoped built-in filesystem tools and explicitly gated plugin/skill approval |
 
 ## Main capabilities
 
@@ -47,19 +47,25 @@ ChatGPT / Claude / other MCP client
 - **Reduce unnecessary round trips.** `read_multiple_files`, `batch_tools`, `workspace_batch` and `run_parallel` combine suitable work rather than sending many individual MCP calls.
 - **Run background jobs.** Launch commands or sequential tool steps, wait for completion, inspect results and cancel jobs without keeping one MCP request open.
 - **Connect more MCP servers to a device.** Use Playwright, computer-use, Serena, MarkItDown or another supported server *when actually installed and configured*.
+- **Owner-approved reusable skills.** Import SKILL.md text from reviewed sources, browse the optional skills.sh catalog, and allow AI clients to discover/read approved skills without automatic code execution.
+- **Understand model usage when reported.** A dedicated authenticated reporting endpoint accepts provider-supplied input/output token counts. View daily, weekly and monthly totals on the dashboard; MCP tools themselves cannot know ChatGPT model token counts.
 - **Keep your existing custom relay features.** This fork retains MongoDB support, private MCP URLs, OAuth recovery/reconnection logic and scoped worker coordination alongside the upstream additions.
 
 ## MCP tool catalog
 
-The **default full profile** advertises **83 built-in MCP tools**: **80 agent tools** plus **3 relay tools**. `BRC_TOOL_PROFILE=coding` may hide some tools from discovery; that profile is not an authorization boundary. Optional third-party plugins expose their own tools dynamically through `list_plugin_tools` and `call_plugin_tool`, so they are **not** included in the 83.
+The **default full profile** advertises **87 built-in MCP tools**: **80 agent tools** plus **7 relay tools**. `BRC_TOOL_PROFILE=coding` may hide some tools from discovery; that profile is not an authorization boundary. Optional third-party plugins expose their own tools dynamically through `list_plugin_tools` and `call_plugin_tool`, so they are **not** included in the 87.
 
-### Relay tools (3)
+### Relay tools (7)
 
 | Tool | Purpose |
 | --- | --- |
 | `list_devices` | List paired devices and online status |
 | `search_mcp_registry` | Search the official MCP Registry for potential plugin servers |
 | `request_plugin_install` | File a pending install request for owner approval; **never installs automatically** |
+| `list_skills` | List skills approved by the relay owner for this account |
+| `read_skill` | Read a skill's SKILL.md and approved supporting text files |
+| `search_skills_catalog` | Search skills.sh with optional Vercel OIDC authentication; unavailable without it |
+| `request_skill_install` | Request owner review of a skill; **no automatic installation** |
 
 ### Agent tools (80)
 
@@ -122,6 +128,12 @@ Other supported sources: `--npm package@version`, `--pypi package==version`, `--
 
 Plugin secrets are kept on the device, not persisted by the relay's plugin-request database. **Important:** third-party MCP plugins run with their own process permissions and do not automatically obey BRC's built-in `allowedDirectories` restriction. Install only plugins you trust.
 
+## Skills and model token analytics
+
+The self-hosted admin at `/admin` now has a fixed responsive sidebar, device cards, plugin controls, and daily / weekly / monthly model token charts. `/admin/skills` stores explicitly approved `SKILL.md` instruction packs for MCP clients; `list_skills` and `read_skill` expose them. A third-party skill is never executed or installed automatically.
+
+**Actual LLM tokens cannot be intercepted from ChatGPT by MCP.** An instrumented model client must report input/output token counts to `POST /api/usage/report` using a dedicated existing API key from `/auth/apikeys`; otherwise the chart explicitly shows no usage data. Tool calls do not perform token accounting or DB writes. SQLite and MongoDB both persist user-scoped, deduplicated usage events and approved skills. See [complete setup and privacy notes](docs/relay-skills-usage.md).
+
 ## Authentication, connections and persistence
 
 ### Connecting a client
@@ -138,8 +150,8 @@ Private links can be configured for periods including **1 or 2 years**, but long
 
 ### SQLite and MongoDB
 
-- **SQLite (default):** `BRC_DB=/data/relay.sqlite` in the container. Keep the `/data` volume persistent between deployments.
-- **MongoDB (optional):** set `MONGODB_URI` and, when needed, `MONGODB_DB`. Use a MongoDB deployment with its own persistent storage. When MongoDB is configured but unavailable, the relay **does not silently switch to SQLite**.
+- **SQLite (default):** `BRC_DB=/data/relay.sqlite` in the container. Keep the `/data` volume persistent between deployments. Approved skill content and reported token events use the same database.
+- **MongoDB (optional):** set `MONGODB_URI` and, when needed, `MONGODB_DB`. Use a MongoDB deployment with its own persistent storage. Skills and token events use the selected MongoDB database. When MongoDB is configured but unavailable, the relay **does not silently switch to SQLite**.
 - User accounts, pairing, OAuth data, connection links and plugin-request metadata are operational state. **Tool-call activity is live/in-memory only** in this fork; it is not a durable audit transcript.
 - Finished **background-job history** on the agent is distinct from ephemeral live diagnostic logs and ephemeral host-native worker coordination.
 
@@ -208,6 +220,7 @@ Local test profiles use HTTP on loopback; public deployments need HTTPS and corr
 | `BRC_PLUGIN_REMOTE_ADMIN=0` | Reject remote plugin changes on the device |
 | `BRC_PARSER_WORKERS` | Configure optional parser-worker pool size |
 | `BRC_IMAGE_WORKERS` | Concurrent native image decodes per preview request (default 2; 1-3 supported) |
+| `BRC_SKILLS_API_TOKEN` | Optional short-lived Vercel OIDC JWT for skills.sh catalog search; manual skills import needs no token |
 
 See [`.env.example`](.env.example) for relay and tunnel variables. Do not commit a real `.env`, pairing tokens or plugin secrets.
 
@@ -243,6 +256,7 @@ pnpm bench:context
 ## More documentation
 
 - [Architecture and protocol](docs/architecture.md)
+- [Relay dashboard, approved Skills and provider-reported token analytics](docs/relay-skills-usage.md)
 - [Coding-agent setup and diagnostics](docs/coding-agent.md)
 - [Fast batches, images and sandbox](docs/fast-agent.md)
 - [Parallel worker coordination](docs/parallel-workers.md)

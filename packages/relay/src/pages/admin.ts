@@ -37,7 +37,7 @@ export function apiKeysPage(keys: { prefix: string; name: string; created_at: nu
 <p>Long-lived bearer tokens as an alternative to OAuth. Anyone holding a key can control your paired devices — treat it like a password.</p>
 <form method="post" action="/auth/apikeys"><label>Name</label><input name="name" placeholder="MCP client" required>
 <div class="row"><button class="primary" type="submit">Create key</button></div></form>
-<h1 style="margin-top:22px">Existing</h1>${rows}<p><a href="/admin">Back</a></p>`);
+<h1 style="margin-top:22px">Existing</h1>${rows}<p><a href="/admin">Back</a></p>`, 'wide');
 }
 
 export interface ConnectionLinkView { id: string; name: string; mode: 'read' | 'full'; created_at: number; expires_at: number }

@@ -66,8 +66,10 @@ export async function invokeTool(
     const ms = Date.now() - started;
     result._meta = {...result._meta, auditPersisted:false, activityStorage:"memory-only"};
     try {
-      await store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: null, ok: result.isError ? 0 : 1, ms, error: null });
-      await store.touchDevice(deviceId);
+      // Audit is in-memory only. Device last-seen is housekeeping, never an
+      // authorization check; do not delay the completed tool result on Mongo I/O.
+      void store.audit({ ts: started, user_id: ctx.userId, device_id: deviceId, client: ctx.clientId, tool, args_hash: null, ok: result.isError ? 0 : 1, ms, error: null });
+      void Promise.resolve().then(() => store.touchDevice(deviceId)).catch(() => {});
     } catch {
       // The command may already have changed files. Never invite a blind replay.
       result._meta = {...result._meta, auditPersisted:false, auditWarning:'Live activity update failed; tool result is still valid.'};
