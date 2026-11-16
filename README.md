@@ -1,241 +1,253 @@
-# Better Remote Commander
+# Better Remote Commander — Extended Fork
 
-Self-hosted remote control of your own computers from **Claude** and **ChatGPT**.
-Files, terminal and processes on any machine you pair — through a relay **you** host, on **your** domain.
+**Self-hosted remote control and coding tools for your own devices through MCP.** Connect compatible AI clients such as ChatGPT or Claude to a relay you operate, then use approved tools on paired Windows, Linux and macOS computers.
 
+**Repository:** [Rifatul-Islam-Munna/better-better-remote-commander](https://github.com/Rifatul-Islam-Munna/better-better-remote-commander)
+
+**Development branch:** `marge-branch` | **Integrated upstream version:** 2.0.7
+
+**Upstream:** [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander)
+
+> This README describes the source code in this fork's `marge-branch`. Local commits are not automatically available on GitHub or deployed to a running relay; push and redeploy separately when appropriate.
+
+```text
+ChatGPT / Claude / other MCP client
+                |
+        HTTPS + OAuth / API key / private link
+                |
+     Self-hosted relay  (MCP + dashboard)
+          /     |     \
+         /      |      \
+       WSS     WSS     WSS   (outbound connections)
+        |       |       |
+     Agent A  Agent B  Agent C
+     Files, terminals, jobs, coding tools and optional MCP plugins
 ```
-Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  ──outbound WebSocket──▶  agent on your machine
-```
 
-- **Claude**: add the relay as a custom connector (remote MCP). Works in claude.ai web, desktop and mobile.
-- **ChatGPT**: add the relay as a remote MCP connector.
-- **Your infrastructure**: run the relay on a VPS, or on your PC behind a Cloudflare Tunnel / ngrok. SQLite, one container, no third-party service.
-- **Many machines**: pair Windows, macOS, Linux boxes and containers to one relay; agents only connect outbound.
-- **Control**: browser dashboard to pair, pause, rename and remove devices, manage OAuth clients and see bounded live activity.
+## Highlights
 
-## Features
+| Area | What this fork provides |
+| --- | --- |
+| Remote access | OAuth with PKCE, device-code pairing, outbound WebSockets, multiple devices, reconnect/re-pairing, stable tool discovery |
+| Connection options | Standard `/mcp` OAuth, API keys, and revocable private MCP URLs with read-only/full access |
+| Persistence | SQLite by default; optional MongoDB for persistent relay accounts, pairings and plugin metadata |
+| Coding tools | File inspection, hash-checked edits, source navigation, project checks, multi-file batches and live diagnostics |
+| Performance | Fast command-start paths, optimized searches/reads, lazy dependencies, bounded outputs and RTK compression when installed |
+| Jobs | Concurrent tool/command execution and persistent finished background-job history |
+| Coordination | Optional scoped patch submission from real host-native subagents; no built-in LLM spawning |
+| MCP extensions | Extra per-device MCP servers, default plugin setup, marketplace, owner-approved installs and admin controls |
+| Administration | Device controls, OAuth clients, API keys, connection links, plugin requests, plugin status and live activity |
+| Security | Session CSRF protection, rate limits, device token revocation, scoped built-in filesystem tools and explicitly gated plugin installs |
 
-- **Remote MCP relay** with OAuth 2.0 (dynamic client registration, PKCE) and API keys, for Claude and ChatGPT.
-- **Device pairing**: the agent shows a code, you approve it in the browser. Device tokens are stored hashed.
-- **Multi-device**: every tool takes an optional `deviceId`. With one device online it is picked automatically.
-- **Outbound-only agents**: no open ports on your machines. Automatic reconnect, heartbeat and re-pairing.
-- **Admin dashboard** (`/admin`): rename, pause, resume and delete devices, view current-process activity and stats.
-  `/auth/clients` manages OAuth clients and `/auth/apikeys` manages API keys.
-- **Live-only diagnostics**: concise tool activity in the console and bounded RAM-only dashboard metadata. No persisted tool-call logs.
-- **Encrypted file transfer** between devices (see below).
-- **One-shot commands** (`run_command`): run a command and get exit code, stdout and stderr in a single call,
-  with timeout and process-tree kill.
-- **Multi-edit**: `edit_block` applies several find/replace edits to a file in one call, all-or-nothing.
-- **Blocking search**: `start_search` with `wait: true` returns all results in one call (grep-style).
-- **Ranged multi-file reads**: `read_multiple_files` accepts per-file line ranges.
-- **Workers** (`run_parallel`, `spawn_job`, `wait_jobs`): the AI splits work into pieces that run in parallel
-  on the device as background jobs, then collects the results. No extra model or API key needed.
-- **Safe delete** (`delete_file`) and **git helpers** (`git_status`, `git_diff`, `git_log`).
-- **Fast agent**: heavy document libraries (Excel, PDF, DOCX) load on demand, system info is cached,
-  parser libraries load lazily, diagnostic telemetry is disabled, and activity metrics stay in memory.
-  Performance depends on workload and network; no fixed speedup is claimed.
-- **OS service install** (`--install-service`) so the agent starts at login.
-- **Security**: login rate limiting, signed session cookies, security headers, blocked-command list and
-  `allowedDirectories` on the agent. See `SECURITY.md`.
-- **Deployment**: Docker Compose profiles for Caddy (auto-TLS), Cloudflare Tunnel, ngrok or localhost.
-- **Android agent** (branch `feat/android-agent`): native Kotlin agent that exposes Android-specific tools
-  (accessibility automation, screenshots, notifications, contacts, SMS, location, camera/mic capture, screen
-  recording, app install, automation jobs, Shizuku/Device Owner modes). See [docs/android-agent.md](docs/android-agent.md).
+## Main capabilities
 
-## Coding-agent reliability and diagnostics
+- **Control several paired devices.** Each agent connects *outbound* to the relay; use an optional `deviceId` when more than one is online. Pausing or deleting a device is enforced at the relay.
+- **Read, search, edit and transfer files.** Includes multi-file reads, exact edits, git inspection, image previews, PDF tooling and encrypted transfers between paired devices.
+- **Work inside real codebases.** Project mapping, declarations, syntax-aware navigation, multi-language context, cross-file references, SHA-256 preconditions and manifest-backed verification.
+- **Reduce unnecessary round trips.** `read_multiple_files`, `batch_tools`, `workspace_batch` and `run_parallel` combine suitable work rather than sending many individual MCP calls.
+- **Run background jobs.** Launch commands or sequential tool steps, wait for completion, inspect results and cancel jobs without keeping one MCP request open.
+- **Connect more MCP servers to a device.** Use Playwright, computer-use, Serena, MarkItDown or another supported server *when actually installed and configured*.
+- **Keep your existing custom relay features.** This fork retains MongoDB support, private MCP URLs, OAuth recovery/reconnection logic and scoped worker coordination alongside the upstream additions.
 
-The source build includes batched coding operations, hash-checked atomic file edits, search-and-read context, explicit build/test verification, an optional watched filename index, request isolation, bounded execution/cancellation, structured errors and latency metrics. Tool START/OK/ERROR lines are visible by default. Diagnostics are live-only: no agent log writer and no SQLite audit inserts. Credentials and settings are preserved. Project context, parser-backed navigation and RAM-only coding sessions help the AI inspect, edit and verify changes.
+## MCP tool catalog
 
-See [the coding harness and local launch guide](docs/coding-agent.md) for limits, cleanup timing, Windows startup instructions and service migration. On Windows, `START_AGENT.cmd` runs this checkout's compiled agent without a global install.
+The **default full profile** advertises **83 built-in MCP tools**: **80 agent tools** plus **3 relay tools**. `BRC_TOOL_PROFILE=coding` may hide some tools from discovery; that profile is not an authorization boundary. Optional third-party plugins expose their own tools dynamically through `list_plugin_tools` and `call_plugin_tool`, so they are **not** included in the 83.
 
-Set `BRC_TOOL_PROFILE=coding` before starting the agent to hide document/transfer/history tools from discovery. The default preserves the full tool set. This is an advertisement filter, not an access-control boundary.
+### Relay tools (3)
 
-## Tools available to the AI
+| Tool | Purpose |
+| --- | --- |
+| `list_devices` | List paired devices and online status |
+| `search_mcp_registry` | Search the official MCP Registry for potential plugin servers |
+| `request_plugin_install` | File a pending install request for owner approval; **never installs automatically** |
 
-The relay adds `list_devices`, `search_mcp_registry`, and `request_plugin_install`. The agent provides 80 tools, derived from Desktop Commander plus BRC additions.
+### Agent tools (80)
 
 | Category | Tools |
 | --- | --- |
-| Devices | `list_devices` |
-| Plugins | `list_plugin_tools`, `call_plugin_tool` (agent); `search_mcp_registry`, `request_plugin_install` (relay) |
-| Code structure | `ast_search`, `ast_rewrite` (ast-grep) |
-| Config | `get_config`, `set_config_value` |
-| Files | `read_file`, `read_multiple_files`, `write_file`, `create_directory`, `list_directory`, `move_file`, `delete_file`, `get_file_info` |
-| Editing | `edit_block` (single or multi-edit), `write_pdf` |
-| Search | `start_search` (streaming or `wait=true` blocking), `get_more_search_results`, `stop_search`, `list_searches` |
-| Commands | `run_command` (one-shot: exit code + stdout/stderr) |
-| Processes | `start_process`, `read_process_output`, `interact_with_process`, `force_terminate`, `list_sessions`, `list_processes`, `kill_process` |
-| Git | `git_status`, `git_diff`, `git_log` |
-| Workers | `run_parallel`, `spawn_job`, `wait_jobs`, `get_job`, `list_jobs`, `cancel_job` |
-| File transfer | `prepare_file_transfer`, `send_file_transfer`, `receive_file_transfer` |
-| Coding workflows | `read_code_file`, `read_code_context`, `edit_files`, `batch_tools`, `verify_project`, `project_index`, `agent_status`, `cancel_operation` |
-| Project context | `project_context`, `project_preferences`, `project_map`, `vscode_tasks` |
-| Code navigation | `read_code_ranges`, `code_outline`, `find_symbols`, `read_symbol`, `find_references`, `related_files` |
-| Refactoring | `replace_symbol`, `edit_code_ranges`, `code_diagnostics` |
-| Verification/harness | `discover_checks`, `run_project_checks`, `test_impact`, `coding_session`, `review_changes` |
-| Live diagnostics | `get_usage_stats`, `get_recent_tool_calls` |
+| Configuration (2) | `get_config`, `set_config_value` |
+| Files and editing (10) | `read_file`, `read_multiple_files`, `write_file`, `write_pdf`, `create_directory`, `list_directory`, `move_file`, `get_file_info`, `edit_block`, `delete_file` |
+| Encrypted transfer (3) | `prepare_file_transfer`, `send_file_transfer`, `receive_file_transfer` |
+| Search (4) | `start_search`, `get_more_search_results`, `stop_search`, `list_searches` |
+| Commands and processes (8) | `run_command`, `start_process`, `read_process_output`, `interact_with_process`, `force_terminate`, `list_sessions`, `list_processes`, `kill_process` |
+| Live status and cancellation (4) | `get_usage_stats`, `get_recent_tool_calls`, `agent_status`, `cancel_operation` |
+| Git inspection (3) | `git_status`, `git_diff`, `git_log` |
+| Coding operations (6) | `read_code_file`, `read_code_context`, `edit_files`, `batch_tools`, `verify_project`, `project_index` |
+| Project discovery (3) | `project_context`, `project_preferences`, `project_map` |
+| Code navigation (6) | `read_code_ranges`, `code_outline`, `find_symbols`, `read_symbol`, `find_references`, `related_files` |
+| Refactoring and diagnostics (3) | `replace_symbol`, `edit_code_ranges`, `code_diagnostics` |
+| Checks and reviews (6) | `vscode_tasks`, `test_impact`, `discover_checks`, `run_project_checks`, `coding_session`, `review_changes` |
+| Language context (4) | `language_capabilities`, `code_graph`, `context_pack`, `session_handoff` |
+| Coordinated workspace edits (1) | `workspace_batch` |
+| Docker, images and isolation (4) | `docker_inventory`, `docker_inspect`, `read_images`, `sandbox_run` |
+| Parallel/background jobs (6) | `run_parallel`, `spawn_job`, `wait_jobs`, `get_job`, `list_jobs`, `cancel_job` |
+| Device MCP plugins and AST (4) | `list_plugin_tools`, `call_plugin_tool`, `ast_search`, `ast_rewrite` |
+| Optional native-worker coordination (3) | `worker_tasks`, `worker_patch`, `worker_integrate` |
 
-Note: `write_pdf` downloads Chrome on first use.
+**Choosing the right tool:** Use `read_file` for one known file, `read_multiple_files` for multiple known files, `start_search` for unknown locations, `run_command` for short one-shot commands, and `start_process` for interactive/long-running processes. Use `workspace_batch` for hash-checked multi-file changes with readback and checks; use `spawn_job` for long background work. Source-level guidance is in [`packages/agent/src/tool-routing.ts`](packages/agent/src/tool-routing.ts).
 
-### Fewer round trips
+### Two different kinds of parallel work
 
-These cut the number of calls the AI needs for common work (each call crosses the relay):
+**1. Command and tool workers — no extra AI models.** `run_parallel` runs independent tool/command steps together. `spawn_job` returns a job ID immediately; `wait_jobs`, `get_job`, `list_jobs` and `cancel_job` manage the result. The default concurrent job limit is 4 (configurable with `BRC_MAX_JOBS`); excess jobs queue. Background jobs can run longer than a normal MCP request (up to the configured maximum of 6 hours), and completed job records can survive an agent restart.
 
-- **`run_command`**: run a non-interactive command and get exit code, stdout and stderr in one call.
-  stdin is closed so prompts fail fast; on timeout (default 60s, max 110s) the process tree is killed;
-  output is capped, keeping the beginning and end. Use `start_process` only for REPLs and servers.
-- **`edit_block` multi-edit**: pass `edits: [{old_string, new_string, expected_replacements?}, ...]`.
-  Edits apply in order; for text files it is all-or-nothing (nothing is written if any edit fails).
-- **`start_search` with `wait: true`**: blocks until done and returns grep-style results
-  (stops at `maxResults`, default 200, or `timeout_ms`, default 30s).
-- **`read_multiple_files` ranges**: `files: [{path, offset, length}]` alongside `paths`.
-- **`delete_file`**: deletes a file or directory (`recursive: true` for non-empty). Refuses filesystem
-  roots, the home directory and allowed roots.
-- **`git_status` / `git_diff` / `git_log`**: compact git output with size caps.
+**2. Host-native AI workers — only if your AI client genuinely supports them.** `worker_tasks`, `worker_patch` and `worker_integrate` coordinate independent source scopes, proposed patches and a parent-owned verified integration. These tools **do not** create extra ChatGPT/Claude/Codex models or invoke an inference API. Coordination plans/claims live in the agent's memory and disappear on agent restart. See [parallel worker coordination](docs/parallel-workers.md).
 
-All path arguments respect `allowedDirectories`, and commands respect `blockedCommands`.
+## Extra MCP servers and marketplace
 
-### Workers: parallel and background jobs
+Built-in plugin management is available in the device agent and relay dashboard. The first agent launch can set up a default plugin set in the background. **Availability depends on the operating system, installed programs, Python, display permissions and successful installation**; listing a default does not guarantee it is ready.
 
-The AI in your chat (Claude, ChatGPT, ...) stays the only one that thinks. It splits a task into pieces and
-hands them to workers on the device, which run in parallel and report back. This works through the plain MCP
-connector: no API key, no second model.
-
-```
-AI plans the task
-  -> run_parallel / spawn_job x N    (workers run at the same time, on one or many devices)
-  -> wait_jobs                       (collects each worker's result; call again until all are done)
-  -> AI reads the results, decides the next step
-```
-
-- **`run_parallel`**: several tool calls and/or commands at once, all results in one call, in input order.
-  Items: `{tool, args}` (any BRC tool) or `{command, cwd?, timeout_ms?}`. Calls still running after
-  `timeout_ms` (default 90s, max 100s) keep going as background jobs (`wait_jobs({group})`).
-- **`spawn_job`**: start a background job and get its id immediately. A job is one `command` or a list of
-  `steps` run in order (e.g. `edit_block` -> build -> test); a failed step stops the job unless
-  `continue_on_error`. Jobs are not limited by the 2-minute call timeout (default 30 min, max 6 h).
-  Up to 4 jobs run at once (`BRC_MAX_JOBS`), the rest are queued. Use `group` to handle related jobs together.
-- **`wait_jobs`**: wait up to 100s for jobs (`ids`, `group`, or everything pending). `mode: "any"` returns as
-  soon as one more finishes. Each finished job's output is shown once.
-- **`get_job`** (full output), **`list_jobs`**, **`cancel_job`** (kills the process tree).
-
-Job steps go through the normal tool dispatcher, so `allowedDirectories` and `blockedCommands` apply. Finished
-jobs are saved to `$BRC_HOME/jobs/` and are still listed after an agent restart.
-
-### Encrypted file transfer
-
-Move a file from one paired device to another without routing it through the relay. The encrypted blob is hosted temporarily on tmpfiles.org:
-
-1. `prepare_file_transfer` on the destination. Returns a `receiveId` and `recipientPublicKey`.
-2. `send_file_transfer` on the source with that public key. The file is encrypted and uploaded;
-   it returns a `transferToken` holding the download URL and a wrapped key (never the raw AES key).
-3. `receive_file_transfer` on the destination with the `receiveId` and `transferToken`.
-   It downloads, authenticates, decrypts and saves the file.
-
-### Plugins: extra MCP servers on your devices
-
-The agent can run other MCP servers on the device and pass their tools to your AI through two tools,
-`list_plugin_tools` and `call_plugin_tool`, so the tool list stays small. Plugins start the first time they are used.
-
-**Installed automatically on first start** (in the background, once; later starts only check files on disk):
-
-| Plugin | What the AI gets | Default |
+| Default plugin | Purpose | Requirements / notes |
 | --- | --- | --- |
-| `playwright` ([Playwright MCP](https://github.com/microsoft/playwright-mcp)) | Control a real browser (uses your Chrome/Edge if installed) | on |
-| `computer-use` ([computer-use-mcp](https://github.com/domdomegg/computer-use-mcp)) | Screenshots, mouse and keyboard | on for Windows and Linux (skipped without a display), **off on macOS** |
-| `ast-grep` | Powers `ast_search` / `ast_rewrite` | on |
-| `rtk` ([rtk](https://github.com/rtk-ai/rtk), open-source `rtk-oss` build) | Shorter command output in `run_command` (`raw=true` for full output) | on |
-| `serena` ([Serena](https://github.com/oraios/serena), GPL-3.0) | Go to definition, find references, symbol edits | on, needs Python |
-| `markitdown` ([MarkItDown MCP](https://github.com/microsoft/markitdown)) | PDF, Word, Excel, PowerPoint to Markdown | on, needs Python |
+| `playwright` | Browser automation | Browser/Playwright MCP must install successfully |
+| `computer-use` | Screen, mouse and keyboard | GUI/display permissions; macOS default is off |
+| `ast-grep` | Structural `ast_search` and `ast_rewrite` | Local ast-grep executable |
+| `rtk` | Compress supported command output | Optional; `run_command` can fall back to ordinary output |
+| `serena` | Symbol-level code intelligence | Python environment and Serena installation |
+| `markitdown` | Convert supported documents to Markdown | Python environment and MarkItDown installation |
 
-Everything goes into `~/.brc` (`$BRC_HOME`): no Docker, no admin rights, no PATH changes. Versions are pinned and
-downloaded programs are checked against a sha256. For the Python plugins the agent uses your Python 3.10+ if it has
-one, otherwise it downloads [uv](https://github.com/astral-sh/uv) and a private Python into `~/.brc`. Only if both
-fail does it ask you to install Python (the python.org installer is downloaded but never run for you; on Linux it
-shows the package-manager command). On macOS, `computer-use` also needs Screen Recording and Accessibility permission.
+**From the relay dashboard:** Open `/admin` to see devices, installed-plugin status and pending AI requests. Use `/admin/marketplace` to search the MCP Registry or add a custom npm, PyPI, command or HTTPS MCP server. The owner explicitly approves installations; Docker-only registry packages are not supported by the marketplace.
 
-**Marketplace**: `/admin/marketplace` searches the official [MCP Registry](https://registry.modelcontextprotocol.io)
-and installs npm, PyPI or hosted (https) servers on the devices you pick; Docker-only servers are not supported.
-A Custom form adds any npm package, PyPI package, command or URL. API keys you enter go straight to the device
-(stored in `~/.brc/plugins.json`, mode 0600) and are never stored on the relay. The AI can search the registry and
-*request* an install with `request_plugin_install`, but nothing is installed until you approve it in `/admin`.
-Plugins run with your user account's permissions; BRC's `allowedDirectories` do not apply inside a plugin.
+**From the agent CLI:**
 
-**Agent flags**: `--list-plugins`, `--add-plugin <id>` (or `--add-plugin <id> --npm pkg@1.2.3 | --pypi pkg==1.2.3 |
---command "cmd args" | --url https://... [--env KEY=VALUE]`), `--remove-plugin <id>`, `--enable-plugin <id>`,
-`--disable-plugin <id>`, `--update-plugins`, `--no-plugins` (or `BRC_PLUGINS=none`). Set
-`BRC_PLUGIN_REMOTE_ADMIN=0` on a device to refuse plugin changes from the relay.
-
-## Install
-
-### 1. Relay (once, on a server or your PC)
-
-**Docker (recommended)**
-```bash
-git clone https://github.com/shahidx0x/better-remote-commander.git && cd better-remote-commander
-cp .env.example .env        # set PUBLIC_URL, BRC_ADMIN_PASSWORD, BRC_SESSION_SECRET
-docker compose --profile cloud up -d                            # VPS with your domain (Caddy, auto-TLS)
-docker compose --profile tunnel --profile cloudflare up -d      # your PC via Cloudflare Tunnel
-docker compose --profile tunnel --profile ngrok up -d           # your PC via a static ngrok domain
-docker compose --profile local up -d                            # localhost only (testing)
+```powershell
+node packages/agent/dist/cli.js --list-plugins
+node packages/agent/dist/cli.js --add-plugin playwright
+node packages/agent/dist/cli.js --enable-plugin playwright
+node packages/agent/dist/cli.js --disable-plugin playwright
+node packages/agent/dist/cli.js --remove-plugin playwright
+node packages/agent/dist/cli.js --update-plugins
 ```
-Images are published to `ghcr.io/shahidx0x/better-remote-commander/relay` and `/agent`.
 
-**Without Docker**
-```bash
-npm i -g brc-relay
-PUBLIC_URL=https://rdp.example.com BRC_ADMIN_PASSWORD=... BRC_SESSION_SECRET=... brc-relay
+Other supported sources: `--npm package@version`, `--pypi package==version`, `--command "executable args"` and `--url https://host/mcp`, with optional `--env KEY=VALUE`. To **skip the default setup on startup**, use `--no-plugins` or `BRC_PLUGINS=none`. To refuse relay-initiated plugin changes on a device, set `BRC_PLUGIN_REMOTE_ADMIN=0`.
+
+Plugin secrets are kept on the device, not persisted by the relay's plugin-request database. **Important:** third-party MCP plugins run with their own process permissions and do not automatically obey BRC's built-in `allowedDirectories` restriction. Install only plugins you trust.
+
+## Authentication, connections and persistence
+
+### Connecting a client
+
+| Method | Endpoint / management | Notes |
+| --- | --- | --- |
+| OAuth MCP | `https://your-domain/mcp` | Normal authorization-code flow, PKCE and owner consent |
+| Private MCP URL | `/auth/links` (creates a private `/c/.../mcp` link) | No OAuth configuration for the client; secret URL, revocable, read-only or full |
+| API key | `/auth/apikeys` | Bearer credential for supported clients/integrations |
+| Pair new device | `/device/verify` | Approve the agent's pairing code |
+| Relay dashboard | `/admin` | Manage devices, plugin requests and recent activity |
+
+Private links can be configured for periods including **1 or 2 years**, but long-lived full-access links carry substantial risk. Anyone holding an active full-access credential may invoke powerful device tools. Use HTTPS, read-only access where possible, and revoke links you no longer use.
+
+### SQLite and MongoDB
+
+- **SQLite (default):** `BRC_DB=/data/relay.sqlite` in the container. Keep the `/data` volume persistent between deployments.
+- **MongoDB (optional):** set `MONGODB_URI` and, when needed, `MONGODB_DB`. Use a MongoDB deployment with its own persistent storage. When MongoDB is configured but unavailable, the relay **does not silently switch to SQLite**.
+- User accounts, pairing, OAuth data, connection links and plugin-request metadata are operational state. **Tool-call activity is live/in-memory only** in this fork; it is not a durable audit transcript.
+- Finished **background-job history** on the agent is distinct from ephemeral live diagnostic logs and ephemeral host-native worker coordination.
+
+## Start from this fork's source
+
+**Requirements:** Node.js 22.13+ (Node 24 is also supported by this checkout), pnpm 11, a reachable relay address, and a modern browser for pairing. Run commands from your existing local checkout; cloning from GitHub will reflect only commits that have actually been pushed.
+
+```powershell
+# In the repository root
+pnpm install --frozen-lockfile
+pnpm build
+pnpm catalog:check
 ```
-Put it behind any HTTPS reverse proxy (Caddy, nginx, Cloudflare Tunnel) that forwards WebSockets, and set `TRUST_PROXY=true`.
 
-### 2. Agent (on every machine you want to control)
+### Local relay on Windows / PowerShell
+
+In the first PowerShell window:
+
+```powershell
+$env:PUBLIC_URL = "http://127.0.0.1:3000"
+$env:PORT = "3000"
+$env:BRC_ADMIN_PASSWORD = "replace-with-a-strong-password"
+$env:BRC_SESSION_SECRET = "replace-with-a-long-random-secret"
+pnpm relay
+```
+
+In another PowerShell window on the device to control:
+
+```powershell
+.\START_AGENT.cmd --relay http://127.0.0.1:3000 --name "My PC"
+```
+
+Open `http://127.0.0.1:3000/device/verify`, sign in and approve the displayed code. Later launches can use `.\START_AGENT.cmd` to reuse the saved connection. `.\START_AGENT.cmd --setup` opens connection settings; `--forget-relay` clears only the agent's *local* saved connection, not the relay's paired-device entry.
+
+For non-Windows devices, run `node packages/agent/dist/cli.js --relay https://your-domain --name "My Device"` from a built checkout. On supported systems the agent also offers `--install-service` and `--uninstall-service`.
+
+### Docker relay / cloud deployment
+
+The Compose file **builds the relay from this checkout** when run with `--build`. Prefer that during development; do not assume an image previously published under the upstream namespace contains this fork's changes.
 
 ```bash
-npm i -g brc-agent          # any OS with Node 22.13+
-brc-agent --relay https://rdp.example.com --name "My PC"
+# Copy .env.example to .env, then edit PUBLIC_URL,
+# BRC_ADMIN_PASSWORD, BRC_SESSION_SECRET and optional storage values.
+docker compose --profile local up -d --build
+# or: docker compose --profile tunnel --profile cloudflare up -d --build
+# or: docker compose --profile tunnel --profile ngrok up -d --build
+# or: docker compose --profile cloud up -d --build
 ```
-The agent prints a pairing code and opens `https://rdp.example.com/device/verify`; sign in and approve.
-Then make it start at login: `brc-agent --install-service`.
 
-Docker agent (Linux servers): `docker run -d -v brc-agent:/home/rdp/.brc -e BRC_RELAY=https://rdp.example.com -e BRC_NAME=srv1 ghcr.io/shahidx0x/better-remote-commander/agent`
+Local test profiles use HTTP on loopback; public deployments need HTTPS and correct `PUBLIC_URL` / `TRUST_PROXY` settings. The relay container can run independently of the Windows desktop agent.
 
-**Android phone** (branch `feat/android-agent`): build the APK from `apps/android-agent`, install it, enter your relay
-URL and approve the pairing. Full guide, tool list and permissions: [docs/android-agent.md](docs/android-agent.md).
+### Important environment variables
 
-### 3. Connect your AI
+| Variable | Purpose |
+| --- | --- |
+| `PUBLIC_URL` | Exact public relay origin; used for OAuth issuer and callback validation |
+| `BRC_ADMIN_USER`, `BRC_ADMIN_PASSWORD` | Dashboard login; use a strong password |
+| `BRC_SESSION_SECRET` | Secret for signed browser sessions |
+| `BRC_DB` | SQLite database path when MongoDB is not selected |
+| `MONGODB_URI`, `MONGODB_DB` | Optional MongoDB storage (no silent SQLite fallback) |
+| `BRC_RELAY`, `BRC_NAME`, `BRC_HOME` | Agent relay URL, device name and local state directory |
+| `BRC_TOOL_PROFILE` | Tool-advertisement profile (e.g. `coding`); not a security boundary |
+| `BRC_FAST_EXEC=0` | Disable the optional fast command-start optimization |
+| `BRC_MAX_JOBS` | Background job concurrency |
+| `BRC_PLUGINS=none` | Skip agent default-plugin installation/setup |
+| `BRC_PLUGIN_REMOTE_ADMIN=0` | Reject remote plugin changes on the device |
+| `BRC_PARSER_WORKERS` | Configure optional parser-worker pool size |
 
-- **Claude**: Settings → Connectors → Add custom connector → URL `https://rdp.example.com/mcp` → Add → Connect → sign in → Allow.
-- **ChatGPT (MCP)**: Settings → Connectors → add `https://rdp.example.com/mcp`.
+See [`.env.example`](.env.example) for relay and tunnel variables. Do not commit a real `.env`, pairing tokens or plugin secrets.
 
-Useful URLs on your relay: `/admin` (devices, live activity), `/device/verify` (pairing), `/auth/clients`, `/health`.
+## Test, verify and benchmark
 
-## Build from source
 ```bash
-pnpm install && pnpm build && pnpm test
-node packages/relay/dist/cli.js      # relay
-node packages/agent/dist/cli.js      # agent
+pnpm build
+pnpm typecheck
+pnpm catalog:check
+pnpm test:unit
+pnpm test:agent
+pnpm test:e2e
+pnpm test
+pnpm bench:io
+pnpm bench:context
 ```
-Requires Node 22.13+ (uses `node:sqlite`) and pnpm 11. Design notes: `docs/architecture.md`. Security notes: `SECURITY.md`.
 
-## License
+`pnpm test:mongo` is an additional opt-in MongoDB integration suite and requires a suitable MongoDB test environment. The normal `pnpm test` runs the unit, agent and end-to-end suites.
 
-MIT — see [LICENSE](LICENSE).
+**Integration validation on this fork (2026-11-16):** build and catalog verification passed; the agent suite reported **195 passed, 2 skipped, 0 failed**; relay unit tests and relay-plugin tests passed; and the end-to-end suites passed. Those runs validate the tested scenarios, not every third-party plugin, operating system, production database or external deployment.
 
-## Credits
+## Operational limits and safety
 
-The agent's tool implementation (`packages/agent/src/core`) is derived from
-[Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP) by Eduard Ruzga and contributors (MIT).
-Desktop Commander's hosted remote relay is proprietary; this project provides an open, self-hostable relay with the same
-device-agent model, plus OAuth for Claude/ChatGPT, device pairing, and a browser dashboard. See [NOTICE](NOTICE).
+- Built-in file tools enforce configured filesystem restrictions, and ordinary commands pass through the agent's command policy. **This is not a full OS sandbox**, especially for arbitrary shells and external MCP plugins.
+- `docker_inventory` and `docker_inspect` are observational tools. `sandbox_run` requires explicitly authorized execution, a running local Docker daemon and an existing suitable image; it does not automatically pull images.
+- `ast_search` / `ast_rewrite` require the ast-grep executable. Language navigation is syntax-aware where supported, but candidate references are not guaranteed semantic/LSP results.
+- `write_pdf` may require a Chrome download. `read_images` previews images but does not provide OCR.
+- Running a command, starting a background job or finding a test command is **not evidence that it passed**. Inspect actual exit status and verification results.
+- If a client caches an old tool list, reconnect or refresh the MCP connector after deploying updated relay/agent code.
+- An experimental Android agent is documented separately; it is **not part of this current `marge-branch` checkout**.
 
-## Multilingual coding harness
+## More documentation
 
-Code navigation and `related_files` are no longer JS/TS-only. C#, Rust, Python, Go, Java, C/C++ and additional portable grammars provide syntax-aware support; unknown text languages retain explicit generic fallback. An agent-local RAM graph, budgeted `context_pack`, scoped Claude/Codex-style guidance and manifest-backed checks improve context retrieval without another model or a graph database. Relay schema reuse preserves live permission checks and bounds per-device load. See [the multilingual guide](docs/polyglot-harness.md) for precise limits and validation.
+- [Architecture and protocol](docs/architecture.md)
+- [Coding-agent setup and diagnostics](docs/coding-agent.md)
+- [Fast batches, images and sandbox](docs/fast-agent.md)
+- [Parallel worker coordination](docs/parallel-workers.md)
+- [Multilingual coding harness](docs/polyglot-harness.md)
+- [Android agent notes (separate work)](docs/android-agent.md)
+- [Security notes](SECURITY.md)
 
-## Faster batches, infrastructure and images
+## License and credits
 
-See [the fast-agent guide](docs/fast-agent.md) for 64-call read waves/write barriers, combined workspace edits/readback/checks, Docker observation, actual image previews, optional restricted execution, automatic cache eviction and `pnpm bench:io`. Diagnostics remain live-only. These tools do not add another model or a graph database.
-
-## Optional host-native worker coordination
-
-See [the parallel-worker guide](docs/parallel-workers.md) for `worker_tasks`, `worker_patch`, and `worker_integrate`. Native AI workers, when the host actually supports them with BRC access, can claim independent scopes and submit patches without directly editing shared source. One parent integrates and verifies. Hosts without native workers keep ordinary batches; no model/API calls are added. `workspace_batch` also supports optional 1-4-way distinct-file publication with settled-wave rollback. Diagnostics and coordinator state remain live-only/RAM-only.
+MIT — see [LICENSE](LICENSE). The device tool core includes work derived from [Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP), by Eduard Ruzga and contributors, under its license. See [NOTICE](NOTICE) for attribution. This repository builds on [shahidx0x/better-remote-commander](https://github.com/shahidx0x/better-remote-commander) and retains additional fork-specific relay, storage, connection and coordination features.
