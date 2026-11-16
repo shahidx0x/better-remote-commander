@@ -9,6 +9,7 @@ import {
   type AgentMessage, type RelayMessage, type CallMessage, type DeviceInfo, type ToolDefinition,
 } from 'brc-shared';
 import { setCurrentRemoteClient, setCurrentCallIsRemote } from '../context.js';
+import { PluginAdmin } from './plugin-admin.js';
 
 export interface WsClientOptions {
   relayUrl: string;          // https://host or wss://host
@@ -22,6 +23,8 @@ export interface WsClientOptions {
   log?: (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => void;
   /** Called when the relay rejects our token. Return true if the caller takes over (no further reconnects). */
   onUnauthorized?: () => Promise<boolean>;
+  /** Called after each successful connect (hello sent). */
+  onConnected?: () => void;
 }
 
 export class WsClient {
@@ -33,10 +36,13 @@ export class WsClient {
   private unauthorizedCount = 0;
   private readonly log: NonNullable<WsClientOptions['log']>;
   readonly wsUrl: string;
+  /** Plugin status reports + relay-driven plugin administration (protocol additions, v1-compatible). */
+  private readonly plugins: PluginAdmin;
 
   constructor(private readonly opts: WsClientOptions) {
     this.log = opts.log ?? (() => {});
     this.wsUrl = WsClient.toWsUrl(opts.relayUrl);
+    this.plugins = new PluginAdmin((m) => this.send(m), this.log);
   }
 
   static toWsUrl(relayUrl: string): string {
@@ -46,10 +52,11 @@ export class WsClient {
     return u.toString();
   }
 
-  start(): void { this.stopped = false; this.connect(); }
+  start(): void { this.stopped = false; this.plugins.start(); this.connect(); }
 
   stop(): void {
     this.stopped = true;
+    this.plugins.stop();
     this.clearPongTimer();
     this.ws?.close(1000, 'agent stopped');
     this.ws = null;
@@ -70,6 +77,7 @@ export class WsClient {
       this.send({ type: 'hello', protocol: BRC_PROTOCOL_VERSION, device: this.deviceInfo(), tools: this.opts.tools });
       this.armPongTimer();
       this.log('info', 'Connected, hello sent');
+      try { this.opts.onConnected?.(); } catch { /* listener errors must not break the socket */ }
     });
 
     ws.on('message', (data) => void this.onMessage(data as Buffer));
@@ -102,7 +110,7 @@ export class WsClient {
     if (this.opts.onUnauthorized && this.unauthorizedCount <= 1) {
       this.stopped = true;
       const handled = await this.opts.onUnauthorized().catch((e) => { this.log('error', `re-pair failed: ${e instanceof Error ? e.message : String(e)}`); return false; });
-      if (handled) return;
+      if (handled) { this.plugins.stop(); return; }
       this.stopped = false;
     }
     const wait = Math.min(DEFAULTS.reconnectMaxMs, 10_000 * this.unauthorizedCount);
@@ -116,6 +124,7 @@ export class WsClient {
     switch (msg.type) {
       case 'welcome':
         this.log('info', `Relay ${msg.relayVersion} (protocol ${msg.protocol})`);
+        this.plugins.sendStatus();
         return;
       case 'ping':
         this.armPongTimer();
@@ -123,6 +132,8 @@ export class WsClient {
         return;
       case 'call':
         return this.handleCall(msg);
+      case 'plugin_admin':
+        return this.plugins.handle(msg);
       case 'error':
         this.log('error', `Relay error ${msg.code}: ${msg.message}`);
         if (msg.fatal) this.stop();

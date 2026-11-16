@@ -42,7 +42,7 @@ function isFile(p: string): boolean {
   try { return fs.statSync(p).isFile(); } catch { return false; }
 }
 
-function findOnPath(program: string, pathVar: string | undefined, exts: string[]): string | null {
+export function findOnPath(program: string, pathVar: string | undefined, exts: string[]): string | null {
   const key = `${program}\0${pathVar}\0${exts.join(';')}`;
   const hit = lookupCache.get(key);
   if (hit && Date.now() - hit.at < LOOKUP_TTL_MS) return hit.found;

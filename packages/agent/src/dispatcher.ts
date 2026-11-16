@@ -9,6 +9,8 @@ import { buildToolDefinitions, EXCLUDED_TOOLS, type ToolDefinition } from './cor
 import { usageTracker } from './core/utils/usageTracker.js';
 import { BRC_TOOL_HANDLERS, buildBrcToolDefinitions } from './tools/brc-tools.js';
 import { JOB_TOOL_HANDLERS, buildJobToolDefinitions, setJobToolExecutor } from './tools/jobs.js';
+import { PLUGIN_TOOL_HANDLERS, buildPluginToolDefinitions } from './tools/plugin-tools.js';
+import { AST_GREP_TOOL_HANDLERS, buildAstGrepToolDefinitions } from './tools/ast-grep.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
 
@@ -47,13 +49,17 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(BRC_TOOL_HANDLERS),
   // Workers: background jobs + parallel fan-out
   ...Object.entries(JOB_TOOL_HANDLERS),
+  // Plugins: MCP servers installed on this device
+  ...Object.entries(PLUGIN_TOOL_HANDLERS),
+  // Structural code search/rewrite (ast-grep binary plugin)
+  ...Object.entries(AST_GREP_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
 
 export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions()]
+    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name));
   }
   return cachedDefs;

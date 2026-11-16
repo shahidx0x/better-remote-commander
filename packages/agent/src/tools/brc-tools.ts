@@ -18,6 +18,7 @@ import { commandManager } from '../core/command-manager.js';
 import { configManager } from '../core/config-manager.js';
 import { getShellSpawnArgs, getRepairedPathExt } from '../core/terminal-manager.js';
 import { planFastExec } from './fast-exec.js';
+import { planRtkCommand, resolveRtk, rtkEnv, annotateRtkOutput, isRtkUsageError } from './rtk.js';
 import type { ServerResult } from '../core/types.js';
 import type { ToolDefinition } from '../core/tool-definitions.js';
 
@@ -30,7 +31,7 @@ const text = (t: string, isError = false): ServerResult => ({ content: [{ type: 
 // ---------------------------------------------------------------------------
 // Bounded output capture: keeps the head and the tail of a stream.
 // ---------------------------------------------------------------------------
-class CappedOutput {
+export class CappedOutput {
   private head = '';
   private tail = '';
   private dropped = 0;
@@ -55,7 +56,7 @@ class CappedOutput {
   }
 }
 
-function killTree(pid: number | undefined): void {
+export function killTree(pid: number | undefined): void {
   if (!pid) return;
   try {
     if (isWindows) {
@@ -85,6 +86,7 @@ export const RunCommandArgsSchema = z.object({
   timeout_ms: z.number().int().min(1).optional().default(60_000),
   shell: z.string().optional(),
   maxOutputChars: z.number().int().min(1_000).max(1_000_000).optional().default(100_000),
+  raw: z.boolean().optional().default(false),
 });
 
 export async function handleRunCommand(args: unknown): Promise<ServerResult> {
@@ -138,24 +140,34 @@ export async function runCommandCore(
     : getShellSpawnArgs(shellPath, wrapped);
   const env = fast?.env ?? baseEnv;
 
-  const started = Date.now();
-  const stdout = new CappedOutput(Math.floor(maxOutputChars * 0.25), Math.ceil(maxOutputChars * 0.75));
-  const stderr = new CappedOutput(Math.floor(maxOutputChars * 0.1), Math.ceil(maxOutputChars * 0.2));
+  type SpawnCfg = { executable: string; args: string[]; useShellOption?: string | boolean; windowsVerbatim?: boolean };
+  type Outcome = {
+    exitCode: number | null; signal: NodeJS.Signals | null; spawnError?: Error; spawnThrew?: boolean;
+    timedOut: boolean; cancelled: boolean; out: string; err: string; ms: number;
+  };
 
-  return await new Promise<ServerResult>((resolve) => {
+  // Spawn once and collect capped output. Never rejects.
+  const execOnce = (c: SpawnCfg, spawnEnv: NodeJS.ProcessEnv): Promise<Outcome> => new Promise<Outcome>((resolve) => {
+    const started = Date.now();
+    const stdout = new CappedOutput(Math.floor(maxOutputChars * 0.25), Math.ceil(maxOutputChars * 0.75));
+    const stderr = new CappedOutput(Math.floor(maxOutputChars * 0.1), Math.ceil(maxOutputChars * 0.2));
+    const done = (o: Partial<Outcome>) => resolve({
+      exitCode: null, signal: null, timedOut: false, cancelled: false,
+      out: stdout.toString(), err: stderr.toString(), ms: Date.now() - started, ...o,
+    });
     let child;
     try {
-      child = spawn(cfg.executable, cfg.args, {
+      child = spawn(c.executable, c.args, {
         cwd,
-        env,
+        env: spawnEnv,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: !isWindows,
-        ...(cfg.useShellOption ? { shell: cfg.useShellOption } : {}),
-        ...(isWindows && cfg.windowsVerbatim ? { windowsVerbatimArguments: true } : {}),
+        ...(c.useShellOption ? { shell: c.useShellOption } : {}),
+        ...(isWindows && c.windowsVerbatim ? { windowsVerbatimArguments: true } : {}),
       });
     } catch (e) {
-      resolve(text(`Failed to start command: ${e instanceof Error ? e.message : String(e)}`, true));
+      done({ spawnError: e instanceof Error ? e : new Error(String(e)), spawnThrew: true });
       return;
     }
 
@@ -176,29 +188,50 @@ export async function runCommandCore(
       settled = true;
       clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
-      const ms = Date.now() - started;
-      if (spawnError) {
-        resolve(text(`Failed to start command with shell "${shellPath}": ${spawnError.message}`, true));
-        return;
-      }
-      const status = cancelled
-        ? 'CANCELLED (process killed)'
-        : timedOut
-        ? `TIMED OUT after ${timeoutMs}ms (process killed)`
-        : `exit code ${exitCode ?? 'null'}${signal ? ` (signal ${signal})` : ''}`;
-      const out = stdout.toString();
-      const err = stderr.toString();
-      let body = `$ ${command}\n[${status} · ${ms}ms${cwd ? ` · cwd ${cwd}` : ''}]\n`;
-      body += out ? `\n--- stdout ---\n${out.replace(/\s+$/, '')}\n` : '\n(no stdout)\n';
-      if (err) body += `\n--- stderr ---\n${err.replace(/\s+$/, '')}\n`;
-      // run_command never flags a completed process as an error (historical behaviour);
-      // jobs opt in so a failing step can stop the job.
-      resolve(text(body, !!opts.failOnNonZero && (cancelled || timedOut || exitCode !== 0)));
+      done({ exitCode, signal, spawnError, timedOut, cancelled });
     };
 
     child.on('error', (e) => finish(null, null, e));
     child.on('close', (code, signal) => finish(code, signal));
   });
+
+  const format = (r: Outcome, note?: string): ServerResult => {
+    const { exitCode, signal, cancelled, timedOut } = r;
+    const status = cancelled
+      ? 'CANCELLED (process killed)'
+      : timedOut
+      ? `TIMED OUT after ${timeoutMs}ms (process killed)`
+      : `exit code ${exitCode ?? 'null'}${signal ? ` (signal ${signal})` : ''}`;
+    let body = `$ ${command}\n[${status} · ${r.ms}ms${cwd ? ` · cwd ${cwd}` : ''}]\n`;
+    if (note) body += `${note}\n`;
+    body += r.out ? `\n--- stdout ---\n${r.out.replace(/\s+$/, '')}\n` : '\n(no stdout)\n';
+    if (r.err) body += `\n--- stderr ---\n${r.err.replace(/\s+$/, '')}\n`;
+    // run_command never flags a completed process as an error (historical behaviour);
+    // jobs opt in so a failing step can stop the job.
+    return text(body, !!opts.failOnNonZero && (cancelled || timedOut || exitCode !== 0));
+  };
+
+  // rtk: compress the output of supported simple commands (see rtk.ts). Falls back to the
+  // normal run when rtk cannot start or rejects the arguments before running anything.
+  const rtkArgs = planRtkCommand({
+    command,
+    raw: parsed.data.raw,
+    posix: !['cmd', 'powershell', 'pwsh'].includes(shellName),
+  });
+  const rtkPath = rtkArgs ? resolveRtk() : null;
+  if (rtkArgs && rtkPath) {
+    const r = await execOnce({ executable: rtkPath, args: rtkArgs }, rtkEnv(env));
+    if (!r.spawnError && !(r.exitCode !== null && isRtkUsageError(r.exitCode, r.err))) {
+      const a = annotateRtkOutput(r.out, r.err);
+      return format({ ...r, out: a.stdout, err: a.stderr }, a.note);
+    }
+    if (opts.signal?.aborted) return format(r);
+  }
+
+  const r = await execOnce(cfg, env);
+  if (r.spawnThrew) return text(`Failed to start command: ${r.spawnError?.message}`, true);
+  if (r.spawnError) return text(`Failed to start command with shell "${shellPath}": ${r.spawnError.message}`, true);
+  return format(r);
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +439,8 @@ export function buildBrcToolDefinitions(): ToolDefinition[] {
         'Output is capped (maxOutputChars, default 100000) keeping the beginning and end.',
         'Pass cwd (absolute path, must be inside allowed directories) to choose the working directory.',
         'Blocked commands (config blockedCommands) are rejected.',
+        'Output of common dev commands (git status/log/diff, cargo/go/pytest/vitest/jest/tsc/eslint, npm run, ...)',
+        'may be compressed by rtk; such results say "[compressed by rtk ...]". Pass raw=true for the exact, uncompressed output.',
       ].join('\n'),
       inputSchema: zodToJsonSchema(RunCommandArgsSchema),
       annotations: { title: 'Run Command', readOnlyHint: false, destructiveHint: true, openWorldHint: true },

@@ -55,6 +55,7 @@ const CommandStepSchema = z.object({
   cwd: z.string().optional().describe('Working directory (absolute, inside allowed directories).'),
   timeout_ms: z.number().int().min(1).optional().describe('Per-command timeout. Default: whatever is left of the job timeout.'),
   shell: z.string().optional(),
+  raw: z.boolean().optional().describe('Bypass rtk output compression (full output).'),
   label: z.string().max(120).optional(),
 });
 
@@ -205,7 +206,7 @@ function abortable<T>(p: Promise<T>, signal: AbortSignal, onAbort: () => T): Pro
 async function execStep(step: Step, signal: AbortSignal, remainingMs: number): Promise<ServerResult> {
   if ('command' in step) {
     return runCommandCore(
-      { command: step.command, cwd: step.cwd, shell: step.shell, timeout_ms: Math.max(1, Math.min(step.timeout_ms ?? remainingMs, remainingMs)) },
+      { command: step.command, cwd: step.cwd, shell: step.shell, raw: step.raw, timeout_ms: Math.max(1, Math.min(step.timeout_ms ?? remainingMs, remainingMs)) },
       { maxTimeoutMs: remainingMs, signal, failOnNonZero: true },
     );
   }
