@@ -194,8 +194,10 @@ test('manual OAuth recovery validates issuer, callback, PKCE and explicit owner 
   } finally { store.close(); }
 });
 
-test('MCP catalog is stable before agent connects, while online, and after disconnect', async () => {
-  const { liveTools, BUNDLED_AGENT_TOOL_CATALOG } = await import('../dist/mcp/server.js').then(async m => ({
+test('MCP full catalog is stable before agent connects, while online, and after disconnect', async () => {
+  const previousProfile=process.env.BRC_MCP_TOOL_PROFILE;
+  process.env.BRC_MCP_TOOL_PROFILE='full';
+  const { liveTools, BUNDLED_AGENT_TOOL_CATALOG, RETIRED_PUBLIC_AGENT_TOOLS } = await import('../dist/mcp/server.js').then(async m => ({
     ...m, BUNDLED_AGENT_TOOL_CATALOG: (await import('../dist/mcp/agent-tools.catalog.js')).BUNDLED_AGENT_TOOL_CATALOG,
   }));
   const hub = new DeviceHub('test', () => {});
@@ -205,8 +207,8 @@ test('MCP catalog is stable before agent connects, while online, and after disco
     const offline = await liveTools(hub, store, owner.id);
     const names = offline.tools.map(t => t.name);
     assert.equal(offline.online, 0);
-    assert.equal(names.length, BUNDLED_AGENT_TOOL_CATALOG.length);
-    assert.ok(names.includes('read_file') && names.includes('write_file') && names.includes('run_command') && names.includes('workspace_batch'));
+    assert.equal(names.length, BUNDLED_AGENT_TOOL_CATALOG.length - RETIRED_PUBLIC_AGENT_TOOLS.size);
+    assert.ok(names.includes('read_file') && names.includes('write_file') && names.includes('run_command') && !names.includes('workspace_batch'));
     assert.ok(offline.tools.every(t => t.inputSchema?.properties?.deviceId), 'all tools have device targeting property');
     const readFile = offline.tools.find(t => t.name === 'read_file');
     assert.equal(typeof readFile.description, 'string');
@@ -231,7 +233,11 @@ test('MCP catalog is stable before agent connects, while online, and after disco
     assert.equal(recovered.online, 0);
     assert.deepEqual(recovered.tools.map(t => t.name), names, 'offline and reconnect states keep the same base catalog');
     assert.equal(hub.resolveDefault(owner.id), null, 'advertised offline tools are not executable on an offline device');
-  } finally { hub.close(); store.close(); }
+  } finally {
+    hub.close(); store.close();
+    if(previousProfile===undefined) delete process.env.BRC_MCP_TOOL_PROFILE;
+    else process.env.BRC_MCP_TOOL_PROFILE=previousProfile;
+  }
 });
 
 test('LLM routing guidance chooses batches for known files and read-only batching cannot mutate', async () => {
@@ -242,8 +248,8 @@ test('LLM routing guidance chooses batches for known files and read-only batchin
   assert.deepEqual(BUNDLED_AGENT_TOOL_CATALOG.slice(0, 3).map(t => t.name),
     ['read_multiple_files', 'batch_tools', 'workspace_batch'], 'batch-first discovery order');
   assert.match(TOOL_ROUTING_GUIDANCE, /2\+ known files.*read_multiple_files/);
-  assert.match(TOOL_ROUTING_GUIDANCE, /batch_tools/);
-  assert.match(TOOL_ROUTING_GUIDANCE, /workspace_batch/);
+  assert.match(TOOL_ROUTING_GUIDANCE, /run_parallel/);
+  assert.match(TOOL_ROUTING_GUIDANCE, /write_file/);
   assert.match(definitions.get('read_multiple_files').description, /PREFERRED FOR 2 OR MORE KNOWN FILE PATHS/);
   assert.match(definitions.get('read_file').description, /ONE FILE OR URL ONLY/);
   assert.doesNotMatch(definitions.get('write_file').description, /CHUNKING IS STANDARD PRACTICE|25-30 lines/);

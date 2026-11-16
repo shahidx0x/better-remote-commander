@@ -54,7 +54,9 @@ ChatGPT / Claude / other MCP client
 
 ## MCP tool catalog
 
-The **default full profile** advertises **87 built-in MCP tools**: **80 agent tools** plus **7 relay tools**. `BRC_TOOL_PROFILE=coding` may hide some tools from discovery; that profile is not an authorization boundary. Optional third-party plugins expose their own tools dynamically through `list_plugin_tools` and `call_plugin_tool`, so they are **not** included in the 87.
+The **default Core MCP profile** advertises **34 everyday agent tools**, plus relay connection/marketplace/skills tools. Set `BRC_MCP_TOOL_PROFILE=focused` for 44 or `full` for 60. We retired 20 overlapping or unnecessary **public tool entry points** across every profile, including the public multi-file writer, redundant editors, ad-hoc verification and Docker-specific tools. The 80 existing agent handlers remain installed for backward compatibility, and the internal hash-checked batch engine is still used for worker integration. Public discovery remains small: no stale tool list gets a new permission or bypasses ownership checks. After deploying, **refresh the MCP tool definitions in ChatGPT**. `BRC_TOOL_PROFILE=coding` is a separate agent-side filter.
+
+To write two files, call **`write_file` once for each file** and verify each result; use `mode=rewrite` for the first chunk and `mode=append` for later chunks. For precise source edits, read current content/hash and use `edit_block`. There is no public multi-file writer in the simplified MCP catalog. See [ChatGPT tool selection and recovery](docs/chatgpt-mcp-tool-guide.md).
 
 ### Relay tools (7)
 
@@ -68,7 +70,7 @@ The **default full profile** advertises **87 built-in MCP tools**: **80 agent to
 | `search_skills_catalog` | Search skills.sh with optional Vercel OIDC authentication; unavailable without it |
 | `request_skill_install` | Request owner review of a skill; **no automatic installation** |
 
-### Agent tools (80)
+### Active public agent tools (60 in `BRC_MCP_TOOL_PROFILE=full`)
 
 | Category | Tools |
 | --- | --- |
@@ -77,21 +79,19 @@ The **default full profile** advertises **87 built-in MCP tools**: **80 agent to
 | Encrypted transfer (3) | `prepare_file_transfer`, `send_file_transfer`, `receive_file_transfer` |
 | Search (4) | `start_search`, `get_more_search_results`, `stop_search`, `list_searches` |
 | Commands and processes (8) | `run_command`, `start_process`, `read_process_output`, `interact_with_process`, `force_terminate`, `list_sessions`, `list_processes`, `kill_process` |
-| Live status and cancellation (4) | `get_usage_stats`, `get_recent_tool_calls`, `agent_status`, `cancel_operation` |
+| Live status and cancellation (2) | `agent_status`, `cancel_operation` |
 | Git inspection (3) | `git_status`, `git_diff`, `git_log` |
-| Coding operations (6) | `read_code_file`, `read_code_context`, `edit_files`, `batch_tools`, `verify_project`, `project_index` |
+| Coding snapshot (1) | `read_code_file` |
 | Project discovery (3) | `project_context`, `project_preferences`, `project_map` |
-| Code navigation (6) | `read_code_ranges`, `code_outline`, `find_symbols`, `read_symbol`, `find_references`, `related_files` |
-| Refactoring and diagnostics (3) | `replace_symbol`, `edit_code_ranges`, `code_diagnostics` |
-| Checks and reviews (6) | `vscode_tasks`, `test_impact`, `discover_checks`, `run_project_checks`, `coding_session`, `review_changes` |
+| Code navigation (5) | `code_outline`, `find_symbols`, `read_symbol`, `find_references`, `related_files` |
+| Verified project checks (2) | `discover_checks`, `run_project_checks` |
 | Language context (4) | `language_capabilities`, `code_graph`, `context_pack`, `session_handoff` |
-| Coordinated workspace edits (1) | `workspace_batch` |
-| Docker, images and isolation (4) | `docker_inventory`, `docker_inspect`, `read_images`, `sandbox_run` |
+| Image preview (1) | `read_images` |
 | Parallel/background jobs (6) | `run_parallel`, `spawn_job`, `wait_jobs`, `get_job`, `list_jobs`, `cancel_job` |
-| Device MCP plugins and AST (4) | `list_plugin_tools`, `call_plugin_tool`, `ast_search`, `ast_rewrite` |
+| Device plugins and AST search (3) | `list_plugin_tools`, `call_plugin_tool`, `ast_search` |
 | Optional native-worker coordination (3) | `worker_tasks`, `worker_patch`, `worker_integrate` |
 
-**Choosing the right tool:** Use `read_file` for one known file, `read_multiple_files` for multiple known files, `start_search` for unknown locations, `run_command` for short one-shot commands, and `start_process` for interactive/long-running processes. Use `workspace_batch` for hash-checked multi-file changes with readback and checks; use `spawn_job` for long background work. Source-level guidance is in [`packages/agent/src/tool-routing.ts`](packages/agent/src/tool-routing.ts).
+**Choosing the right tool:** Use `read_file` for one known file, `read_multiple_files` for multiple known files, `write_file` for creation/rewrite/append and `edit_block` for focused existing-file edits. Use `run_command` for one-shot commands, `start_process` for interactive programs and `run_parallel` for independent work. Use `discover_checks` and `run_project_checks` for actual check evidence. Tool selection guidance lives in [`packages/agent/src/tool-routing.ts`](packages/agent/src/tool-routing.ts) and the relay MCP initialization rules.
 
 ### Two different kinds of parallel work
 
@@ -225,6 +225,8 @@ Local test profiles use HTTP on loopback; public deployments need HTTPS and corr
 | `BRC_IMAGE_WORKERS` | Concurrent native image decodes per preview request (default 2; 1-3 supported) |
 | `BRC_SKILLS_API_TOKEN` | Optional short-lived Vercel OIDC JWT for skills.sh catalog search; manual skills import needs no token |
 | `BRC_MCP_TOKEN_ESTIMATES` | `1` (default) automatically estimates MCP-visible text tokens in a worker; set `0` to disable |
+| `BRC_MCP_TOOL_PROFILE` | `core` (default, 34 agent tools), `focused` (44), or `full` (60). Set on the **relay**; 20 retired tools are not publicly advertised in any profile. |
+| `BRC_MAX_RESULT_BYTES` | Optional **agent** setting, default 524288 bytes (512 KiB), clamped from 64 KiB to 512 KiB; the relay also enforces a 512 KiB result forwarding cap for old agents. |
 
 See [`.env.example`](.env.example) for relay and tunnel variables. Do not commit a real `.env`, pairing tokens or plugin secrets.
 

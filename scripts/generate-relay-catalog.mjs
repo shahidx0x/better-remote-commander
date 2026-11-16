@@ -20,7 +20,14 @@ function portableDescription(name, original) {
   let start;
   while ((start = description.indexOf(pathLead)) !== -1) {
     const end = description.indexOf(pathTail, start);
-    if (end < 0) throw new Error('Unexpected platform-specific path guidance for ' + name);
+    // Discovery descriptions may be abbreviated before catalog generation.
+    // A partial OS-specific paragraph has no reliable end marker: drop the
+    // incomplete tail rather than crashing generation or leaking the builder OS.
+    if (end < 0) {
+      description = description.slice(0,start) +
+        'IMPORTANT: Use absolute paths appropriate for the connected device.';
+      break;
+    }
     description = description.slice(0, start)
       + 'IMPORTANT: Use absolute paths appropriate for the connected device. Relative paths may depend on the active shell and working directory.'
       + description.slice(end + pathTail.length);
@@ -30,10 +37,11 @@ function portableDescription(name, original) {
     // Each connected agent still supplies its own actual OS/shell at runtime.
     const from = description.indexOf('Running on ');
     const to = description.indexOf('The command runs on the connected device', from);
-    if (from < 0 || to < 0) throw new Error('Unexpected start_process platform guidance');
-    description = description.slice(0, from)
-      + 'Choose commands for the connected device operating system and shell.\n                '
-      + description.slice(to);
+    if (from >= 0) {
+      const portable = 'Choose commands for the connected device operating system and shell.';
+      description = description.slice(0, from) + portable +
+        (to < 0 ? '' : '\n' + description.slice(to));
+    }
   }
   return description;
 }

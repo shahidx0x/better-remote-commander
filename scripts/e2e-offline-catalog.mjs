@@ -17,7 +17,9 @@ async function rpc(endpoint, headers, method, params, id) {
 }
 const health = await (await fetch(base + '/health')).json();
 step('testing while zero devices are connected', health.devices === 0);
-step('health advertises stable tool count for deployment diagnostics', health.mcpTools === 87);
+step('health advertises the selected catalog profile and actual tool count',
+  health.mcpTools === ({core:34,focused:44,full:60}[health.mcpToolProfile] + 7) &&
+  health.mcpToolProfile === (process.env.BRC_MCP_TOOL_PROFILE || 'core'));
 const reg = await (await fetch(base + '/register', { method: 'POST', headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
     client_name: 'offline-catalog-e2e', redirect_uris: ['https://tools.example.test/oauth/callback'],
@@ -52,13 +54,15 @@ const H = { authorization: 'Bearer ' + tok.access_token };
 const listed = await rpc(base + '/mcp', H, 'tools/list', {}, 1);
 const publishedTools = listed.msg?.result?.tools ?? [];
 const names = publishedTools.map(t => t.name);
-step('all 87 tools describe WHEN to use them and WHAT to use instead',
-  publishedTools.length === 87 && publishedTools.every(t => t.description.startsWith('USE WHEN: ') && t.description.includes('USE INSTEAD: ')));
+step('default core tools describe WHEN and HOW to use them',
+  publishedTools.length >= 35 && publishedTools.length <= 55 &&
+  publishedTools.every(t=>t.description.startsWith('USE WHEN: ')&&t.description.includes('USE INSTEAD: ')) &&
+  !publishedTools.some(t=>['docker_inventory','write_pdf','ast_rewrite'].includes(t.name)));
 step('a single-run command is not confused with an interactive process',
   publishedTools.find(t => t.name === 'run_command')?.description.includes('ONE-SHOT command')
   && publishedTools.find(t => t.name === 'start_process')?.description.includes('run_command'));
 step('first connection advertises file and terminal tools while agent is offline',
-  listed.status === 200 && names.length >= 60 && names.includes('list_devices') && names.includes('read_file') && names.includes('write_file') && names.includes('start_process') && names.includes('workspace_batch'));
+  listed.status === 200 && names.length >= 35 && names.includes('list_devices') && names.includes('read_file') && names.includes('write_file') && names.includes('start_process') && !names.includes('workspace_batch') && !names.includes('batch_tools'));
 const offline = await rpc(base + '/mcp', H, 'tools/call', { name: 'read_file', arguments: { path: '/fake/offline/path' } }, 2);
 step('advertised offline tools fail safely instead of claiming to run',
   offline.status === 200 && offline.msg?.result?.isError === true && /No device is online/i.test(offline.msg?.result?.content?.[0]?.text ?? ''));

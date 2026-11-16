@@ -27,6 +27,7 @@ import { parseAuthorizeRequest, validateClientId, validateRedirectUri, approveCa
 import { Sessions } from './auth/sessions.js';
 import { createMcpServer } from './mcp/server.js';
 import { BUNDLED_AGENT_TOOL_CATALOG } from './mcp/agent-tools.catalog.js';
+import { exposeMcpAgentTool, mcpToolProfile } from './mcp/server.js';
 import * as pages from './pages/html.js';
 import * as adminPages from './pages/admin.js';
 import { LoginLimiter } from './auth/rate-limit.js';
@@ -236,7 +237,9 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
       catch { return res.status(503).json({ ok: false, storage: 'mongodb', error: 'database_unavailable' }); }
     }
     res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl,
-      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1 + PLUGIN_RELAY_TOOLS.length + SKILL_RELAY_TOOLS.length, storage: cfg.mongoUri ? 'mongodb' : 'sqlite', relayInstance: hub.instanceId });
+      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.filter(t=>exposeMcpAgentTool(t.name)).length + 1 + PLUGIN_RELAY_TOOLS.length + SKILL_RELAY_TOOLS.length,
+      mcpToolProfile: mcpToolProfile(),
+      storage: cfg.mongoUri ? 'mongodb' : 'sqlite', relayInstance: hub.instanceId });
   });
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */

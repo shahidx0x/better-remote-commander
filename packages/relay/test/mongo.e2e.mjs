@@ -122,7 +122,8 @@ try {
   const base = 'http://127.0.0.1:' + port;
   const res = await fetch(base + '/health');
   const health = await res.json();
-  assert.equal(health.ok, true); assert.equal(health.storage, 'mongodb'); assert.equal(health.mcpTools, 87);
+  assert.equal(health.ok, true); assert.equal(health.storage, 'mongodb');
+  assert.equal(health.mcpTools, ({core:34,focused:44,full:60}[health.mcpToolProfile]+7));
   assert.equal(health.relayInstance, relay.hub.instanceId, 'health must identify the relay process handling device sockets');
   assert.equal((await relay.store.getDeviceByToken(originalDeviceToken)).device_id, 'workstation');
 

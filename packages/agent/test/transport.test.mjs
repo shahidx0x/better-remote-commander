@@ -12,6 +12,10 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,ms=15000){const start=Date.now();while(Date.now()-start<ms){if(await fn())return;await sleep(30);}throw new Error('Timed out waiting for integration fixture');}
 
 test('real MCP coding workflow, cancellation and bounded live diagnostics',{timeout:45000},async t=>{
+ // This comprehensive integration suite explicitly exercises the *full*
+ // catalog. Default-core discovery is covered separately by core-profile.test.
+ const previousProfile=process.env.BRC_MCP_TOOL_PROFILE;
+ process.env.BRC_MCP_TOOL_PROFILE='full';
  const dir=mkdtempSync(path.join(realpathSync.native(tmpdir()),'brc-transport-test-'));
  const project=path.join(dir,'project'),home=path.join(dir,'agent');await fs.mkdir(project);
  const p=path.join(project,'sample.ts'),source='const sourceSecret = "DO_NOT_LOG_SOURCE_7e164";\nconst value = 1;\n';await fs.writeFile(p,source);
@@ -34,7 +38,9 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
   await until(()=>relay.hub.list().length===1);
   await rpc('initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'integration-test',version:'1'}});
   await t.test('new tool definitions and exact snapshots traverse MCP',async()=>{
-   const d=await rpc('tools/list',{});assert.ok(d.tools.some(x=>x.name==='edit_files'));assert.ok(d.tools.some(x=>x.name==='agent_status'));
+   const d=await rpc('tools/list',{});
+   assert.ok(d.tools.some(x=>x.name==='edit_block') && d.tools.some(x=>x.name==='agent_status'));
+   assert.ok(!d.tools.some(x=>x.name==='edit_files'),'duplicate public edit_files must be retired; legacy direct invocation is covered separately');
    const r=await tool('read_code_file',{path:p});assert.equal(r.isError,false);assert.ok(r.structuredContent.sha256);assert.ok(r._meta.callId);assert.equal(r._meta.deviceId,'integration-pc');
   });
   await t.test('hash-checked editing and batch reads work through the relay',async()=>{
@@ -46,7 +52,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    const r=await tool('verify_project',{cwd:project,commands:[{name:'syntax check',command:'node --check sample.ts'}]});assert.equal(r.isError,false);assert.equal(r.structuredContent.passed,true);
   });
   await t.test('project context, symbol tools and safe previews traverse real MCP',async()=>{
-   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,87);assert.ok(defs.tools.some(t=>t.name==='coding_session'));
+   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,67);assert.ok(defs.tools.some(t=>t.name==='run_project_checks'));assert.ok(!defs.tools.some(t=>t.name==='workspace_batch'));
    const context=await tool('project_context',{path:project,focus:'sample.ts'});assert.equal(context.isError,false);assert.equal(context.structuredContent.package.packageManager,'pnpm');assert.ok(context.structuredContent.instructions.some(x=>x.path==='AGENTS.md'));
    const outline=await tool('code_outline',{path:p});assert.equal(outline.isError,false);assert.ok(outline.structuredContent.symbols.some(s=>s.name==='value'));
    const symbol=await tool('read_symbol',{path:p,name:'value'});assert.equal(symbol.isError,false);assert.match(symbol.structuredContent.text,/value = 2/);
@@ -136,5 +142,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
  }finally{
   const exited=child.exitCode!==null?Promise.resolve():once(child,'exit');child.kill('SIGTERM');await Promise.race([exited,sleep(2500)]);if(child.exitCode===null){child.kill('SIGKILL');await Promise.race([exited,sleep(1000)]);}
   relay.http.closeAllConnections();await relay.close();await fs.rm(dir,{recursive:true,force:true,maxRetries:8,retryDelay:100});
+  if(previousProfile===undefined)delete process.env.BRC_MCP_TOOL_PROFILE;
+  else process.env.BRC_MCP_TOOL_PROFILE=previousProfile;
  }
 });

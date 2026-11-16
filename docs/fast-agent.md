@@ -1,18 +1,18 @@
-# Fast coding tools, Docker observation, images and optional isolation
+# BRC coding tools, bounded results and legacy tool reference
 
-This checkout exposes 70 agent tools plus the relay's `list_devices` (71 total in the default full profile). The work happens on the local agent; the relay authenticates, routes requests and advertises tools. There is no new model, orchestration framework, graph database or dependency installation for this upgrade.
+This checkout implements an 80-handler compatibility catalog, but the relay now publicly advertises only **34 Core tools** by default (44 Focused / 60 Full). The 20 retired public entries include competing multi-file editors and Docker-specific tools. The agent executes authorized calls; the relay authenticates, routes and limits results. Existing internal worker-batch functionality is retained. No new model, orchestration framework or graph database is required.
 
 ## The short workflow
 
 1. When **two or more paths are already known**, call `read_multiple_files` **once** with `paths` or per-file `files` ranges. Avoid multiple separate `read_file` calls or Promise.all(read_file). The tool itself overlaps up to eight file reads.
-2. For **one** file/range, use `read_file`; for many narrow code ranges requiring hashes use `read_code_ranges`. If the paths are **unknown**, prefer `start_search` with `wait=true` or `read_code_context`, not repeated polling.
-3. For multiple **different independent** read/context operations use one `batch_tools` call (auto mode, up to four read calls at once); don't nest batches.
-4. For coordinated edits/creation + readback + agreed checks use `workspace_batch`. It previews by default and requires hashes to modify existing files.
+2. For **one** file/range, use `read_file`; use `read_code_file` if the caller needs the SHA-256 for a safe edit. If paths are **unknown**, prefer `start_search` with `wait=true`, then read the matches.
+3. For independent non-file operations use `run_parallel` (bounded concurrency and combined output). For many known file reads prefer `read_multiple_files`. Do not nest batches.
+4. For file changes use `write_file` (explicit rewrite/append) or `edit_block` (focused replacement). For multiple files, apply each authorized change in a deliberate sequence and verify the result. The internal `workspaceBatch` engine is reserved for worker integration and legacy compatibility.
 5. Load `project_context` or a focused `context_pack` only when conventions are unknown; avoid blanket context dumps.
-6. Inspect real containers with `docker_inventory` / `docker_inspect` and image assets with `read_images` only when relevant.
-7. Use `run_command` for one-shot commands with a final exit code; use `start_process` only for interactive or long-running processes. Use `sandbox_run` only for explicitly requested isolation.
+6. Inspect image assets with `read_images` when appropriate. Docker-specific MCP tools are retired from public discovery; run system commands only if the user authorized them.
+7. Use `run_command` for one-shot commands with a final exit code; use `start_process` only for interactive or long-running processes. The retired `sandbox_run` tool is not advertised.
 
-Every one of the 70 agent tools has an explicit `USE WHEN` and `USE INSTEAD` decision rule in `packages/agent/src/tool-routing.ts`. These rules are prepended to the local agent's tool definitions and the relay's stable catalog, including when an older agent reconnects. CI tests verify that every tool has a rule and that schemas/permissions are unchanged. The relay's additional `list_devices` tool has its own decision rule. The catalog adds no model call, network hop, persistent data, or project index.
+Each legacy agent handler has a `USE WHEN`/`USE INSTEAD` rule in `packages/agent/src/tool-routing.ts`; the relay serves only the non-retired subset. These rules are prepended to the local agent's tool definitions and the relay's stable catalog, including when an older agent reconnects. CI tests verify that every tool has a rule and that schemas/permissions are unchanged. The relay's additional `list_devices` tool has its own decision rule. The catalog adds no model call, network hop, persistent data, or project index.
 
 **Ground claims in tool output:** lexical matches are not semantic references, syntax checks are not compiler passes, Docker errors are not empty inventories, and starting a command is not completing it. Only report executed checks, edits, service status and worker results that the actual tools verified. A model/host still chooses the tools; these rules are guidance, not a way to force third-party models to obey.
 
@@ -25,7 +25,7 @@ The BRC agent bounds direct file I/O with explicit pagination and errors:
 - `read_file` defaults to 300 lines on new installs (configurable `fileReadLineLimit`), hard max 2,000 lines. Model-facing plain text is capped at 128,000 characters and UI preview at 256,000. Huge single lines return **OUTPUT TRUNCATED**; request a smaller range or use `read_code_file` for character offsets.
 - `read_multiple_files` defaults to 200 lines per file, accepts explicit per-file ranges up to 2,000 lines, and caps returned content to 48,000 text characters per item, 160,000 characters combined and 2 MiB of image data. Truncated results are labeled; use smaller batches or `read_images`.
 - `write_file` defaults to 1,000 lines per call on new installs, configurable with `fileWriteLineLimit` (hard max: 2,000), and **1 MiB UTF-8 per call**. Oversized writes return structured `WRITE_LINE_LIMIT` or `WRITE_SIZE_LIMIT` **before changing a file**. Existing nonempty files require explicit `mode=rewrite` or `mode=append`, otherwise `WRITE_MODE_REQUIRED` prevents accidental overwrite.
-- Write larger new files in deliberate rewrite + append chunks. For existing source edits, use small, hash-checked `edit_block`, `edit_code_ranges` or bounded `workspace_batch`. The limits apply to individual requests, **not total project size**. An append operation is not automatically idempotent; inspect results before retrying.
+- Write larger new files in deliberate rewrite + append chunks. For existing source edits, use focused, hash-preconditioned `edit_block` changes. Public batch writers are retired; internal worker integration still uses hash-checked batching. Limits apply per request, **not total project size**. Append is not automatically idempotent; inspect results before retrying.
 - `project_context` now supports a planned focus file and missing nested directories, reading existing scoped instructions. Missing project roots return `PROJECT_NOT_FOUND`; symlink/junction escapes remain blocked.
 - `run_project_checks` now returns `CHECK_FAILED` with the failing check, exit code and bounded log excerpt (up to 8,000 chars per step) rather than an opaque `TOOL_FAILED`. It still marks failed tests as failures. `VERIFICATION_CHANGED` indicates files changed while checks were running. Use `discover_checks` to find valid check IDs.
 
@@ -43,7 +43,7 @@ To avoid very large MCP replies, `run_parallel`, `wait_jobs`, and `get_job` cap 
 
 Each job step retains a bounded output excerpt in memory; job count is bounded. If the host disconnects or the agent restarts, inspect target files and hashes before reconstructing plans; in-RAM worker plans do not survive an agent restart. Actual host-native subagents are outside BRC: worker coordination stages/verifies patches, but does not spawn models.
 
-### `batch_tools`
+### Retired public tool: `batch_tools` (legacy compatibility reference)
 
 A batch accepts up to 64 calls. `mode: "auto"` is the default: consecutive independent read tools run in waves of at most four, with writes and stateful tools acting as sequential barriers. This preserves read-before-write and write-before-read ordering inside a batch. `mode: "sequential"` keeps strict serial execution. `mode: "parallel"` accepts only independent read tools and rejects a write before execution.
 
@@ -51,7 +51,7 @@ A batch accepts up to 64 calls. `mode: "auto"` is the default: consecutive indep
 
 Responses are compact by default: structured data is not duplicated again as text inside each child result. `maxChars` defaults to 96,000 and is capped at 256,000. Per-entry output is bounded, truncation is explicit, and work stops before the shared result budget is exhausted. This is an output budget, not permission to assume an incomplete result is complete. Image binaries are returned through `read_images`, not escaped inside a generic JSON batch.
 
-### `workspace_batch`
+### Internal/legacy tool: `workspace_batch` (not publicly advertised)
 
 The `path` is a project root. One call can contain up to 64 changes, 64 reads and five existing check IDs. The sequence is: validate all changes and check IDs, commit changes, return readbacks/hashes, then run selected checks. `dryRun` defaults to true. Checks never run in a dry run.
 

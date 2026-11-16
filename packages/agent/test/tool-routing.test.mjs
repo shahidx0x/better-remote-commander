@@ -58,6 +58,20 @@ test('confusing neighboring tools are differentiated without claiming unsupporte
   assert.match(TOOL_CHOICES['worker_patch'].caveat, /does not apply/i);
 });
 
+test('tool descriptions lead with actionable next calls and enforce discovery budgets', () => {
+  const required=['read_file','read_multiple_files','read_code_file','write_file','workspace_batch','run_parallel','get_job','worker_tasks'];
+  for(const name of required){
+    const desc=byName.get(name)?.description;
+    assert.ok(desc?.includes('HOW / NEXT:'),name+' missing executable next-step guidance');
+    assert.ok(desc.length<=3000,name+' oversized tool discovery description');
+  }
+  assert.match(byName.get('read_file').description,/PDF|pages/);
+  assert.match(byName.get('write_file').description,/chunk/);
+  assert.match(byName.get('run_parallel').description,/wait_jobs/);
+  const total=definitions.reduce((n,x)=>n+x.description.length,0);
+  assert.ok(total<72000,'the model-facing tool descriptions are oversized: '+total);
+});
+
 test('the tool-routing helper changes descriptions ONLY, not names, schema or access annotations', () => {
   const schema = { type: 'object', required: ['path'], properties: { path: { type: 'string' } } };
   const annotations = { readOnlyHint: true };

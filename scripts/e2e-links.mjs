@@ -42,7 +42,10 @@ const initialize = await rpc(readUrl, 'initialize', { protocolVersion: '2025-06-
 step('URL-only MCP initialize needs no OAuth or headers', initialize.status === 200 && initialize.result?.result?.serverInfo?.name === 'brc');
 const tools = await rpc(readUrl, 'tools/list', {}, 2);
 const names = (tools.result?.result?.tools ?? []).map(t => t.name);
-step('read-only link lists only safe tools', tools.status === 200 && names.includes('read_file') && names.includes('list_devices') && !names.includes('write_file') && !names.includes('start_process') && names.includes('batch_tools'));
+step('read-only link advertises only safe non-retired tools',
+  tools.status === 200 && names.includes('read_file') && names.includes('read_multiple_files') &&
+  names.includes('list_devices') && !names.includes('write_file') &&
+  !names.includes('start_process') && !names.includes('batch_tools'));
 const denied = await rpc(readUrl, 'tools/call', { name: 'start_process', arguments: { command: 'echo should-not-run' } }, 3);
 step('direct write or terminal invocation is rejected on read-only link', denied.status === 200 && denied.result?.result?.isError === true);
 const knownFile = path.join(process.cwd(), 'package.json');

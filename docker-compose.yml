@@ -21,6 +21,7 @@ x-relay: &relay
     MONGODB_DB: ${MONGODB_DB:-}
     BRC_SKILLS_API_TOKEN: ${BRC_SKILLS_API_TOKEN:-}
     BRC_MCP_TOKEN_ESTIMATES: ${BRC_MCP_TOKEN_ESTIMATES:-1}
+    BRC_MCP_TOOL_PROFILE: ${BRC_MCP_TOOL_PROFILE:-core}
     LOG_LEVEL: ${LOG_LEVEL:-info}
   volumes:
     - relay-data:/data

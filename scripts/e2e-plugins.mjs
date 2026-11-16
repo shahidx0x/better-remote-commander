@@ -64,7 +64,11 @@ async function rpc(method, params) {
 }
 const call = async (name, args) => { const b = await rpc('tools/call', { name, arguments: args }); const res = b.result ?? {}; return { isError: !!res.isError, text: (res.content ?? []).map((c) => c.text ?? '').join('\n') }; };
 const tools = (await rpc('tools/list', {})).result?.tools?.map((t) => t.name) ?? [];
-step('MCP lists marketplace tools', tools.includes('search_mcp_registry') && tools.includes('request_plugin_install') && tools.includes('list_plugin_tools'), tools.filter((t) => /plugin|registry/.test(t)).join(','));
+step('MCP lists marketplace tools without forcing every local plugin tool into the core catalog',
+  tools.includes('search_mcp_registry') && tools.includes('request_plugin_install') &&
+    (process.env.BRC_MCP_TOOL_PROFILE==='full'||process.env.BRC_MCP_TOOL_PROFILE==='focused'
+      ? tools.includes('list_plugin_tools') : !tools.includes('list_plugin_tools')),
+  tools.filter((t) => /plugin|registry/.test(t)).join(','));
 let c = await call('list_plugin_tools', { deviceId, plugin: 'echo-e2e' });
 step('list_plugin_tools shows plugin tools', !c.isError && /### echo/.test(c.text), c.text.slice(0, 80));
 c = await call('call_plugin_tool', { deviceId, plugin: 'echo-e2e', tool: 'echo', args: { text: 'hi' } });

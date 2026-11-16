@@ -121,7 +121,8 @@ test('relay schema cache preserves stable discovery while device pause and recon
  const h=new DeviceHub('test',()=>{}),s=new Sock();h.attach(s,'u','pc');s.emit('message',hello('pc'));
  let paused=false;const store={getDevice:()=>({paused:paused?1:0})};
  const first=await liveTools(h,store,'u'),second=await liveTools(h,store,'u');assert.equal(first.tools,second.tools);
- const stable=first.tools.map(t=>t.name);assert.ok(stable.length>=60);
+ const stable=first.tools.map(t=>t.name);assert.ok(stable.length>=30,'core profile should advertise the essential tools');
+ assert.ok(stable.includes('write_file') && !stable.includes('workspace_batch') && !stable.includes('docker_inventory'),'core should expose single-file writing without duplicate batch/Docker tools');
  assert.equal(first.online,1);
  paused=true;
  const duringPause=await liveTools(h,store,'u');

@@ -6,6 +6,7 @@ import { OperationScheduler,cancelOperation } from '../runtime/operations.js';
 import { AgentError,failure } from '../runtime/errors.js';
 import { PluginAdmin } from './plugin-admin.js';
 import { isTermuxRuntime } from '../runtime/platform-capabilities.js';
+import { boundedAgentFrame } from './result-budget.js';
 export interface WsClientOptions {
  relayUrl:string;token:string;deviceId:string;name:string;agentVersion:string;coreVersion:string;tools:ToolDefinition[];
  callTool:(name:string,args:Record<string,unknown>)=>Promise<unknown>;
@@ -108,8 +109,16 @@ export class WsClient {
  }
  private send(msg:AgentMessage,ws=this.ws):void{
   if(ws?.readyState!==WebSocket.OPEN)return;
-  let encoded=JSON.stringify(msg);
-  if(Buffer.byteLength(encoded)>8*1024*1024&&msg.type==='result')encoded=JSON.stringify({type:'result',id:msg.id,result:failure(new AgentError('RESULT_TOO_LARGE','Result exceeds 8 MiB. Use smaller ranges; mutations may already have completed. Do not blindly retry.'))});
+  let encoded:string;
+  try {
+    const frame=boundedAgentFrame(msg);
+    encoded=frame.encoded;
+    if(frame.replaced)this.log('warn','Oversized/invalid result replaced with bounded recovery error; call '+(msg.type==='result'?msg.id:'?'));
+  } catch(e) {
+    this.log('warn','Unable to encode non-result WebSocket frame: '+(e instanceof Error?e.message:'unknown'));
+    ws.terminate();
+    return;
+  }
   if(ws.bufferedAmount>8*1024*1024){ws.terminate();return;}
   try{ws.send(encoded);}catch{ws.terminate();}
  }

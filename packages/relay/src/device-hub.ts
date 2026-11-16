@@ -116,6 +116,16 @@ export class DeviceHub {
           Array.isArray(raw)?raw.reduce((total,b)=>total+b.length,0):raw.byteLength;
         try { this.onWireTraffic?.(dev.ownerId,'from-agent',resultBytes); } catch { /* telemetry must not alter tools */ }
         if (msg.error) p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
+        else if(resultBytes>512*1024) {
+          // Guard the MCP/ChatGPT stream even when the connected agent is old
+          // and has no 512 KiB result cap. The operation may already be done.
+          const message='Tool response exceeded the relay 512 KiB forwarding budget. '+
+            'For reads request fewer lines/pages/images. For mutations inspect the current file or job state BEFORE retrying.';
+          p.resolve({isError:true,content:[{type:'text',text:'RESULT_TOO_LARGE: '+message}],
+            structuredContent:{error:{code:'RESULT_TOO_LARGE',message,retryable:false},
+              recovery:{automaticRetry:false,suggestion:'Use a narrower read; inspect existing changes before retrying a mutation.'},
+              truncated:true}});
+        }
         else p.resolve(msg.result ?? { content: [] });
         return;
       }
