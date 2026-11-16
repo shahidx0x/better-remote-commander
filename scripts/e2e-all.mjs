@@ -42,23 +42,25 @@ function runScript(script, ...args) {
 
 let failed = 0;
 try {
-  start('relay', [relayCli], { PORT: String(PORT), PUBLIC_URL: base, BRC_ADMIN_PASSWORD: pass, BRC_SESSION_SECRET: 'e2e', BRC_DB: path.join(scratch, 'relay.sqlite'), LOG_LEVEL: 'warn' });
+  // BRC_MCP_REGISTRY_FIXTURE: marketplace e2e runs offline against a local registry fixture.
+  start('relay', [relayCli], { PORT: String(PORT), PUBLIC_URL: base, BRC_ADMIN_PASSWORD: pass, BRC_SESSION_SECRET: 'e2e', BRC_DB: path.join(scratch, 'relay.sqlite'), LOG_LEVEL: 'warn', BRC_MCP_REGISTRY_FIXTURE: path.resolve('scripts/fixtures/mcp-registry.json') });
   await waitFor(async () => (await fetch(`${base}/health`)).ok, 20_000, 'relay');
 
-  const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { BRC_HOME: path.join(scratch, 'agent-home') });
+  const agent = start('agent', [agentCli, '--relay', base, '--name', 'e2e-agent', '--no-browser'], { BRC_HOME: path.join(scratch, 'agent-home'), BRC_PLUGINS: 'none' /* no default plugin downloads: e2e stays offline */ });
   const code = await waitFor(() => agent.out.match(/code: ([A-Z0-9]{4}-[A-Z0-9]{4})/)?.[1], 20_000, 'pairing code');
 
   let r = await fetch(`${base}/auth/login`, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ username: 'admin', password: pass, returnTo: '/' }) });
   const cookie = (r.headers.get('set-cookie') ?? '').split(';')[0];
-  r = await fetch(`${base}/device/approve`, { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ user_code: code, decision: 'allow' }) });
+  r = await fetch(`${base}/device/approve`, { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ user_code: code, decision: 'allow', csrf: (await (await fetch(`${base}/device/verify`, { headers: { cookie } })).text()).match(/name="csrf" value="([^"]+)"/)?.[1] ?? '' }) });
   if (r.status !== 200) throw new Error(`approve failed: ${r.status}`);
   await waitFor(async () => (await (await fetch(`${base}/health`)).json()).devices === 1, 20_000, 'agent online');
   console.log(`relay + agent up on ${base} (pairing code ${code})\n`);
 
   // rate-limit test must run last: it locks the admin login for 5 minutes.
-  for (const s of ['scripts/e2e-oauth.mjs', 'scripts/e2e-admin.mjs']) {
+  const extraArgs = { 'scripts/e2e-plugins.mjs': [path.join(scratch, 'relay.sqlite')] };
+  for (const s of ['scripts/e2e-oauth.mjs', 'scripts/e2e-plugins.mjs', 'scripts/e2e-admin.mjs']) {
     console.log(`== ${s}`);
-    const out = await runScript(s, base, 'admin', pass);
+    const out = await runScript(s, base, 'admin', pass, ...(extraArgs[s] ?? []));
     process.stdout.write(out.split('\n').filter((l) => /^(PASS|FAIL)/.test(l)).map((l) => '  ' + l.slice(0, 110)).join('\n') + '\n');
     const f = (out.match(/^FAIL/gm) ?? []).length;
     if (f || !/^PASS/m.test(out)) { failed += f || 1; if (!/^PASS/m.test(out)) console.log('  (suite crashed)\n' + out.slice(-600)); }

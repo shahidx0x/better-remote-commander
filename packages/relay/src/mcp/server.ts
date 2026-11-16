@@ -8,6 +8,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import type { DeviceHub } from '../device-hub.js';
 import type { SqliteStore } from '../store/sqlite.js';
 import { invokeTool, listUserDevices, type InvokeContext } from './invoke.js';
+import { PLUGIN_RELAY_TOOLS, handlePluginRelayTool, type PluginToolDeps } from './plugin-tools.js';
 
 export type McpContext = InvokeContext;
 
@@ -38,18 +39,25 @@ export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
   return { online: online.length, tools: [...merged.values()] };
 }
 
-export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string): Server {
+/** `plugins` enables the marketplace tools (search_mcp_registry, request_plugin_install). */
+export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string, plugins?: Omit<PluginToolDeps, 'hub' | 'store'>): Server {
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { online, tools } = liveTools(hub, store, ctx.userId);
-    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.` }, ...tools] };
+    const relayTools = plugins ? PLUGIN_RELAY_TOOLS : [];
+    const reserved = new Set(relayTools.map((t) => t.name));
+    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.` }, ...relayTools, ...tools.filter((t) => !reserved.has(t.name))] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: args } = req.params;
     if (name === 'list_devices') {
       return { content: [{ type: 'text', text: JSON.stringify({ devices: listUserDevices(hub, store, ctx.userId) }, null, 2) }] };
+    }
+    if (plugins) {
+      const handled = await handlePluginRelayTool({ ...plugins, hub, store }, ctx, name, args as Record<string, unknown> | undefined);
+      if (handled) return handled;
     }
     const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined);
     if (!out.ok) return { content: [{ type: 'text', text: out.message }], isError: true };

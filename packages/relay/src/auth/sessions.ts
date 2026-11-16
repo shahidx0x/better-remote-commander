@@ -27,6 +27,22 @@ export class Sessions {
     res.clearCookie(COOKIE, { path: '/' });
   }
 
+  /**
+   * CSRF token bound to the current session cookie (HMAC; nothing stored server side).
+   * Rendered as a hidden `csrf` field in admin forms and checked by verifyCsrf().
+   */
+  csrfToken(req: Request): string {
+    const raw = (req.cookies?.[COOKIE] as string | undefined) ?? '';
+    return raw ? this.sign(`csrf:${raw}`) : '';
+  }
+
+  verifyCsrf(req: Request, token: unknown): boolean {
+    const expected = this.csrfToken(req);
+    if (!expected || typeof token !== 'string' || !token) return false;
+    const a = Buffer.from(token), b = Buffer.from(expected);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
   userId(req: Request): string | null {
     const raw = req.cookies?.[COOKIE] as string | undefined;
     if (!raw) return null;

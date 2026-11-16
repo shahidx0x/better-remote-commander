@@ -8,6 +8,7 @@
  *   POST /device/start, POST /device/poll, GET|POST /device/verify, POST /device/approve
  *   ALL  /mcp                   Streamable HTTP (bearer, stateless per request)
  *   WS   /ws                    agent socket (device token)
+ *   GET  /admin, /admin/marketplace, POST /admin/plugins/*  (see plugins/admin-routes.ts)
  */
 import express, { type Request, type Response, type NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
@@ -25,6 +26,8 @@ import { createMcpServer } from './mcp/server.js';
 import * as pages from './pages/html.js';
 import * as adminPages from './pages/admin.js';
 import { LoginLimiter } from './auth/rate-limit.js';
+import { RegistryClient } from './plugins/registry.js';
+import { registerPluginRoutes } from './plugins/admin-routes.js';
 
 export interface RelayConfig {
   port: number;
@@ -64,6 +67,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const admin = store.upsertUser(cfg.adminUser, cfg.adminPassword);
   const sessions = new Sessions(cfg.sessionSecret, cfg.publicUrl.startsWith('https://'));
   const hub = new DeviceHub(cfg.relayVersion, log);
+  const registry = RegistryClient.fromEnv();
   const publicUrl = new URL(cfg.publicUrl);
 
   const app = express();
@@ -207,13 +211,41 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const requireLogin = (req: Request, res: Response, next: NextFunction) =>
     currentUser(req) ? next() : res.redirect(`/auth/login?returnTo=${encodeURIComponent(req.originalUrl)}`);
 
+  // CSRF for the signed-in forms (device pairing approval, device admin, API keys, OAuth clients).
+  // Pages get a session-bound hidden `csrf` field added to every POST form that lacks one;
+  // POST handlers then require it (the plugin routes check it themselves).
+  const withCsrfFields = (req: Request, res: Response, next: NextFunction) => {
+    const token = sessions.csrfToken(req);
+    if (!token) return next();
+    const send = res.send.bind(res);
+    res.send = ((body: unknown) => {
+      if (typeof body === 'string' && body.includes('<form')) {
+        body = body.replace(/<form method="post"[^>]*>/g, (tag: string, offset: number, all: string) => {
+          const end = all.indexOf('</form>', offset);
+          const inner = all.slice(offset, end === -1 ? undefined : end);
+          return inner.includes('name="csrf"') ? tag : `${tag}<input type="hidden" name="csrf" value="${token}">`;
+        });
+      }
+      return send(body as never);
+    }) as typeof res.send;
+    next();
+  };
+  const requireCsrf = (req: Request, res: Response, next: NextFunction) => {
+    if (req.get('sec-fetch-site') === 'cross-site' || !sessions.verifyCsrf(req, (req.body as Record<string, unknown> | undefined)?.csrf)) {
+      log('warn', `CSRF check failed for ${req.path} from ${req.ip}`);
+      return res.status(403).type('html').send(pages.messagePage('Request blocked', 'This form expired or came from another site. Go back, reload the page and try again.', false));
+    }
+    next();
+  };
+  for (const p of ['/admin', '/auth/clients', '/auth/apikeys', '/device/verify']) app.use(p, withCsrfFields);
+
   app.get('/device/verify', requireLogin, (req, res) => res.type('html').send(pages.deviceVerifyPage(String(req.query.user_code ?? ''))));
-  app.post('/device/verify', requireLogin, (req, res) => {
+  app.post('/device/verify', requireLogin, requireCsrf, (req, res) => {
     const row = store.getDeviceCodeByUserCode(String(req.body.user_code ?? ''));
     if (!row || row.expires_at < Date.now()) return res.status(404).type('html').send(pages.deviceVerifyPage('', 'Code not found or expired.'));
     res.type('html').send(pages.deviceApprovePage(row.user_code, row.client_name));
   });
-  app.post('/device/approve', requireLogin, (req, res) => {
+  app.post('/device/approve', requireLogin, requireCsrf, (req, res) => {
     const userId = currentUser(req)!;
     const row = store.getDeviceCodeByUserCode(String(req.body.user_code ?? ''));
     if (!row || row.expires_at < Date.now()) return res.status(404).type('html').send(pages.messagePage('Not found', 'Code not found or expired.', false));
@@ -229,7 +261,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     return { client_id: c.client_id, name: m.client_name ?? c.client_id, redirect_uris: m.redirect_uris ?? [], hasSecret: !!c.client_secret, created_at: c.created_at };
   });
   app.get('/auth/clients', requireLogin, (_req, res) => res.type('html').send(pages.clientsPage(clientRows())));
-  app.post('/auth/clients/delete', requireLogin, (req, res) => {
+  app.post('/auth/clients/delete', requireLogin, requireCsrf, (req, res) => {
     store.deleteClient(String(req.body.client_id ?? ''));
     res.redirect('/auth/clients');
   });
@@ -241,7 +273,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const auth = (req as Request & { auth?: AuthInfo }).auth!;
     const userId = String(auth.extra?.userId ?? '');
     if (!userId) return res.status(401).json({ error: 'invalid_token' });
-    const server = createMcpServer(hub, store, { userId, clientId: auth.clientId }, cfg.relayVersion);
+    const server = createMcpServer(hub, store, { userId, clientId: auth.clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {
@@ -253,6 +285,9 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     }
   });
 
+  /* ---------- plugins: marketplace, per-device plugin admin, AI install requests ---------- */
+  const pluginUi = registerPluginRoutes({ app, hub, store, sessions, registry, requireLogin, log });
+
   /* ---------- admin dashboard ---------- */
   app.get('/admin', requireLogin, (req, res) => {
     const userId = currentUser(req)!;
@@ -260,9 +295,9 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const devices = store.listDevices(userId).map((d) => ({ ...d, online: online.has(d.device_id) }));
     const names = new Map(devices.map((d) => [d.device_id, d.name]));
     const audit = store.recentAudit(userId, 100).map((a) => ({ ts: a.ts, device: names.get(a.device_id ?? '') ?? (a.device_id ?? '?').slice(0, 8), client: a.client, tool: a.tool, ok: a.ok, ms: a.ms, error: a.error }));
-    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, store.auditStats(userId)));
+    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, store.auditStats(userId), pluginUi.adminSections(req, userId), pluginUi.flash(req)));
   });
-  app.post('/admin/device', requireLogin, (req, res) => {
+  app.post('/admin/device', requireLogin, requireCsrf, (req, res) => {
     const userId = currentUser(req)!;
     const { device_id, action, name } = req.body as Record<string, string>;
     const dev = store.getDevice(String(device_id ?? ''));
@@ -279,14 +314,14 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
 
   /* ---------- API keys ---------- */
   app.get('/auth/apikeys', requireLogin, (req, res) => res.type('html').send(adminPages.apiKeysPage(store.listApiKeys(currentUser(req)!))));
-  app.post('/auth/apikeys', requireLogin, (req, res) => {
+  app.post('/auth/apikeys', requireLogin, requireCsrf, (req, res) => {
     const userId = currentUser(req)!;
     const name = String(req.body.name ?? '').trim().slice(0, 80) || 'api-key';
     const { raw } = store.createApiKey(userId, name);
     log('info', `api key created: ${name}`);
     res.type('html').send(adminPages.apiKeysPage(store.listApiKeys(userId), { name, raw }));
   });
-  app.post('/auth/apikeys/revoke', requireLogin, (req, res) => {
+  app.post('/auth/apikeys/revoke', requireLogin, requireCsrf, (req, res) => {
     store.revokeApiKey(currentUser(req)!, String(req.body.prefix ?? ''));
     res.redirect('/auth/apikeys');
   });

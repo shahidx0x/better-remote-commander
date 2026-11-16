@@ -5,8 +5,9 @@
 import type WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import {
-  DEFAULTS, BRC_PROTOCOL_VERSION, parseMessage,
+  DEFAULTS, BRC_PROTOCOL_VERSION, parseMessage, sanitizePluginSummary,
   type AgentMessage, type RelayMessage, type DeviceInfo, type ToolDefinition, type ToolResult,
+  type PluginAdminMessage, type PluginStatusSummary,
 } from 'brc-shared';
 
 export interface ConnectedDevice {
@@ -16,7 +17,13 @@ export interface ConnectedDevice {
   connectedAt: number;
   lastSeen: number;
   socket: WebSocket;
+  /** Latest `plugins` report; undefined = agent never reported (too old for plugin admin). */
+  plugins?: PluginStatusSummary[];
+  pluginsAt?: number;
 }
+
+export interface PluginAdminOutcome { ok: boolean; error?: string; plugin?: PluginStatusSummary }
+export type PluginAdminRequest = Omit<PluginAdminMessage, 'type' | 'id'>;
 
 export interface DeviceSummary {
   deviceId: string;
@@ -38,9 +45,12 @@ interface Pending {
 export class DeviceHub {
   private devices = new Map<string, ConnectedDevice>();
   private pending = new Map<string, Pending>();
+  private adminPending = new Map<string, { deviceId: string; resolve: (r: PluginAdminOutcome) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   private heartbeat: NodeJS.Timeout;
 
   onHello?: (device: DeviceInfo, tools: ToolDefinition[]) => void;
+  /** Called with every (sanitised) plugin report, e.g. to persist the last-known list. */
+  onPlugins?: (deviceId: string, plugins: PluginStatusSummary[]) => void;
 
   constructor(private readonly relayVersion: string, private readonly log: (l: string, m: string) => void) {
     this.heartbeat = setInterval(() => this.tick(), DEFAULTS.pingIntervalMs);
@@ -88,6 +98,22 @@ export class DeviceHub {
         clearTimeout(p.timer);
         if (msg.error) p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
         else p.resolve(msg.result ?? { content: [] });
+        return;
+      }
+      if (msg.type === 'plugins') {
+        if (!dev || !Array.isArray(msg.plugins)) return;
+        dev.plugins = msg.plugins.slice(0, 500).map(sanitizePluginSummary).filter((p): p is PluginStatusSummary => !!p);
+        dev.pluginsAt = Date.now();
+        try { this.onPlugins?.(deviceId, dev.plugins); } catch (e) { this.log('warn', `onPlugins failed: ${e instanceof Error ? e.message : String(e)}`); }
+        return;
+      }
+      if (msg.type === 'plugin_admin_result') {
+        const p = typeof msg.id === 'string' ? this.adminPending.get(msg.id) : undefined;
+        if (!p || p.deviceId !== deviceId) return;
+        this.adminPending.delete(msg.id);
+        clearTimeout(p.timer);
+        const plugin = msg.plugin ? sanitizePluginSummary(msg.plugin) ?? undefined : undefined;
+        p.resolve({ ok: msg.ok === true, error: typeof msg.error === 'string' ? msg.error.slice(0, 2000) : undefined, plugin });
       }
     });
 
@@ -95,6 +121,12 @@ export class DeviceHub {
       if (deviceId && this.devices.get(deviceId)?.socket === socket) {
         this.devices.delete(deviceId);
         this.log('info', `device offline: ${deviceId}`);
+        for (const [id, p] of this.adminPending) {
+          if (p.deviceId !== deviceId) continue;
+          this.adminPending.delete(id);
+          clearTimeout(p.timer);
+          p.reject(new Error(`DEVICE_OFFLINE: ${deviceId} disconnected`));
+        }
       }
     });
   }
@@ -114,6 +146,30 @@ export class DeviceHub {
       this.pending.set(id, { resolve, reject, timer });
       this.sendTo(dev.socket, { type: 'call', id, tool, args, client: opts.client, timeoutMs });
     });
+  }
+
+  /**
+   * Send an owner-approved plugin_admin request to a device and wait for its result.
+   * Rejects with DEVICE_OFFLINE, PLUGINS_UNSUPPORTED (agent never sent `plugins`) or ADMIN_TIMEOUT.
+   */
+  pluginAdmin(deviceId: string, req: PluginAdminRequest, timeoutMs = 30_000): Promise<PluginAdminOutcome> {
+    const dev = this.devices.get(deviceId);
+    if (!dev) return Promise.reject(new Error(`DEVICE_OFFLINE: ${deviceId}`));
+    if (!dev.plugins) return Promise.reject(new Error('PLUGINS_UNSUPPORTED: this agent version does not support plugins; update brc-agent'));
+    const id = randomUUID();
+    return new Promise<PluginAdminOutcome>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.adminPending.delete(id);
+        reject(new Error(`ADMIN_TIMEOUT: ${req.action} still running after ${timeoutMs} ms`));
+      }, timeoutMs);
+      this.adminPending.set(id, { deviceId, resolve, reject, timer });
+      this.sendTo(dev.socket, { type: 'plugin_admin', id, ...req });
+    });
+  }
+
+  /** Latest plugin report of an online device (undefined when offline or never reported). */
+  plugins(deviceId: string): PluginStatusSummary[] | undefined {
+    return this.devices.get(deviceId)?.plugins;
   }
 
   list(ownerId?: string): DeviceSummary[] {
@@ -154,5 +210,6 @@ export class DeviceHub {
     clearInterval(this.heartbeat);
     for (const d of this.devices.values()) d.socket.close(1001, 'relay shutdown');
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('RELAY_SHUTDOWN')); }
+    for (const p of this.adminPending.values()) { clearTimeout(p.timer); p.reject(new Error('RELAY_SHUTDOWN')); }
   }
 }
