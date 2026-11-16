@@ -27,55 +27,119 @@ ${flash}${pluginHtml}
 <div class="section"><div class="section-head"><div><h2>Recent MCP calls</h2><p>Latest activity across your paired devices.</p></div></div><div class="panel table-wrap" style="padding:0"><table><thead><tr><th>When</th><th>Device</th><th>Tool</th><th>Result</th><th>Latency</th><th>Error</th></tr></thead><tbody>${auditRows}</tbody></table></div></div>`, 'wide');
 }
 
-export function apiKeysPage(keys: { prefix: string; name: string; created_at: number; last_used: number | null }[], created?: { name: string; raw: string }): string {
-  const banner = created ? `<p class="ok">API key "${esc(created.name)}" created. Copy it now — it is not shown again.</p>
-<label>API key</label><input readonly value="${esc(created.raw)}" onclick="this.select()">
-<p style="font-size:12px">Use as <code>Authorization: Bearer ${esc(created.raw.slice(0, 18))}…</code> on <code>/mcp</code>.</p>` : '';
-  const rows = keys.length ? `<ul>${keys.map((k) => `<li><strong>${esc(k.name)}</strong> <code>${esc(k.prefix)}…</code> · created ${ago(k.created_at)} · last used ${ago(k.last_used)}
-<form method="post" action="/auth/apikeys/revoke" style="display:inline"><input type="hidden" name="prefix" value="${esc(k.prefix)}"><button class="secondary" style="padding:4px 10px" onclick="return confirm('Revoke this key?')">Revoke</button></form></li>`).join('')}</ul>` : '<p>No API keys.</p>';
-  return layout('API keys', `<h1>API keys</h1>${banner}
-<p>Long-lived bearer tokens as an alternative to OAuth. Anyone holding a key can control your paired devices — treat it like a password.</p>
-<form method="post" action="/auth/apikeys"><label>Name</label><input name="name" placeholder="MCP client" required>
-<div class="row"><button class="primary" type="submit">Create key</button></div></form>
-<h1 style="margin-top:22px">Existing</h1>${rows}<p><a href="/admin">Back</a></p>`, 'wide');
+export function apiKeysPage(
+  keys: { prefix: string; name: string; created_at: number; last_used: number | null }[],
+  created?: { name: string; raw: string },
+): string {
+  const notice = created ? `<div class="credential-secret" role="status">
+    <span class="brand">NEW API KEY · ONE-TIME DISPLAY</span>
+    <h2>${esc(created.name)} is ready</h2>
+    <p>Copy this credential now. For security, the full key will never be shown again.</p>
+    <label for="new-api-key">Your API key</label>
+    <input id="new-api-key" readonly value="${esc(created.raw)}" autocomplete="off" spellcheck="false" onclick="this.select()">
+    <div class="row"><button class="primary" type="button" onclick="const e=document.getElementById('new-api-key');navigator.clipboard.writeText(e.value).then(()=>{this.textContent='Copied'},()=>{e.select()})">Copy key</button>
+      <span class="muted" style="font-size:11px">Use in your client's Authorization: Bearer header.</span></div>
+  </div>` : '';
+  const cards=keys.length ? keys.map(key=>`<div class="credential-card">
+    <div class="device-top"><div style="min-width:0">
+      <span class="brand">ACTIVE CREDENTIAL</span><h2>${esc(key.name)}</h2><code>${esc(key.prefix)}…</code>
+    </div><span class="pill ok"><span class="dot"></span>Active</span></div>
+    <p style="font-size:12px;margin-top:12px">Created ${ago(key.created_at)}<br>Last used ${ago(key.last_used)}</p>
+    <form method="post" action="/auth/apikeys/revoke" onsubmit="return confirm('Revoke this API key immediately?')">
+      <input type="hidden" name="prefix" value="${esc(key.prefix)}">
+      <div class="actions"><button type="submit" class="secondary danger">Revoke key</button></div>
+    </form></div>`).join('') : '<div class="empty">No API keys yet. Create one above to connect a trusted client.</div>';
+  return layout('API keys', `<div class="section-head"><div class="page-heading">
+    <span class="brand">ACCESS MANAGEMENT</span><h1>API keys</h1>
+    <p>Create and revoke credentials for trusted MCP clients and usage reporters.</p></div>
+    <a href="/auth/clients" class="btn secondary">Manage OAuth clients</a></div>
+    <div class="access-banner"><span class="symbol">!</span><div>
+      <strong>Keep your keys private</strong><p>A holder of a valid API key can access your devices through this relay. Create separate keys for each client and revoke those no longer needed.</p></div></div>
+    ${notice}
+    <div class="admin-two-col section">
+      <div class="panel panel-form"><span class="brand">CREATE A KEY</span>
+        <h2>New API credential</h2><p>Name it after the service or application that will use it.</p>
+        <form method="post" action="/auth/apikeys">
+          <label for="key-name">Credential name</label>
+          <input id="key-name" name="name" maxlength="120" placeholder="e.g. Backend model usage reporter" required>
+          <div class="row"><button class="primary" type="submit">Create API key</button></div>
+        </form></div>
+      <div class="panel"><span class="brand">BEST PRACTICES</span><h2>Secure by design</h2>
+        <div class="admin-steps">
+          <div class="admin-step"><span class="num">1</span><div><strong>Create a dedicated key</strong><p>Use different keys for separate services.</p></div></div>
+          <div class="admin-step"><span class="num">2</span><div><strong>Store it securely</strong><p>Only the new key is shown once after creation.</p></div></div>
+          <div class="admin-step"><span class="num">3</span><div><strong>Revoke old access</strong><p>Remove credentials you no longer trust.</p></div></div>
+        </div></div>
+    </div>
+    <section class="section"><div class="section-head"><div><span class="brand">ISSUED CREDENTIALS</span>
+      <h2>Existing API keys</h2><p>${keys.length} active key${keys.length===1?'':'s'}.</p></div></div>
+      <div class="credential-list">${cards}</div></section>`,'wide');
 }
 
 export interface ConnectionLinkView { id: string; name: string; mode: 'read' | 'full'; created_at: number; expires_at: number }
 
 /** The raw capability URL is revealed only in the immediate creation response. */
 export function connectionLinksPage(
-  links: ConnectionLinkView[],
-  csrf: string,
+  links: ConnectionLinkView[], csrf: string,
   created?: { name: string; url: string; expiresAt: number },
   error?: string,
 ): string {
-  const banner = created ? `<div class="panel section">
-<h2 class="ok">Connection URL created</h2><p>Copy this URL now. It will not be displayed again.</p>
-<label>Private MCP URL</label><input id="new-connection-url" class="mono" readonly value="${esc(created.url)}" onclick="this.select()" autocomplete="off" spellcheck="false">
-<div class="row"><button type="button" class="primary" onclick="navigator.clipboard.writeText(document.getElementById('new-connection-url').value).then(()=>{this.textContent='Copied!'},()=>{document.getElementById('new-connection-url').select()})">Copy URL</button></div>
-<p class="err"><strong>Anyone with this URL can access the tools allowed by this connection.</strong> Do not share it or paste it into public issue reports.</p>
-<p>Expires ${esc(new Date(created.expiresAt).toUTCString())}.</p></div>` : '';
-  const rows = links.length ? links.map(l => `<div class="device"><div class="device-top"><div>
-<strong>${esc(l.name)}</strong><p>${l.mode === 'read' ? 'Read only' : '<span class="err">Full access — can edit files and run commands</span>'}</p>
-<p class="muted">Expires ${esc(new Date(l.expires_at).toUTCString())}</p></div><span class="pill ok">Active</span></div>
-<form method="post" action="/auth/links/revoke" onsubmit="return confirm('Revoke this connection URL immediately?')">
-<input type="hidden" name="csrf" value="${esc(csrf)}">
-<input type="hidden" name="link_id" value="${esc(l.id)}">
-<button type="submit" class="secondary danger">Revoke URL</button></form></div>`).join('') : '<p>No active connection URLs. Create one below.</p>';
-  return layout('Connect without OAuth', `<h1>Connect without OAuth</h1>
-<p>Create a private URL once and paste it into any MCP client that supports a custom Streamable HTTP URL and no-auth connections. No OAuth callback or headers to configure.</p>
-<p><strong>Security:</strong> the randomly generated URL is a secret credential. Use HTTPS and revoke URLs you no longer need, especially when choosing a 1- or 2-year expiry. The ordinary <code>/mcp</code> OAuth endpoint remains unchanged.</p>
-${error ? `<p class="err">${esc(error)}</p>` : ''}${banner}
-<div class="section panel"><h2>Create a connection URL</h2>
-<form method="post" action="/auth/links">
-<input type="hidden" name="csrf" value="${esc(csrf)}">
-<label>Connection name</label><input name="name" maxlength="80" placeholder="My MCP client" required>
-<label>Access level</label><select name="mode" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text)" required>
-<option value="read" selected>Read only (safer)</option>
-<option value="full">Full access (files + terminal + other tools)</option></select>
-<label>Expires after</label><select name="days" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text)">
-<option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year (365 days)</option><option value="730">2 years (730 days)</option></select>
-<div class="row"><button type="submit" class="primary">Generate private MCP URL</button></div></form></div>
-<div class="section"><h2>Active connections (${links.length})</h2><div class="device-grid">${rows}</div></div>
-<p class="section"><a href="/admin">Back to admin</a></p>`, 'wide');
+  const createdPanel=created ? `<div class="credential-secret" role="status">
+    <span class="brand">NEW CONNECTION · ONE-TIME DISPLAY</span><h2>Private URL created</h2>
+    <p>Copy this URL now. It is a bearer credential and will not be displayed again.</p>
+    <label for="new-connection-url">Private MCP URL</label>
+    <input id="new-connection-url" class="mono" readonly value="${esc(created.url)}"
+      onclick="this.select()" autocomplete="off" spellcheck="false">
+    <div class="row"><button type="button" class="primary" onclick="const e=document.getElementById('new-connection-url');navigator.clipboard.writeText(e.value).then(()=>{this.textContent='Copied'},()=>{e.select()})">Copy private URL</button>
+      <span class="muted" style="font-size:11px">Expires ${esc(new Date(created.expiresAt).toUTCString())}</span></div>
+    <p class="err" style="font-size:12px">Anyone with this URL can access the permitted tools. Do not share it in logs, issue reports or screenshots.</p>
+  </div>` : '';
+  const cards=links.length ? links.map(link=>`<div class="credential-card">
+    <div class="device-top"><div><span class="brand">PRIVATE CONNECTION</span><h2>${esc(link.name)}</h2>
+      <p>${link.mode==='read'?'Read-only access':'Full tool access · files and terminal'}<br>
+        Expires ${esc(new Date(link.expires_at).toUTCString())}</p></div>
+      <span class="pill ${link.mode==='read'?'ok':'err'}"><span class="dot"></span>${link.mode==='read'?'Read only':'Full access'}</span></div>
+    <form method="post" action="/auth/links/revoke" onsubmit="return confirm('Revoke this connection URL immediately?')">
+      <input type="hidden" name="csrf" value="${esc(csrf)}">
+      <input type="hidden" name="link_id" value="${esc(link.id)}">
+      <div class="actions"><button type="submit" class="secondary danger">Revoke connection</button></div>
+    </form></div>`).join('') : '<div class="empty">No active private URLs. Create one to connect an MCP client without OAuth.</div>';
+  return layout('Connect without OAuth',`<div class="section-head"><div class="page-heading">
+    <span class="brand">ACCESS MANAGEMENT</span><h1>Private MCP links</h1>
+    <p>Connect without OAuth using a private Streamable HTTP URL. Control permissions and expiration for each connection.</p></div>
+    <a href="/auth/clients" class="btn secondary">OAuth connections</a></div>
+    <div class="access-banner"><span class="symbol">!</span><div>
+      <strong>Private URLs are credentials</strong>
+      <p>Use HTTPS. Anyone with a URL can use its permitted tools until it expires or is revoked. Only issue full-access links when necessary.</p></div></div>
+    ${error ? `<div class="auth-alert err section" role="alert">${esc(error)}</div>`:''}
+    ${createdPanel}
+    <div class="admin-two-col section"><div class="panel panel-form">
+      <span class="brand">NEW CONNECTION</span><h2>Create a connection URL</h2>
+      <p>Give the connection a recognizable name, choose its permissions and set an expiry date.</p>
+      <form method="post" action="/auth/links">
+        <input type="hidden" name="csrf" value="${esc(csrf)}">
+        <label for="link-name">Connection name</label>
+        <input id="link-name" name="name" maxlength="80" placeholder="e.g. My ChatGPT connector" required>
+        <label for="link-mode">Access level</label>
+        <select id="link-mode" name="mode" required>
+          <option value="read" selected>Read only (recommended)</option>
+          <option value="full">Full access (files, terminal and other tools)</option>
+        </select>
+        <label for="link-expiry">Expires after</label>
+        <select id="link-expiry" name="days">
+          <option value="1">1 day</option><option value="7" selected>7 days</option>
+          <option value="30">30 days</option><option value="90">90 days</option>
+          <option value="365">1 year (365 days)</option><option value="730">2 years (730 days)</option>
+        </select>
+        <div class="row"><button type="submit" class="primary">Generate private MCP URL</button></div>
+      </form></div>
+      <div class="panel"><span class="brand">HOW IT WORKS</span><h2>Connect with confidence</h2>
+        <div class="admin-steps">
+          <div class="admin-step"><span class="num">1</span><div><strong>Choose the scope</strong><p>Read-only blocks changes; full access can run commands.</p></div></div>
+          <div class="admin-step"><span class="num">2</span><div><strong>Copy the private URL</strong><p>It is shown once after you create the connection.</p></div></div>
+          <div class="admin-step"><span class="num">3</span><div><strong>Manage the lifecycle</strong><p>Revoke access at any time or let the URL expire.</p></div></div>
+        </div><div class="credential-hint" style="margin-top:20px">The OAuth-enabled <code>/mcp</code> endpoint remains available separately.</div></div></div>
+    <section class="section"><div class="section-head"><div><span class="brand">ISSUED CONNECTIONS</span>
+      <h2>Active connections (${links.length})</h2><p>Access can be revoked immediately.</p></div></div>
+      <div class="credential-list">${cards}</div></section>`,'wide');
 }

@@ -4,13 +4,14 @@ import type {RelayStore} from '../store/types.js';
 import type {Sessions} from '../auth/sessions.js';
 import {SkillsCatalog,validateSkill,validSkillId} from './skills.js';
 import {skillsPage} from '../pages/skills.js';
+import { messagePage } from '../pages/html.js';
 const form=(req:Request,key:string)=>{const v=(req.body as Record<string,unknown>|undefined)?.[key];return typeof v==='string'?v:''};
 export function registerSkillsRoutes(app:Express,store:RelayStore,sessions:Sessions,catalog:SkillsCatalog,
   requireLogin:(req:Request,res:Response,next:NextFunction)=>void){
  const user=(req:Request)=>sessions.userId(req)!;
  const csrf=(req:Request,res:Response,next:NextFunction)=>{
    if(req.get('sec-fetch-site')==='cross-site'||!sessions.checkCsrf(req,form(req,'csrf')))
-     return res.status(403).type('html').send('Forbidden: invalid CSRF token');
+     return res.status(403).type('html').send(messagePage('Forbidden', 'Invalid CSRF token. Reload the Skills page and try again.', false));
    next();
  };
  const render=async(req:Request,res:Response,status=200,error?:string)=>{

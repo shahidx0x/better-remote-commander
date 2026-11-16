@@ -147,9 +147,9 @@ ${e.requiredInputs.length ? `<p>Requires: ${e.requiredInputs.map((n) => `<code>$
   }).join('');
   const more = v.nextCursor ? `<div class="row"><a href="/admin/marketplace?q=${encodeURIComponent(v.q)}&cursor=${encodeURIComponent(v.nextCursor)}${dq}"><button class="secondary">More results</button></a></div>` : '';
   const selected = new Set(v.selectedDevice ? [v.selectedDevice] : []);
-  return layout('Marketplace', `${STYLE}<div class="section-head"><div><h1>Plugin marketplace</h1><p>Search the official MCP Registry and install MCP servers on your devices. Entries are published by third parties: review the source before installing.</p></div><a href="/admin"><button class="secondary">Back to admin</button></a></div>
-<form method="get" action="/admin/marketplace" class="row" style="margin-top:0">${v.selectedDevice ? `<input type="hidden" name="device" value="${esc(v.selectedDevice)}">` : ''}<input name="q" value="${esc(v.q)}" placeholder="Search servers, e.g. playwright, github, filesystem" style="flex:1;min-width:200px" maxlength="100"><button class="primary" type="submit">Search</button></form>
-<p class="muted" style="font-size:12px">Source: ${esc(v.registrySource)}</p>
+  return layout('Marketplace', `${STYLE}<div class="section-head"><div><span class="brand">MCP INTEGRATIONS</span><h1>Plugin marketplace</h1><p>Search the official MCP Registry and install MCP servers on your devices. Entries are published by third parties: review the source before installing.</p></div><a href="/admin"><button class="secondary">Back to admin</button></a></div>
+<div class="panel" style="margin:18px 0"><span class="brand">DISCOVER MCP SERVERS</span><form method="get" action="/admin/marketplace" class="row" style="margin-top:0">${v.selectedDevice ? `<input type="hidden" name="device" value="${esc(v.selectedDevice)}">` : ''}<input name="q" value="${esc(v.q)}" placeholder="Search servers, e.g. playwright, github, filesystem" style="flex:1;min-width:200px" maxlength="100"><button class="primary" type="submit">Search</button></form>
+<p class="muted" style="font-size:12px;margin-bottom:0">Registry: ${esc(v.registrySource)}</p></div>
 ${v.error ? `<p class="err">${esc(v.error)}</p>` : ''}
 <div class="results section">${results || (v.q && !v.error ? '<p>No matching servers.</p>' : '')}</div>${more}
 <div class="section panel" id="custom"><h2>Custom plugin</h2><p>Install something that is not in the registry. npm: <code>package@1.2.3</code> · PyPI: <code>package==1.2.3</code> · command line: <code>node C:\\tools\\server.mjs --flag</code> · remote: <code>https://host/mcp</code></p>
@@ -211,13 +211,13 @@ ${opt.inputs.map(inputField).join('')}
   } else {
     body = '<h1>Install plugin</h1>';
   }
-  return layout('Install plugin', `${STYLE}${v.error ? `<p class="err">${esc(v.error)}</p>` : ''}${body}`, 'wide');
+  return layout('Install plugin', `${STYLE}<div class="section-head"><div><span class="brand">MCP INTEGRATIONS</span><p>Review your selected plugin and trusted device before installing.</p></div></div>${v.error ? `<div class="auth-alert err" role="alert">${esc(v.error)}</div>` : ''}<div class="panel panel-form">${body}</div>`, 'wide');
 }
 
 export interface InstallOutcomeView { device: string; ok: boolean; message: string }
 
 export function installResultPage(title: string, outcomes: InstallOutcomeView[], error?: string): string {
   const rows = outcomes.map((o) => `<li><strong>${esc(o.device)}</strong>: <span class="${o.ok ? 'ok' : 'err'}">${esc(o.message)}</span></li>`).join('');
-  return layout('Plugin install', `${STYLE}<h1>${esc(title)}</h1>${error ? `<p class="err">${esc(error)}</p>` : ''}${rows ? `<ul>${rows}</ul>` : ''}
-<div class="row"><a href="/admin#plugins"><button class="primary">Back to admin</button></a><a href="/admin/marketplace"><button class="secondary">Marketplace</button></a></div>`, 'wide');
+  return layout('Plugin install', `${STYLE}<div class="panel panel-form"><span class="brand">INSTALLATION RESULTS</span><h1>${esc(title)}</h1>${error ? `<div class="auth-alert err" role="alert">${esc(error)}</div>` : ''}${rows ? `<ul>${rows}</ul>` : ''}
+<div class="row"><a href="/admin#plugins"><button class="primary">Back to admin</button></a><a href="/admin/marketplace"><button class="secondary">Marketplace</button></a></div></div>`, 'wide');
 }
