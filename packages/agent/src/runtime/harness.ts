@@ -44,7 +44,14 @@ export async function sourceFingerprint(root: string) {
     let bytes = 0;
     for (const name of files) {
         checkCancelled();
-        const p = await projectPath(root, name), data = await readBounded(p, 8 * 1024 * 1024);
+        const p = await projectPath(root, name);
+        let data: Buffer;
+        try { data = await readBounded(p, 8 * 1024 * 1024); }
+        catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT')
+                throw new AgentError('VERIFICATION_CHANGED', 'A source file disappeared during verification. Re-run checks after file changes finish.');
+            throw e;
+        }
         bytes += data.length;
         if (bytes > 32 * 1024 * 1024)
             throw new AgentError('VERIFICATION_SCOPE_TOO_LARGE', 'Verification source snapshots exceed 32 MiB. Narrow the root.');
@@ -89,13 +96,30 @@ export async function runProjectChecks(root: string, names: string[], execute: b
         const after = await sourceFingerprint(root);
         const data = out.structuredContent ?? {};
         const stable = before.fingerprint === after.fingerprint;
-        const steps = (data.steps as Record<string, unknown>[] ?? []).map(s => ({ name: String(s.name), passed: s.passed === true, exitCode: s.exitCode }));
+        // Keep failure evidence, but never return multiple unbounded build logs
+        // through MCP (which can exhaust the host's message stream).
+        const steps = (Array.isArray(data.steps) ? data.steps as Record<string, unknown>[] : []).map(s => {
+            const chunks = Array.isArray(s.output) ? s.output as {type?:string;text?:string}[] : [];
+            const full = chunks.filter(c => c?.type === 'text').map(c => String(c.text ?? '')).join('\n');
+            return { name: String(s.name), passed: s.passed === true, exitCode: s.exitCode,
+                output: full.slice(-8000), outputTruncated: full.length > 8000 };
+        });
         const passed = !out.isError && data.passed === true && steps.length === names.length && steps.every(s => s.passed) && stable;
         if (session) {
             session.verification = { fingerprint: after.fingerprint, passed, checks: names, steps, at: Date.now() };
             session.state = passed ? 'verified' : 'active';
         }
-        return { ...data, root, passed, sourceStableDuringChecks: stable, fingerprint: after.fingerprint, coverage: after.coverage, sessionId, executed: true, note: stable ? 'Checks returned real exit codes. Passing only establishes the selected checks, not full correctness.' : 'Source changed while checks ran; verification cannot be accepted. Re-run on a stable tree.' };
+        const firstFailure = steps.find(s => !s.passed);
+        const checkError = passed ? undefined : {
+            code: stable ? 'CHECK_FAILED' : 'VERIFICATION_CHANGED',
+            message: stable
+                ? ('Project check ' + (firstFailure?.name ?? '(unknown)') + ' failed (exit code ' +
+                    String(firstFailure?.exitCode ?? 'unknown') + '). Inspect steps[].output; this is a real check failure, not an agent transport failure.')
+                : 'Project files changed during verification; rerun on a stable tree.'
+        };
+        return { ...data, steps, root, passed, ...(checkError ? { error: checkError } : {}),
+            sourceStableDuringChecks: stable, fingerprint: after.fingerprint, coverage: after.coverage,
+            sessionId, executed: true, note: stable ? 'Checks returned real exit codes. Passing only establishes the selected checks, not full correctness.' : 'Source changed while checks ran; verification cannot be accepted. Re-run on a stable tree.' };
     }
     finally {
         if (session)

@@ -33,14 +33,23 @@ const MAX_WAIT_MS = 100_000; // stay well below the relay's 120 s call timeout
 const DEFAULT_WAIT_MS = 60_000;
 const DEFAULT_JOB_TIMEOUT_MS = 30 * 60_000;
 const MAX_JOB_TIMEOUT_MS = 6 * 60 * 60_000;
-const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.BRC_MAX_JOBS) || 4);
-const MAX_STORED_STEP_OUTPUT = 200_000;
-const KEEP_IN_MEMORY = 200;
+// Bounded even if the environment variable is accidentally set very high.
+const configuredJobs=Number(process.env.BRC_MAX_JOBS);
+const MAX_CONCURRENT_JOBS = Number.isInteger(configuredJobs) && configuredJobs>0 ? Math.min(8,configuredJobs) : 4;
+const MAX_STORED_STEP_OUTPUT = 32_000;
+const KEEP_IN_MEMORY = 64;
+const MAX_MCP_JOB_OUTPUT = 128_000;
 const KEEP_ON_DISK = 500;
 
 export const JOB_TOOL_NAMES = new Set(['spawn_job', 'wait_jobs', 'get_job', 'list_jobs', 'cancel_job', 'run_parallel']);
 
-const text = (t: string, isError = false): ServerResult => ({ content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) });
+// One enormous combined job report can break an MCP client's message stream.
+const capJobReply=(s:string):string=>s.length<=MAX_MCP_JOB_OUTPUT?s:
+  s.slice(0,MAX_MCP_JOB_OUTPUT-360)+
+  '\n[OUTPUT TRUNCATED: MCP job response reached 128000 characters. Request fewer jobs, smaller output_chars, or use get_job with step_offset/step_limit. Already-started jobs are not cancelled; inspect them before retrying mutations.]';
+const text = (t: string, isError = false): ServerResult => ({
+  content: [{ type: 'text', text: capJobReply(t) }], ...(isError ? { isError: true } : {})
+});
 
 // The dispatcher injects itself here (avoids a circular import).
 type Executor = (tool: string, args: Record<string, unknown>) => Promise<ServerResult>;
@@ -89,7 +98,9 @@ export const WaitJobsArgsSchema = z.object({
 
 export const GetJobArgsSchema = z.object({
   id: z.string().min(1),
-  output_chars: z.number().int().min(200).max(200_000).optional().default(20_000),
+  output_chars: z.number().int().min(200).max(32_000).optional().default(8_000),
+  step_offset: z.number().int().min(0).max(50).optional().default(0),
+  step_limit: z.number().int().min(1).max(20).optional().default(10),
 });
 
 export const ListJobsArgsSchema = z.object({
@@ -106,7 +117,7 @@ export const CancelJobArgsSchema = z.object({
 
 export const RunParallelArgsSchema = z.object({
   calls: z.array(StepSchema).min(1).max(50).describe('Items run concurrently: {tool, args} or {command, cwd?, timeout_ms?}.'),
-  max_concurrency: z.number().int().min(1).max(16).optional().default(8),
+  max_concurrency: z.number().int().min(1).max(8).optional().default(4),
   timeout_ms: z.number().int().min(1_000).max(MAX_WAIT_MS).optional().default(90_000)
     .describe('How long to wait for results. Calls still running then continue as background jobs.'),
   output_chars: z.number().int().min(200).max(50_000).optional().default(4_000).describe('Max output characters shown per call.'),
@@ -262,13 +273,26 @@ function enqueue(job: Job): void {
   queue.push(job);
   pump();
 }
+/** Recover from unexpected job executor faults without losing the next jobs.
+ * Ordinary tool failures are already handled by runJob; this is the last-resort
+ * path for unforeseen formatter/persistence exceptions.
+ */
+function markInternalJobFailure(job:Job,error:unknown):void {
+  const message=(error instanceof Error?error.message:String(error)).slice(0,800);
+  job.status='failed';
+  job.endedAt=Date.now();
+  job.currentStep=-1;
+  job.results.push({index:job.results.length,name:'internal job execution',ok:false,ms:0,output:'JOB_FAILED: '+message});
+  job.resolveDone?.();
+}
 
 function pump(): void {
   while (runningPooled < MAX_CONCURRENT_JOBS && queue.length) {
     const job = queue.shift()!;
     if (job.status !== 'queued') continue; // cancelled while queued
     runningPooled++;
-    void runJob(job).finally(() => { runningPooled--; pump(); });
+    void runJob(job).catch(e=>markInternalJobFailure(job,e))
+      .finally(() => { runningPooled--; pump(); });
   }
 }
 
@@ -353,12 +377,18 @@ function headline(j: Job): string {
   return `[${j.id}${name}${grp}] ${j.status.toUpperCase()} · ${timing}${counts}`;
 }
 
-function detail(j: Job, outputChars: number): string {
+function detail(j: Job, outputChars: number, stepOffset=0, stepLimit=10): string {
   let s = headline(j);
-  for (const r of j.results) {
-    s += `\n  ${r.index + 1}. ${r.ok ? 'OK ' : 'ERR'} ${r.name} (${secs(r.ms)})`;
-    if (r.output) s += `\n${clip(r.output, outputChars).split('\n').map((l) => `     ${l}`).join('\n')}`;
+  const selected=j.results.slice(stepOffset,stepOffset+stepLimit);
+  let rendered=0;
+  for (const r of selected) {
+    const head=`\n  ${r.index + 1}. ${r.ok ? 'OK ' : 'ERR'} ${r.name} (${secs(r.ms)})`;
+    const body=r.output ? '\n'+clip(r.output,Math.min(outputChars,32_000)).split('\n').map(l=>'     '+l).join('\n') : '';
+    if(s.length+head.length+body.length>MAX_MCP_JOB_OUTPUT-600)break;
+    s+=head+body;rendered++;
   }
+  const next=stepOffset+rendered;
+  if(next<j.results.length)s+=`\n[MORE JOB STEPS: ${j.results.length-next} results remain. Call get_job({id:"${j.id}",step_offset:${next},step_limit:${stepLimit},output_chars:${Math.min(outputChars,8000)}}).]`;
   const skipped = j.steps.length - j.results.length;
   if (isFinished(j) && skipped > 0) s += `\n  (${skipped} step(s) not run)`;
   return s;
@@ -382,14 +412,24 @@ function summary(picked: Job[], outputChars: number, missing: string[] = []): st
   if (missing.length) s += `\nUnknown job ids: ${missing.join(', ')}`;
   const fresh = finished.filter((j) => !j.reported);
   const old = finished.filter((j) => j.reported);
-  for (const j of fresh) s += `\n\n${detail(j, outputChars)}`;
-  if (old.length) s += `\n\nAlready reported earlier:\n${old.map((j) => `  ${headline(j)}`).join('\n')}`;
+  const displayed:Job[]=[];
+  for(const j of fresh){
+    const report='\n\n'+detail(j,Math.min(outputChars,6000),0,10);
+    if(s.length+report.length>MAX_MCP_JOB_OUTPUT-1200)break;
+    s+=report;displayed.push(j);
+  }
+  if(displayed.length<fresh.length)
+    s+=`\n[MORE JOB REPORTS: ${fresh.length-displayed.length} not yet shown. Call wait_jobs again with this group or fewer ids; these reports remain unreported.]`;
+  if (old.length) {
+    const report='\n\nAlready reported earlier:\n'+old.map(j=>'  '+headline(j)).join('\n');
+    s+=report.slice(0,Math.max(0,MAX_MCP_JOB_OUTPUT-s.length-200));
+  }
   if (running.length || queued.length) {
     s += `\n\nStill in progress:\n${[...running, ...queued].map((j) => `  ${headline(j)}`).join('\n')}`;
     s += '\nCall wait_jobs again to keep waiting.';
   }
-  for (const j of fresh) j.reported = true;
-  return s;
+  for (const j of displayed) j.reported = true;
+  return capJobReply(s);
 }
 
 async function waitUntil(picked: Job[], cond: () => boolean, timeoutMs: number): Promise<void> {
@@ -443,8 +483,8 @@ export async function handleGetJob(args: unknown): Promise<ServerResult> {
   await loadHistory();
   const j = jobs.get(parsed.data.id);
   if (!j) return text(`Unknown job id: ${parsed.data.id}`, true);
-  const out = detail(j, parsed.data.output_chars);
-  if (isFinished(j)) j.reported = true;
+  const out = detail(j, parsed.data.output_chars,parsed.data.step_offset,parsed.data.step_limit);
+  if (isFinished(j) && !out.includes('[MORE JOB STEPS:')) j.reported = true;
   return text(out);
 }
 
@@ -489,25 +529,34 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
   const batch = a.calls.map((c, i) => createJob([c], { label: c.label ?? `#${i + 1} ${stepName(c)}`, group }));
   // Own worker pool, separate from spawn_job's slots, so quick reads are never stuck behind long jobs.
   let next = 0;
-  const worker = async () => { while (next < batch.length) await runJob(batch[next++]); };
-  for (let w = 0; w < Math.min(a.max_concurrency, batch.length); w++) void worker();
+  const worker = async () => {
+    while (next < batch.length) {
+      const job=batch[next++];
+      try {await runJob(job);}
+      catch(e) {markInternalJobFailure(job,e);}
+    }
+  };
+  for (let w = 0; w < Math.min(a.max_concurrency, batch.length); w++)
+    void worker().catch(()=>{ /* Last resort: job-level exceptions are handled above. */ });
 
   await waitUntil(batch, () => batch.every(isFinished), a.timeout_ms);
 
   const finished = batch.filter(isFinished);
   const failed = finished.filter((j) => j.status !== 'succeeded');
   let s = `run_parallel: ${finished.length}/${batch.length} done${failed.length ? `, ${failed.length} failed` : ''}.`;
+  let shown=0;
   for (const j of batch) {
-    s += '\n\n';
-    if (isFinished(j)) {
-      const r = j.results[0];
-      s += `=== ${j.label} -> ${j.status === 'succeeded' ? 'OK' : j.status.toUpperCase()} (${secs((j.endedAt ?? 0) - (j.startedAt ?? j.createdAt))})`;
-      if (r?.output) s += `\n${clip(r.output, a.output_chars)}`;
-      j.reported = true;
-    } else {
-      s += `=== ${j.label} -> STILL ${j.status.toUpperCase()} as background job ${j.id}`;
-    }
+    const r=j.results[0];
+    let part='\n\n'+(isFinished(j)
+      ? `=== ${j.label} -> ${j.status === 'succeeded' ? 'OK' : j.status.toUpperCase()} (${secs((j.endedAt ?? 0) - (j.startedAt ?? j.createdAt))}) jobId=${j.id}`
+      : `=== ${j.label} -> STILL ${j.status.toUpperCase()} as background job ${j.id}`);
+    if(isFinished(j)&&r?.output)part+='\n'+clip(r.output,Math.min(a.output_chars,16000));
+    if(s.length+part.length>MAX_MCP_JOB_OUTPUT-800)break;
+    s+=part;shown++;
+    if(isFinished(j))j.reported=true;
   }
+  if(shown<batch.length)
+    s+=`\n[MORE PARALLEL RESULTS: ${batch.length-shown} omitted from this reply. Call wait_jobs({group:"${group}"}) for unreported results or get_job({id:"..."}) by job ID. Do not rerun already-completed mutations.]`;
   if (finished.length < batch.length) s += `\n\nUnfinished calls keep running. Collect them with wait_jobs({"group":"${group}"}).`;
   return text(s);
 }
@@ -529,11 +578,11 @@ export function buildJobToolDefinitions(): ToolDefinition[] {
     {
       name: 'run_parallel',
       description: [
-        'Run several tool calls and/or shell commands AT THE SAME TIME on this device and get all results in ONE call.',
+        'Run independent tool calls/shell commands concurrently on this device. Total combined reply is capped at 128K characters; use wait_jobs(group) and get_job(id,step_offset) for omitted results without rerunning side effects.',
         'Use it whenever you would otherwise make several independent calls in a row: reading many files, several searches,',
         'git_status in many repos, running lint + typecheck + tests together, etc.',
         'Each item is {tool, args} (any BRC tool, args exactly as for a direct call) or {command, cwd?, timeout_ms?}.',
-        'Results come back in input order. Items still running at timeout_ms (default 90s, max 100s) continue as',
+        'Results come back in input order, with bounded output and an explicit group for follow-up. Do not run writes to the same file concurrently. Items still running at timeout_ms (default 90s, max 100s) continue as',
         'background jobs; collect them with wait_jobs({group}). Commands that exit non-zero are reported as failed.',
       ].join('\n'),
       inputSchema: zodToJsonSchema(RunParallelArgsSchema),

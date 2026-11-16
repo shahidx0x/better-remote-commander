@@ -187,8 +187,8 @@ class ConfigManager {
       })(),
       allowedDirectories: [],
       telemetryEnabled: false, // Better Remote Commander (BRC): off by default
-      fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
-      fileReadLineLimit: 1000,  // Default line limit for file read operations (changed from character-based)
+      fileWriteLineLimit: 1000,  // New installs: larger direct writes, still hard-capped for safety
+      fileReadLineLimit: 300,  // New installs: smaller default read windows, with pagination
       pendingWelcomeOnboarding: true, // New install flag - triggers A/B test for welcome page
       welcomeOnboardingEligible: true // Distinguishes new installs from migrated legacy configs
     };
@@ -319,11 +319,23 @@ class ConfigManager {
       const dir = path.dirname(this.configPath);
       const filename = path.basename(this.configPath);
       this.watcher = watch(dir, { persistent: false }, (_event, changed) => {
+        // Win32 can repeatedly emit rename events after a watched directory is
+        // deleted, causing a busy event loop. Never watch a removed state dir.
+        if (!existsSync(dir)) {
+          this.watcher?.close();
+          this.watcher = null;
+          if (this.reloadTimer) { clearTimeout(this.reloadTimer); this.reloadTimer=null; }
+          return;
+        }
         if (changed && changed.toString() !== filename) return;
         if (this.reloadTimer) clearTimeout(this.reloadTimer);
         this.reloadTimer = setTimeout(() => void this.reloadConfigFromDisk(), 20);
       });
-      this.watcher.on('error', (error) => console.error('Config watcher error:', error));
+      this.watcher.on('error', (error) => {
+        this.watcher?.close();
+        this.watcher = null;
+        console.error('Config watcher error:', error);
+      });
     } catch (error) {
       console.error('Failed to watch config:', error);
     }

@@ -45,6 +45,24 @@ test('three coordination tools are unique and native spawning is never fabricate
  const status=ok(await callTool('worker_tasks',{action:'status',planId:p.planId}));assert.ok(!JSON.stringify(status).includes(p.coordinatorKey));assert.equal(status.tasks.length,2);
  assert.equal(await fs.stat(path.join(root,'.brc')).catch(()=>null),null);
 });
+
+test('planned new directories with a trailing slash allow their own files, never outside scope',async()=>{
+ const root=await fixture();
+ const p=await create(root,[task('new',['src/new-module/'])],{maxWorkers:2});
+ const lease=await claim(p,'new');
+ assert.ok(lease.expiresAt-Date.now()>12*60*1000,'new default lease should be 15 minutes');
+ await fs.mkdir(path.join(root,'src','new-module'));
+ const allowed={path:'src/new-module/feature.ts',expected_sha256:null,content:'export const newFeature = true;\n'};
+ const denied={path:'src/a.cs',expected_sha256:sha256(await fs.readFile(path.join(root,'src/a.cs'))),content:'ESCAPE'};
+ bad(await patch(p,'new',lease,[denied]),'TASK_SCOPE_VIOLATION');
+ ok(await patch(p,'new',lease,[allowed]));
+ const preview=ok(await integrate(p,'preview'));
+ const applied=ok(await integrate(p,'apply',{review_sha256:preview.review_sha256}));
+ assert.equal(applied.committed,true);
+ assert.equal(await fs.readFile(path.join(root,'src','new-module','feature.ts'),'utf8'),allowed.content);
+ assert.equal(await fs.readFile(path.join(root,'src','a.cs'),'utf8'),'public class A {}\n');
+});
+
 test('overlapping writer scopes are rejected unless dependencies serialize them',async()=>{
  const root=await fixture();
  bad(await callTool('worker_tasks',{action:'create',path:root,goal:'conflict',tasks:[task('a',['src']),task('b',['src/a.cs'])]}),'OVERLAPPING_SCOPE');

@@ -56,8 +56,8 @@ export const KillProcessArgsSchema = z.object({
 export const ReadFileArgsSchema = z.object({
   path: z.string(),
   isUrl: z.boolean().optional().default(false),
-  offset: z.number().optional().default(0),
-  length: z.number().optional().default(1000),
+  offset: z.number().int().optional().default(0),
+  length: z.number().int().min(1).max(2000).optional(),
   sheet: z.string().optional(),  // String only for MCP client compatibility (Cursor doesn't support union types in JSON Schema)
   range: z.string().optional(),
   options: z.record(z.any()).optional(),
@@ -70,8 +70,8 @@ export const ReadFileArgsSchema = z.object({
 // BRC: `files` adds per-file line ranges (offset/length, same semantics as read_file).
 export const ReadMultipleFilesEntrySchema = z.object({
   path: z.string(),
-  offset: z.number().optional(),
-  length: z.number().optional(),
+  offset: z.number().int().optional(),
+  length: z.number().int().min(1).max(2000).optional(),
 });
 
 export const ReadMultipleFilesArgsSchema = z.object({

@@ -18,7 +18,17 @@ export async function instructionContext(root: string, focus: string | undefined
     let remaining = maxChars;
     const instructions: Instruction[] = [], warnings: string[] = [], directories = [root];
     if (focus) {
-        const st = await fs.stat(focus), relative = path.relative(root, st.isDirectory() ? focus : path.dirname(focus));
+        let focusDir = path.dirname(focus);
+        try {
+            const st = await fs.stat(focus);
+            if (st.isDirectory()) focusDir = focus;
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+            // New files (including yet-to-be-created nested directories) are
+            // a normal coding workflow, not a failed project_context request.
+            warnings.push('Focus path does not exist yet; using its planned directory for instruction lookup.');
+        }
+        const relative = path.relative(root, focusDir);
         let dir = root;
         for (const part of relative.split(path.sep).filter(Boolean).slice(0, 12)) {
             dir = path.join(dir, part);

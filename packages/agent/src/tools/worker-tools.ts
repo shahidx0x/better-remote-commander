@@ -17,7 +17,7 @@ export const WorkerTasksSchema = z.object({
     hostMode: z.enum(['native_workers', 'parallel_tools', 'single']).default('single'),
     maxWorkers: z.number().int().min(1).max(10).default(3), requiredChecks: z.array(Check).max(5).optional(),
     planId: z.string().uuid().optional(), taskId: Id.optional(), workerId: z.string().min(1).max(80).regex(/^[^\x00-\x1f\x7f]+$/).optional(),
-    coordinatorKey: Key.optional(), claimKey: Key.optional(), leaseSeconds: z.number().int().min(30).max(900).default(300),
+    coordinatorKey: Key.optional(), claimKey: Key.optional(), leaseSeconds: z.number().int().min(30).max(3600).default(900),
     reads: z.array(z.object({ path: z.string().min(1).max(500), offset: z.number().int().min(0).default(0), length: z.number().int().min(1).max(400).default(120) }).strict()).max(16).optional(),
 }).strict();
 export const WorkerPatchSchema = z.object({ planId: z.string().uuid(), taskId: Id, claimKey: Key, submissionId: Id,
@@ -45,7 +45,7 @@ export const WORKER_TOOL_HANDLERS: Record<string, (raw: Record<string, unknown>)
 export function buildWorkerToolDefinitions(): ToolDefinition[] {
     return [
         { name: 'worker_tasks', schema: WorkerTasksSchema,
-            description: 'Optional host-native parallel coding coordination. create(path,goal,tasks with owned scope/dependsOn), status, claim(workerId, optional reads), renew/release, coordinator reset/set_checks/cancel. If the host truly supports spawning workers with these MCP tools, delegate ready independent tasks (prefer 2-4; max 10). Otherwise use ordinary batches or one AI; this server does not spawn models or call APIs. hostMode is caller-declared, not detection. Claims expire; dependencies wait for integration. Keep coordinatorKey with parent. RAM-only bounded state; scope is not an OS sandbox. Skip this tool for small single-worker edits.' },
+            description: 'Optional host-native parallel coding coordination. create(path,goal,tasks with owned scope/dependsOn), status, claim(workerId, optional reads), renew/release, coordinator reset/set_checks/cancel. If the host truly supports spawning workers with these MCP tools, delegate ready independent tasks (prefer 2-4; max 10). Otherwise use ordinary batches or one AI; this server does not spawn models or call APIs. hostMode is caller-declared, not detection. Claims default to a 15-minute lease (max 60 minutes); renew before expiry, reclaim and reread hashes if expired. For scopes covering not-yet-created directories, use a trailing slash (e.g. src/new-feature/). Dependencies wait for integration. Keep coordinatorKey with parent. RAM-only bounded state; scope is not an OS sandbox. Skip this tool for small single-worker edits.' },
         { name: 'worker_patch', schema: WorkerPatchSchema,
             description: 'A claimed worker submits a proposed UTF-8 patch using planId/taskId/claimKey/submissionId, summary and up to 16 changes (same shape as workspace_batch). Exact hashes required; null means create-only. Validates owned canonical paths and current hashes, but writes NO project files. Read-only tasks submit summary and no changes. Same submissionId/payload replay is idempotent; expired/replaced claims cannot submit. 2 MiB/patch; staged patches stay in RAM. Workers must not use direct write or host-shell tools instead.' },
         { name: 'worker_integrate', schema: WorkerIntegrateSchema,

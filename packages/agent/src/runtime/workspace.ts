@@ -24,7 +24,13 @@ export function inside(root: string, file: string): boolean {
 }
 export async function rootPath(raw: string): Promise<string> {
     const valid = await validatePath(path.resolve(raw));
-    const real = await fs.realpath(valid);
+    let real: string;
+    try { real = await fs.realpath(valid); }
+    catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT')
+            throw new AgentError('PROJECT_NOT_FOUND', 'Project folder does not exist. Check the absolute root path and retry.');
+        throw e;
+    }
     if (!(await fs.stat(real)).isDirectory())
         throw new AgentError('NOT_A_DIRECTORY', 'Project root must be a directory.');
     return real;
@@ -33,16 +39,35 @@ export async function projectPath(root: string, raw: string): Promise<string> {
     const absolute = path.resolve(root, raw);
     if (!inside(root, absolute))
         throw new AgentError('OUTSIDE_PROJECT', 'Path is outside the requested project.');
-    const valid = absolute;
-    // Resolve and enforce the narrow project boundary, then apply the configured policy.
+    // Check the project boundary before the wider allowed-directory policy.
+    // Resolve the deepest EXISTING ancestor so a planned nested file works,
+    // while a symlink/junction escaping this project still fails closed.
     let real: string;
-    try {
-        real = await fs.realpath(valid);
-    }
+    try { real = await fs.realpath(absolute); }
     catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT')
-            throw e;
-        real = path.join(await fs.realpath(path.dirname(valid)), path.basename(valid));
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+        let parent = path.dirname(absolute);
+        const missing = [path.basename(absolute)];
+        while (true) {
+            try {
+                real = path.join(await fs.realpath(parent), ...missing);
+                break;
+            } catch (err) {
+                if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+                // A dangling symlink/junction is not a safe "new folder".
+                const stat = await fs.lstat(parent).catch((x:NodeJS.ErrnoException) => {
+                    if (x.code === 'ENOENT') return null;
+                    throw x;
+                });
+                if (stat?.isSymbolicLink())
+                    throw new AgentError('OUTSIDE_PROJECT', 'A broken symlink/junction cannot be used as a project path.');
+                const ancestor = path.dirname(parent);
+                if (ancestor === parent)
+                    throw new AgentError('PROJECT_NOT_FOUND', 'No existing ancestor for this project path.');
+                missing.unshift(path.basename(parent));
+                parent = ancestor;
+            }
+        }
     }
     if (!inside(root, real))
         throw new AgentError('OUTSIDE_PROJECT', 'Symlink or junction escapes the requested project.');

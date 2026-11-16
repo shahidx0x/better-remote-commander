@@ -17,7 +17,7 @@ import { activity, RETENTION_MS } from '../runtime/activity.js';
 import { operationStatus, cancelOperation } from '../runtime/operations.js';
 import { checkCancelled, getCallContext, withCallContext } from '../context.js';
 
-const SnapshotSchema = z.object({ path:z.string().min(1), offset:z.number().int().min(0).default(0), length:z.number().int().min(1).max(2000).default(200) });
+const SnapshotSchema = z.object({ path:z.string().min(1), offset:z.number().int().min(0).default(0), length:z.number().int().min(1).max(2000).default(200), charOffset:z.number().int().min(0).optional(), charLength:z.number().int().min(1).max(100000).default(50000) });
 const ContextSchema = z.object({ path:z.string().min(1), pattern:z.string().min(1), literalSearch:z.boolean().default(true), filePattern:z.string().optional(), maxResults:z.number().int().min(1).max(50).default(10), contextLines:z.number().int().min(0).max(30).default(5) });
 const EditSchema = z.object({ old_string:z.string().min(1), new_string:z.string(), expected_replacements:z.number().int().min(1).max(10000).default(1) });
 const EditFilesSchema = z.object({ files:z.array(z.object({ path:z.string().min(1), expected_sha256:z.string().regex(/^[a-fA-F0-9]{64}$/), edits:z.array(EditSchema).min(1).max(100) })).min(1).max(16), dryRun:z.boolean().default(false) });
@@ -27,17 +27,31 @@ const CancelSchema = z.object({ callId:z.string().min(1).max(100) });
 import { BatchSchema, runBatch } from '../runtime/fast-batch.js';
 export { BatchSchema, runBatch };
 import { cacheStatus } from '../runtime/resource-limits.js';
+import { platformCapabilities } from '../runtime/platform-capabilities.js';
 
 
-export async function snapshot(file:string, offset=0, length=200) {
-  file = await validatePath(file);
-  const bytes = await readBounded(file);
-  const content = decodeCode(bytes);
-  const lines = content.split('\n');
-  const selected = lines.slice(offset,offset+length).join('\n');
-  return {path:file,sha256:sha256(bytes),sizeBytes:bytes.length,offset,length:Math.min(length,Math.max(0,lines.length-offset)),totalLines:lines.length,text:selected.slice(0,100000),truncated:selected.length>100000};
+export async function snapshot(file:string, offset=0, length=200, charOffset?:number, charLength=50000) {
+  file=await validatePath(file);
+  const bytes=await readBounded(file,8*1024*1024), content=decodeCode(bytes), lines=content.split('\n');
+  if(charOffset!==undefined) {
+    const text=content.slice(charOffset,charOffset+charLength);
+    const hasMore=charOffset+text.length<content.length;
+    return {path:file,sha256:sha256(bytes),sizeBytes:bytes.length,mode:'characters',
+      charOffset,charLength:text.length,totalChars:content.length,text,truncated:hasMore,
+      nextCharOffset:hasMore?charOffset+text.length:null,
+      next:{tool:'read_code_file',args:hasMore?{path:file,charOffset:charOffset+text.length,charLength}:null},
+      note:hasMore?'Request nextCharOffset to continue, do not treat partial source as complete.':'Character range complete.'};
+  }
+  const selected=lines.slice(offset,offset+length).join('\n'),text=selected.slice(0,100000);
+  const oversized=selected.length>text.length, hasMore=oversized||offset+length<lines.length;
+  return {path:file,sha256:sha256(bytes),sizeBytes:bytes.length,offset,
+    length:Math.min(length,Math.max(0,lines.length-offset)),totalLines:lines.length,text,
+    truncated:hasMore,moreLines:offset+length<lines.length,
+    next:oversized?{tool:'read_code_file',args:{path:file,charOffset:0,charLength:50000},
+      note:'This line range exceeded the character budget. Use charOffset/charLength and nextCharOffset to retrieve it completely.'}:
+      hasMore?{tool:'read_code_file',args:{path:file,offset:offset+length,length}}:null};
 }
-async function readCodeFile(raw:unknown):Promise<ToolResult> { const a=SnapshotSchema.parse(raw);return result(await snapshot(a.path,a.offset,a.length)); }
+async function readCodeFile(raw:unknown):Promise<ToolResult> { const a=SnapshotSchema.parse(raw);return result(await snapshot(a.path,a.offset,a.length,a.charOffset,a.charLength)); }
 
 async function readCodeContext(raw:unknown):Promise<ToolResult> {
   const a=ContextSchema.parse(raw);
@@ -145,12 +159,12 @@ async function verifyProject(raw:unknown):Promise<ToolResult>{
 export const CODING_TOOL_HANDLERS:Record<string,(args:Record<string,unknown>)=>Promise<ToolResult>>={
   read_code_file:readCodeFile,read_code_context:readCodeContext,edit_files:editFiles,verify_project:verifyProject,
   project_index:async raw=>{const a=IndexSchema.parse(raw);return result(await projectIndex.manage(a.path,a.action,a.query,a.watch,a.limit));},
-  agent_status:async()=>result({operations:operationStatus(),latency:activity.metrics(),resources:cacheStatus(),indexedProjects:projectIndex.status(),codeGraphs:codeGraph.status(),parserCache:codeCacheStatus(),logging:{mode:"live-only",persistent:false},diagnostics:{dropped:activity.dropped,ioErrors:activity.ioErrors},memoryBytes:process.memoryUsage().rss}),
+  agent_status:async()=>result({operations:operationStatus(),latency:activity.metrics(),resources:cacheStatus(),indexedProjects:projectIndex.status(),codeGraphs:codeGraph.status(),parserCache:codeCacheStatus(),logging:{mode:"live-only",persistent:false},platform:platformCapabilities(),diagnostics:{dropped:activity.dropped,ioErrors:activity.ioErrors},memoryBytes:process.memoryUsage().rss}),
   cancel_operation:async raw=>{const a=CancelSchema.parse(raw);if(a.callId===getCallContext()?.id)throw new AgentError('INVALID_ARGUMENT','A cancellation call cannot cancel itself.');return result({callId:a.callId,cancelRequested:cancelOperation(a.callId),note:'Cancellation is cooperative. Commands/searches are stopped; completed edits are not undone. Interactive start_process sessions require force_terminate.'});},
 };
 export function buildCodingToolDefinitions():ToolDefinition[]{
   const defs:{name:string;description:string;schema:z.ZodTypeAny;readOnly?:boolean}[]=[
-    {name:'read_code_file',schema:SnapshotSchema,readOnly:true,description:'Read an exact UTF-8 code range (zero-based offset) plus SHA-256 of the full raw file. Use the hash for conflict-safe edits. Bounded to 8 MiB per file and 100000 output characters.'},
+    {name:'read_code_file',schema:SnapshotSchema,readOnly:true,description:'Read bounded UTF-8 source by zero-based LINE offset/length with exact full-file SHA-256; when a giant line exceeds the response limit, use charOffset/charLength (up to 100000 chars) and follow nextCharOffset until null. Response includes next requests and truncated/hasMore markers. File limit 8 MiB. Never edit based on incomplete content without checking the hash.'},
     {name:'read_code_context',schema:ContextSchema,readOnly:true,description:'Search code with ripgrep then return fresh surrounding snippets and file hashes in ONE call. Respects ignored files, directory policy and global result limits. Searches are literal by default.'},
     {name:'edit_files',schema:EditFilesSchema,description:'Apply exact edits to up to 16 UTF-8 files using mandatory expected_sha256 values from read_code_file/context. Validate all first, atomic replace per file, conflict-aware rollback on failure. dryRun previews hashes without writes. Not a crash-atomic multi-file transaction.'},
     {name:'batch_tools',schema:BatchSchema,description:'BEST FOR 2+ INDEPENDENT, DIFFERENT read/search/context operations in ONE MCP round trip (up to 64). If just reading 2+ known files, use read_multiple_files instead; for many specific code ranges/hashes use read_code_ranges. Auto mode overlaps consecutive reads up to concurrency=4 and orders any write barriers; parallel mode is read-only. Do not nest batches or include shell/config tools. Output is bounded; earlier writes are not rolled back. For multi-file edits + readback/checks prefer workspace_batch.'},

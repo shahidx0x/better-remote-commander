@@ -35,6 +35,7 @@ import { codeGraph } from './runtime/code-graph.js';
 import { consoleBanner, controlHint, connectionPanel, recentActivity, type AgentTerminal } from './terminal-ui.js';
 import { clearCodeCache } from './runtime/code-structure.js';
 import { runPluginCommand } from './plugins/cli-commands.js';
+import { isTermuxRuntime, platformCapabilities } from './runtime/platform-capabilities.js';
 
 const AGENT_VERSION = '2.0.7';
 
@@ -106,7 +107,7 @@ const connection: ConnectionOptions = {
   token: arg('token', flag('auto-connect') && !flag('non-interactive') && !process.argv.includes('--token') ? undefined : 'BRC_TOKEN'),
   deviceId: arg('device-id', flag('auto-connect') && !flag('non-interactive') && !process.argv.includes('--device-id') ? undefined : 'BRC_DEVICE_ID'),
   name: arg('name', 'BRC_NAME', os.hostname())!,
-  noBrowser: flag('no-browser'),
+  noBrowser: flag('no-browser') || isTermuxRuntime(),
 };
 const startupAbort = new AbortController();
 connection.signal = startupAbort.signal;
@@ -143,6 +144,10 @@ if (!creds) {
 await startResourceMaintenance();
 setCurrentClient({ name: 'brc-agent', version: AGENT_VERSION });
 const tools = listTools();
+if (isTermuxRuntime()) {
+  const cap=platformCapabilities();
+  console.log(`Termux ARM64 capabilities: ${tools.length} tool definitions advertised; unavailable desktop/native tools: ${cap.disabledTools.join(', ')}. System ripgrep must be installed (pkg install ripgrep).`);
+}
 const terminalInfo: AgentTerminal = { name: creds.name, relay: creds.relayUrl, deviceId: creds.deviceId, version: AGENT_VERSION, coreVersion: CORE_VERSION, tools: tools.length };
 const visualConsole = !!process.stdout.isTTY && !connection.nonInteractive;
 console.log(visualConsole ? consoleBanner(terminalInfo) : `brc-agent ${AGENT_VERSION} (core ${CORE_VERSION}) - ${tools.length} tools - "${creds.name}" [${creds.deviceId}] -> ${creds.relayUrl}`);
@@ -158,7 +163,7 @@ let settingsOpen = false;
 let shuttingDown = false;
 let pluginSetupStarted = false;
 function startPluginSetup(): void {
-  if (pluginSetupStarted || flag('no-plugins') || process.env.BRC_PLUGINS === 'none') return;
+  if (pluginSetupStarted || flag('no-plugins') || process.env.BRC_PLUGINS === 'none' || isTermuxRuntime()) return;
   pluginSetupStarted = true;
   void (async () => {
     const [{ registerInstaller }, { ensureDefaultPlugins }] = await Promise.all([

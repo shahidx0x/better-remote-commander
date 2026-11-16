@@ -14,6 +14,41 @@ const { callTool, listTools } = await import(pathToFileURL(path.join(repo, 'pack
 const out = (r) => r.content.map((c) => c.text ?? '').join('\n');
 const sleepCmd = (ms, msg = 'done') => `node -e "setTimeout(()=>console.log('${msg}'),${ms})"`;
 
+
+test('parallel output remains under 128K and unreported results can be fetched without re-execution',async()=>{
+  const fs=await import('node:fs/promises');
+  const file=path.join(process.env.BRC_HOME,'parallel-huge.txt');
+  await fs.writeFile(file,'T'.repeat(38000));
+  const calls=Array.from({length:12},(_,i)=>({tool:'read_file',args:{path:file,length:1},label:'read-'+i}));
+  const result=await callTool('run_parallel',{calls,max_concurrency:4,output_chars:20000,timeout_ms:30000});
+  const body=out(result);
+  assert.ok(body.length<=128000,'Too-large combined reply '+body.length);
+  assert.match(body,/MORE PARALLEL RESULTS/);
+  const group=body.match(/wait_jobs\(\{group:"(par-[a-z0-9]+)"\}/)?.[1];
+  assert.ok(group,'Recovery group missing: '+body.slice(-400));
+  const remaining=await callTool('wait_jobs',{group,timeout_ms:0,output_chars:3000});
+  assert.ok(out(remaining).length<=128000);
+  assert.match(out(remaining),/read-/);
+});
+test('get_job paginates 50-step logs without emitting multi-megabyte responses',async()=>{
+  const fs=await import('node:fs/promises');
+  const file=path.join(process.env.BRC_HOME,'job-huge.txt');
+  await fs.writeFile(file,'J'.repeat(37000));
+  const steps=Array.from({length:12},()=>({tool:'read_file',args:{path:file,length:1}}));
+  const started=await callTool('spawn_job',{label:'bounded job',steps});
+  const id=out(started).match(/job (j\w+)/)?.[1];
+  assert.ok(id);
+  await callTool('wait_jobs',{ids:[id],timeout_ms:30000,output_chars:500});
+  const first=await callTool('get_job',{id,output_chars:32000,step_limit:12});
+  assert.ok(out(first).length<=128000);
+  assert.match(out(first),/MORE JOB STEPS/);
+  const offset=Number(out(first).match(/step_offset:(\d+)/)?.[1]);
+  assert.ok(offset>0 && offset<12);
+  const second=await callTool('get_job',{id,output_chars:32000,step_offset:offset,step_limit:4});
+  assert.ok(out(second).length<=128000);
+  assert.match(out(second),/read_file/);
+});
+
 test('job tools are registered', () => {
   const names = listTools().map((t) => t.name);
   for (const n of ['run_parallel', 'spawn_job', 'wait_jobs', 'get_job', 'list_jobs', 'cancel_job']) assert.ok(names.includes(n), n);

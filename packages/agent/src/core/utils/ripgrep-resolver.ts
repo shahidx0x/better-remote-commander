@@ -99,6 +99,7 @@ export async function getRipgrepPath(): Promise<string> {
     'Please install ripgrep:\n' +
     '  macOS: brew install ripgrep\n' +
     '  Linux: See https://github.com/BurntSushi/ripgrep#installation\n' +
+    '  Termux/Android ARM64: pkg install ripgrep (the GNU/Linux bundled binary is not compatible with Android Bionic)\n' +
     '  Windows: choco install ripgrep or download from https://github.com/BurntSushi/ripgrep/releases'
   );
 }

@@ -10,6 +10,7 @@ import { mkdirSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { isTermuxRuntime } from './runtime/platform-capabilities.js';
 
 const NAME = 'brc-agent';
 const cliPath = () => fileURLToPath(new URL('./cli.js', import.meta.url));
@@ -17,6 +18,7 @@ const home = () => process.env.BRC_HOME ?? path.join(os.homedir(), '.brc');
 const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'pipe' }).toString();
 
 export function installService(extraArgs: string[]): string {
+  if(isTermuxRuntime()) throw new Error('Termux has no desktop systemd user service. Use Termux:Boot or a foreground Termux shell with node dist/cli.js --no-plugins --no-browser.');
   mkdirSync(home(), { recursive: true });
   const node = process.execPath;
   const args = [cliPath(), '--no-browser', '--non-interactive', ...extraArgs];
@@ -54,6 +56,7 @@ export function installService(extraArgs: string[]): string {
 }
 
 export function uninstallService(): string {
+  if(isTermuxRuntime()) throw new Error('Termux does not use BRC desktop service registration. Manage your Termux:Boot script or foreground shell instead.');
   if (process.platform === 'win32') {
     try { run('schtasks', ['/End', '/TN', NAME]); } catch { /* not running */ }
     run('schtasks', ['/Delete', '/F', '/TN', NAME]);

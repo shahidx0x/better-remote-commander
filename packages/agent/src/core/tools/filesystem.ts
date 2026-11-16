@@ -64,7 +64,7 @@ function getFileExtension(filePath: string): string {
  */
 async function getDefaultReadLength(): Promise<number> {
     const config = await configManager.getConfig();
-    return config.fileReadLineLimit ?? 1000; // Default to 1000 lines if not set
+    return Math.min(2000, Math.max(1, Math.trunc(config.fileReadLineLimit ?? 300))); // bounded default
 }
 
 /**

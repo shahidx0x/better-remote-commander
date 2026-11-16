@@ -12,7 +12,7 @@ import { checkCancelled } from '../context.js';
 import { sourceCandidate } from './languages.js';
 export const WORKER_LIMITS = Object.freeze({ plans: 4, tasks: 32, maxWorkers: 10, defaultWorkers: 3, receipts: 64, appliedPaths: 512,
     patchBytes: 2 * 1024 * 1024, planPatchBytes: 8 * 1024 * 1024, totalPatchBytes: 16 * 1024 * 1024,
-    idleMs: 2 * 3600000, terminalMs: 5 * 60000, leaseMs: 5 * 60000 });
+    idleMs: 2 * 3600000, terminalMs: 5 * 60000, leaseMs: 15 * 60000 });
 export type WorkerMode = 'native_workers' | 'parallel_tools' | 'single';
 type Change = z.infer<typeof WorkspaceChangeSchema>;
 type TaskState = 'queued' | 'claimed' | 'submitted' | 'applied';
@@ -233,7 +233,10 @@ export class WorkerCoordinator {
                         throw new AgentError('INVALID_SCOPE', 'Scopes must be directories or regular files.');
                     const canonicalRelative = slash(path.relative(root, canonical));
                     safeRelative(canonicalRelative || '.');
-                    scope.push({ relative, canonical, key: await lockKey(canonical), directory: !!stat?.isDirectory() });
+                    // A planned directory must be explicitly marked with a trailing slash.
+                    // Never infer that an extensionless NEW file grants directory-wide writes.
+                    const plannedDirectory = !stat && /[\\/]$/.test(raw);
+                    scope.push({ relative, canonical, key: await lockKey(canonical), directory: !!stat?.isDirectory() || plannedDirectory });
                 }
                 tasks.set(input.id, { id: input.id, goal: input.goal, scope, dependsOn: [...new Set(input.dependsOn ?? [])], readOnly: !!input.readOnly,
                     state: 'queued', generation: 0, submitting: false });
@@ -346,7 +349,7 @@ export class WorkerCoordinator {
                 throw new AgentError('WORKER_ID_REQUIRED', 'Provide a worker label (not an authentication identity).');
             const active = [...p.tasks.values()].filter(t => t.state === 'claimed');
             if (active.length >= p.maxWorkers)
-                throw new AgentError('WORKER_CAPACITY', 'All worker slots are claimed. Submit/release/expire a claim first.', true);
+                throw new AgentError('WORKER_CAPACITY', 'All worker slots are claimed. Submit, release, or wait for expiry; do not create a duplicate plan.', true);
             const t = a.taskId ? this.task(p, a.taskId) : [...p.tasks.values()].find(t => t.state === 'queued' && this.ready(p, t));
             if (!t)
                 return { planId: p.id, task: null, reason: 'No ready task. Integrate prerequisite submissions or wait for existing workers.', spawnedModels: 0 };
@@ -375,7 +378,7 @@ export class WorkerCoordinator {
                 checkCancelled();
                 return { planId: p.id, root: p.root, task: { id: t.id, goal: t.goal, scope: t.scope.map(s => s.relative), readOnly: t.readOnly, dependsOn: t.dependsOn },
                     workerId: t.worker, claimKey, expiresAt: t.expiresAt, generation: t.generation, snapshot,
-                    instructions: 'Read/context tools may run in parallel. Do not edit shared source or run host-shell commands as a delegated worker. Submit a proposed patch with this claimKey; renew before expiry. Parent integrates and verifies.',
+                    instructions: 'Read/context tools may run in parallel. Do not edit shared source or run host-shell commands as a delegated worker. Submit a proposed patch with this claimKey; renew before expiresAt (default 15 minutes; max 60). If a claim expired, re-claim and re-read fresh hashes; never blindly resubmit. Parent integrates and verifies.',
                     persistent: false, spawnedModels: 0 };
             }
             catch (error) {
@@ -493,7 +496,7 @@ export class WorkerCoordinator {
             }
             checkCancelled();
             if ((t.expiresAt ?? 0) <= this.now())
-                throw new AgentError('CLAIM_EXPIRED', 'Claim expired during validation. Reclaim and read fresh source.');
+                throw new AgentError('CLAIM_EXPIRED', 'Claim expired during patch validation. Call worker_tasks status, reclaim the task, reread fresh hashes and submit once using its new claimKey. No files were written.');
             t.submission = { id: a.submissionId, digest, summary: a.summary, changes, bytes };
             t.state = 'submitted';
             t.expiresAt = undefined;

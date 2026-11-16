@@ -83,6 +83,11 @@ export async function liveTools(hub: DeviceHub, store: RelayStore, userId: strin
   const pauseStates = await Promise.all(connected.map(d => store.getDevice(d.deviceId)));
   const online = connected.filter((d,i) => !pauseStates[i]?.paused);
   const devices=online.map(d=>hub.get(d.deviceId)!).filter(Boolean);
+  // With an Android-only connection, don't advertise desktop-only tools from
+  // the static catalog. The Android agent reports its actual supported tools
+  // in hello; an offline relay still advertises the full stable catalog.
+  const androidOnly=devices.length>0 && devices.every(d=>d.info.platform==='android');
+  const available=androidOnly ? new Set(devices.flatMap(d=>d.tools.map(t=>t.name))) : null;
   let cache=schemaCaches.get(hub);if(!cache){cache=new Map();schemaCaches.set(hub,cache);}
   const prior=cache.get(userId);
   if(prior&&prior.devices.length===devices.length&&devices.every((d,i)=>prior.devices[i]===d&&prior.definitions[i]===d.tools)){
@@ -93,7 +98,8 @@ export async function liveTools(hub: DeviceHub, store: RelayStore, userId: strin
   // Do not cache user authorization: this is only static, public schema metadata.
   const merged = new Map<string, { name: string; description: string; inputSchema: unknown; annotations?: Record<string, unknown> }>();
   for (const t of BUNDLED_AGENT_TOOL_CATALOG)
-    merged.set(t.name, { ...t, inputSchema: withDeviceId(t.inputSchema) });
+    if (!available || available.has(t.name))
+      merged.set(t.name, { ...t, inputSchema: withDeviceId(t.inputSchema) });
   // Prefer currently connected agent schemas if its installed version differs.
   // Overriding preserves catalog order for the usual tools/list snapshot.
   for (const d of devices) for (const t of d.tools)

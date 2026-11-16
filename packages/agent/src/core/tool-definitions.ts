@@ -44,8 +44,8 @@ export function buildToolDefinitions(): ToolDefinition[] {
                 - blockedCommands (array of blocked shell commands)
                 - defaultShell (shell to use for commands)
                 - allowedDirectories (paths the server can access)
-                - fileReadLineLimit (max lines for read_file, default 1000)
-                - fileWriteLineLimit (max lines per write_file call, default 50)
+                - fileReadLineLimit (default lines for read_file, default 300; hard max 2000)
+                - fileWriteLineLimit (max lines per write_file call, default 1000; hard max 2000, max 1 MiB)
                 - telemetryEnabled (boolean for telemetry opt-in/out)
                 - currentClient (information about the currently connected MCP client)
                 - clientHistory (history of all clients that have connected)
@@ -92,7 +92,7 @@ export function buildToolDefinitions(): ToolDefinition[] {
         name: "read_file",
         description: `
                 ONE FILE OR URL ONLY. If you already know 2+ paths, prefer ONE read_multiple_files call, not several read_file calls or Promise.all(read_file). For narrow code snippets across files with hashes use read_code_ranges; mixed independent reads use batch_tools.
-                Read path from allowed directories. Use isUrl=true for URLs. offset/length select lines (0-based) for text files, negative offset tails efficiently; default limit is configured. If you need a full-file SHA-256 for safe edits, use read_code_file.
+                Read path from allowed directories. Use isUrl=true for URLs. offset/length select lines (0-based) for text files, negative offset tails efficiently; default 300 lines on a new install, configurable up to 2000 lines. Model-facing text is capped at 128000 characters with an explicit TRUNCATED notice for huge lines; request narrower ranges or use read_code_file for character offsets. If you need a full-file SHA-256 for safe edits, use read_code_file.
                 Supported formats: text; Excel via sheet/range (A1:D100) or rows; PDF as page text/images with page offsets; DOCX outline by default (offset=0), raw XML with nonzero offset for exact edits; raster images as image content (use read_images for optimized previews/contact sheets). Use dedicated tools instead of launching a shell to cat/type files.
                 ${PATH_GUIDANCE}
                 ${CMD_PREFIX_DESCRIPTION}`,
@@ -107,6 +107,8 @@ export function buildToolDefinitions(): ToolDefinition[] {
         name: "read_multiple_files",
         description: `
                 PREFERRED FOR 2 OR MORE KNOWN FILE PATHS: read_multiple_files uses ONE MCP call and reads up to 8 files concurrently. Use this instead of repeating read_file, parallel Promise.all(read_file), or batching several identical read_file calls. Read only the files needed; search first when paths are unknown. For many narrow code snippets with hashes, prefer read_code_ranges. For mixed tool types, use batch_tools. For image previews, prefer read_images.
+
+                Returns a bounded combined response: 200 lines per file by default (up to 2000 when requested), at most 48000 text characters per item, 160000 total text characters and 2 MiB combined image data. A TRUNCATED notice means content is incomplete; reread a smaller range. For image-heavy batches prefer read_images.
 
                 Two ways to list files (can be combined):
                 - paths: ["/a.ts", "/b.ts"] → read each file from the start (default line limit)
@@ -152,7 +154,7 @@ export function buildToolDefinitions(): ToolDefinition[] {
                 - Excel (.xlsx, .xls, .xlsm): JSON 2D array or {"SheetName": [[...]]}
                   Example: '[["Name","Age"],["Alice",30]]'
 
-                Files over 50 lines will generate performance notes but are still written successfully.
+                Direct plain-text writes are limited to the configured fileWriteLineLimit (new default: 1000 lines, hard maximum: 2000) and 1 MiB UTF-8 per call. Oversized writes fail BEFORE changing files with WRITE_LINE_LIMIT/WRITE_SIZE_LIMIT. For large new files use mode=rewrite then explicit mode=append chunks; for edits of existing code use hash-checked workspace_batch or edit_block. Existing nonempty files require explicit mode to avoid accidental overwrites.
                 Only works within allowed directories.
 
                 ${PATH_GUIDANCE}
@@ -528,9 +530,7 @@ export function buildToolDefinitions(): ToolDefinition[] {
                 When a close but non-exact match is found, a character-level diff is shown in the format:
                 common_prefix{-removed-}{+added+}common_suffix to help you identify what's different.
 
-                Similar to write_file, there is a configurable line limit (fileWriteLineLimit) that warns
-                if the edited file exceeds this limit. If this happens, consider breaking your edits into
-                smaller, more focused changes.
+                edit_block warns about oversized search/replacement blocks. Unlike write_file's strict per-call create/append limit, it operates on existing files using focused exact replacements and atomic publication. Prefer small hash-checked edits and use workspace_batch for large coordinated changes.
 
                 ${PATH_GUIDANCE}
                 ${CMD_PREFIX_DESCRIPTION}`,
@@ -584,7 +584,7 @@ export function buildToolDefinitions(): ToolDefinition[] {
                 - offset: -50, length: 10    → Start 50 from end, read 10 lines
                 
                 OUTPUT PROTECTION:
-                - Uses same fileReadLineLimit as read_file (default: 1000 lines)
+                - Uses the configured fileReadLineLimit for process output (new default: 300 lines)
                 - Returns status like: [Reading 100 lines from line 0 (total: 5000 lines, 4900 remaining)]
                 - Prevents context overflow from verbose processes
                 

@@ -15,7 +15,25 @@ export function failure(err: unknown, callId?: string): ToolResult {
   const code = errorCode(err);
   const message = err instanceof Error ? err.message : String(err);
   const error = { code, message: message.slice(0, 4000), retryable: err instanceof AgentError ? err.retryable : false, callId };
-  return { isError: true, content: [{ type: 'text', text: `${code}: ${error.message}` }], structuredContent: { error } };
+  // Model-facing recovery is metadata, not an automatic retry. In particular,
+  // an interrupted mutation must never be replayed without checking its result.
+  const guidance: Record<string,string> = {
+    WRITE_LINE_LIMIT:'No file was changed. Split content into smaller chunks; start new file with rewrite, then append subsequent chunks, or use hash-checked workspace_batch.',
+    WRITE_SIZE_LIMIT:'No file was changed. Write a smaller <=1 MiB chunk, then append only unwritten content; avoid blind retries.',
+    WRITE_MODE_REQUIRED:'No file was changed. State mode=rewrite or mode=append explicitly.',
+    BUSY:'The agent queue is full. Wait briefly, retry the read-only operation once; for writes inspect state before retrying.',
+    WORKER_CAPACITY:'All worker slots are busy. Submit, release or renew a claim; do not create a competing plan.',
+    WORKER_PLAN_BUSY:'An integration is already running. Check worker_tasks status before retrying.',
+    CLAIM_EXPIRED:'Reclaim the task with worker_tasks, re-read current hashes and submit under the new claim. Old keys cannot be reused.',
+    FILE_CONFLICT:'Re-read current file and hash before proposing a fresh edit; do not force overwrite.',
+    RESULT_TOO_LARGE:'Tool result exceeded the WebSocket budget. Request narrower ranges or fewer files. Mutations may already have completed: inspect results before any retry.',
+    VERIFICATION_CHANGED:'Source changed during checks; stop parallel mutations and re-run validation when the tree is stable.',
+    PARSER_BUSY:'Reduce parser concurrency or the batch size and retry after in-flight parses finish.',
+    UNSUPPORTED_ON_TERMUX:'Choose a tool advertised by this Android agent; for desktop-native work switch to a desktop BRC Agent.',
+  };
+  const next=guidance[code];
+  return { isError: true, content: [{ type: 'text', text: `${code}: ${error.message}${next?'\\nNEXT ACTION: '+next:''}` }],
+    structuredContent: { error, ...(next?{recovery:{suggestion:next,automaticRetry:false}}:{}) } };
 }
 export function result(data: Record<string, unknown>, isError = false): ToolResult {
   return { isError, content: [{ type: 'text', text: JSON.stringify(data, null, 2) }], structuredContent: data };

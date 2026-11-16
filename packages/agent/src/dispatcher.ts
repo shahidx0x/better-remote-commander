@@ -28,6 +28,7 @@ import { assertHash, withFileLocks } from './runtime/file-safety.js';
 import { validatePath } from './core/tools/filesystem.js';
 import { projectIndex } from './runtime/project-index.js';
 import { getCallContext, withCallContext, checkCancelled } from './context.js';
+import { isTermuxRuntime, availableOnTermux } from './runtime/platform-capabilities.js';
 
 type Args = Record<string, unknown>;
 type Handler = (args: Args) => Promise<unknown>;
@@ -80,13 +81,14 @@ export function listTools(): ToolDefinition[] {
     cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildCodingToolDefinitions(), ...buildExpertToolDefinitions(), ...buildPolyglotToolDefinitions(), ...buildDeveloperToolDefinitions(), ...buildWorkerToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name))
       .filter(t => process.env.BRC_TOOL_PROFILE !== 'coding' || !['write_pdf','prepare_file_transfer','send_file_transfer','receive_file_transfer','get_recent_tool_calls','get_usage_stats'].includes(t.name))
+      .filter(t => !isTermuxRuntime() || availableOnTermux(t.name))
       .map(addToolChoice);
   }
   return cachedDefs;
 }
 
 export function hasTool(name: string): boolean {
-  return TOOL_HANDLERS.has(name);
+  return TOOL_HANDLERS.has(name) && (!isTermuxRuntime() || availableOnTermux(name));
 }
 
 
@@ -102,6 +104,8 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     checkCancelled();
     const handler=TOOL_HANDLERS.get(name);
     if(!handler || EXCLUDED_TOOLS.has(name))throw new AgentError('UNKNOWN_TOOL',`Unknown tool: ${name}`);
+    if(isTermuxRuntime()&&!availableOnTermux(name))throw new AgentError('UNSUPPORTED_ON_TERMUX',
+      `${name} needs a desktop/native feature unavailable on Android/Termux (Bionic). Use a supported file, search or terminal tool on this device, or run it on a desktop agent.`);
     args=args??{};
     await workerCoordinator.guardFileMutation(name,args);
     const perform=async()=>{

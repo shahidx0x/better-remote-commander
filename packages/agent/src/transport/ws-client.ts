@@ -5,6 +5,7 @@ import { withCallContext } from '../context.js';
 import { OperationScheduler,cancelOperation } from '../runtime/operations.js';
 import { AgentError,failure } from '../runtime/errors.js';
 import { PluginAdmin } from './plugin-admin.js';
+import { isTermuxRuntime } from '../runtime/platform-capabilities.js';
 export interface WsClientOptions {
  relayUrl:string;token:string;deviceId:string;name:string;agentVersion:string;coreVersion:string;tools:ToolDefinition[];
  callTool:(name:string,args:Record<string,unknown>)=>Promise<unknown>;
@@ -22,7 +23,7 @@ export class WsClient {
  private pongTimer?:NodeJS.Timeout;
  private reconnectTimer?:NodeJS.Timeout;
  private unauthorizedCount=0;
- private scheduler=new OperationScheduler(Math.min(16,Math.max(1,Number(process.env.BRC_MAX_CONCURRENCY)||4)),32);
+ private scheduler=new OperationScheduler(Math.min(16,Math.max(1,Number(process.env.BRC_MAX_CONCURRENCY)||(isTermuxRuntime()?2:4))),isTermuxRuntime()?16:32);
  private seen=new Map<string,number>();
  private readonly log:NonNullable<WsClientOptions['log']>;
  private readonly plugins:PluginAdmin;
@@ -112,6 +113,6 @@ export class WsClient {
   if(ws.bufferedAmount>8*1024*1024){ws.terminate();return;}
   try{ws.send(encoded);}catch{ws.terminate();}
  }
- private deviceInfo():DeviceInfo{return{deviceId:this.opts.deviceId,name:this.opts.name,platform:process.platform,arch:process.arch,hostname:os.hostname(),agentVersion:this.opts.agentVersion,coreVersion:this.opts.coreVersion};}
+ private deviceInfo():DeviceInfo{return{deviceId:this.opts.deviceId,name:this.opts.name,platform:isTermuxRuntime()?'android':process.platform,arch:process.arch,hostname:os.hostname(),agentVersion:this.opts.agentVersion,coreVersion:this.opts.coreVersion};}
  private armHeartbeat():void{clearTimeout(this.pongTimer);this.pongTimer=setTimeout(()=>{this.log('warn','Relay heartbeat missing; reconnecting');this.ws?.terminate();},DEFAULTS.pongTimeoutMs);}
 }

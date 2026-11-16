@@ -18,7 +18,30 @@ Every one of the 70 agent tools has an explicit `USE WHEN` and `USE INSTEAD` dec
 
 Do not insist on starting a coding session, building a graph, loading parsers or opening Docker for every tiny edit. The existing specialized tools remain available.
 
+## Reliable file budgets and project checks
+
+The BRC agent bounds direct file I/O with explicit pagination and errors:
+
+- `read_file` defaults to 300 lines on new installs (configurable `fileReadLineLimit`), hard max 2,000 lines. Model-facing plain text is capped at 128,000 characters and UI preview at 256,000. Huge single lines return **OUTPUT TRUNCATED**; request a smaller range or use `read_code_file` for character offsets.
+- `read_multiple_files` defaults to 200 lines per file, accepts explicit per-file ranges up to 2,000 lines, and caps returned content to 48,000 text characters per item, 160,000 characters combined and 2 MiB of image data. Truncated results are labeled; use smaller batches or `read_images`.
+- `write_file` defaults to 1,000 lines per call on new installs, configurable with `fileWriteLineLimit` (hard max: 2,000), and **1 MiB UTF-8 per call**. Oversized writes return structured `WRITE_LINE_LIMIT` or `WRITE_SIZE_LIMIT` **before changing a file**. Existing nonempty files require explicit `mode=rewrite` or `mode=append`, otherwise `WRITE_MODE_REQUIRED` prevents accidental overwrite.
+- Write larger new files in deliberate rewrite + append chunks. For existing source edits, use small, hash-checked `edit_block`, `edit_code_ranges` or bounded `workspace_batch`. The limits apply to individual requests, **not total project size**. An append operation is not automatically idempotent; inspect results before retrying.
+- `project_context` now supports a planned focus file and missing nested directories, reading existing scoped instructions. Missing project roots return `PROJECT_NOT_FOUND`; symlink/junction escapes remain blocked.
+- `run_project_checks` now returns `CHECK_FAILED` with the failing check, exit code and bounded log excerpt (up to 8,000 chars per step) rather than an opaque `TOOL_FAILED`. It still marks failed tests as failures. `VERIFICATION_CHANGED` indicates files changed while checks were running. Use `discover_checks` to find valid check IDs.
+
+Existing saved configuration can override new-install defaults. Use `get_config` to inspect current values and `set_config_value` to adjust them within hard bounds. Rebuild and restart the agent to use changed source code; the relay itself does not replace a running agent.
+
+These caps reduce oversized MCP results but cannot guarantee that the independent ChatGPT message stream never fails. Pillow/Python deprecation warnings are not BRC agent errors.
+
 ## Fewer round trips
+
+### Bounded parallel jobs
+
+`run_parallel` now uses a bounded 4-wide default and 8-wide hard cap, regardless of a higher requested concurrency. `BRC_MAX_JOBS` is bounded to 8 pooled jobs. Independent jobs can still run concurrently; do not write the same file from multiple jobs at once.
+
+To avoid very large MCP replies, `run_parallel`, `wait_jobs`, and `get_job` cap their complete **combined** response at 128,000 characters. If a response says `MORE PARALLEL RESULTS`, use its group with `wait_jobs({group: "par-..."})` to retrieve still-unreported jobs, **not another run_parallel call**. For a long multi-step job, call `get_job({id,step_offset:0,step_limit:10,output_chars:8000})`, and follow the returned `MORE JOB STEPS` offset until complete. Jobs continue when output is truncated; it is never safe to blindly replay a timed-out mutation.
+
+Each job step retains a bounded output excerpt in memory; job count is bounded. If the host disconnects or the agent restarts, inspect target files and hashes before reconstructing plans; in-RAM worker plans do not survive an agent restart. Actual host-native subagents are outside BRC: worker coordination stages/verifies patches, but does not spawn models.
 
 ### `batch_tools`
 
