@@ -19,16 +19,22 @@ test('job tools are registered', () => {
   for (const n of ['run_parallel', 'spawn_job', 'wait_jobs', 'get_job', 'list_jobs', 'cancel_job']) assert.ok(names.includes(n), n);
 });
 
+// Prints its own start and end time, so overlap can be checked without wall-clock thresholds
+// (CI runners can be slow to start processes).
+const stampCmd = (ms, tag) => `node -e "console.log('${tag}S'+Date.now());setTimeout(()=>console.log('${tag}E'+Date.now()),${ms})"`;
+
 test('run_parallel runs calls concurrently and keeps input order', async () => {
-  const t0 = Date.now();
   const r = await callTool('run_parallel', { calls: [
-    { command: sleepCmd(1500, 'A'), label: 'A' },
-    { command: sleepCmd(1500, 'B'), label: 'B' },
+    { command: stampCmd(1500, 'A'), label: 'A' },
+    { command: stampCmd(1500, 'B'), label: 'B' },
     { tool: 'read_file', args: { path: path.join(repo, 'package.json'), length: 2 } },
     { command: 'node -e "process.exit(3)"', label: 'bad' },
   ] });
   const text = out(r);
-  assert.ok(Date.now() - t0 < 2900, 'two 1.5 s sleeps should overlap');
+  const stamp = (k) => Number(text.match(new RegExp(`${k}(\\d{13})`))?.[1]);
+  const [aS, aE, bS, bE] = ['AS', 'AE', 'BS', 'BE'].map(stamp);
+  assert.ok([aS, aE, bS, bE].every(Number.isFinite), `timestamps missing:\n${text}`);
+  assert.ok(aS < bE && bS < aE, `A [${aS}-${aE}] and B [${bS}-${bE}] should overlap`);
   assert.match(text, /4\/4 done, 1 failed/);
   assert.ok(text.indexOf('=== A') < text.indexOf('=== B') && text.indexOf('=== B') < text.indexOf('=== bad'));
   assert.match(text, /=== bad -> FAILED/);
