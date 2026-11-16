@@ -99,8 +99,13 @@ if (allowDirs.length) {
 const connection: ConnectionOptions = {
   interactive: !!process.stdin.isTTY && !!process.stdout.isTTY,
   setup: flag('setup'), autoConnect: flag('auto-connect'), nonInteractive: flag('non-interactive'),
-  relay: arg('relay', 'BRC_RELAY'), token: arg('token', 'BRC_TOKEN'),
-  deviceId: arg('device-id', 'BRC_DEVICE_ID'), name: arg('name', 'BRC_NAME', os.hostname())!,
+  // In the interactive BAT/auto-connect flow, saved pairing is authoritative.
+  // Old ambient BRC_RELAY/BRC_TOKEN variables must not silently restore
+  // the previous server after a user changes or forgets a pairing.
+  relay: arg('relay', flag('auto-connect') && !flag('non-interactive') && !process.argv.includes('--relay') ? undefined : 'BRC_RELAY'),
+  token: arg('token', flag('auto-connect') && !flag('non-interactive') && !process.argv.includes('--token') ? undefined : 'BRC_TOKEN'),
+  deviceId: arg('device-id', flag('auto-connect') && !flag('non-interactive') && !process.argv.includes('--device-id') ? undefined : 'BRC_DEVICE_ID'),
+  name: arg('name', 'BRC_NAME', os.hostname())!,
   noBrowser: flag('no-browser'),
 };
 const startupAbort = new AbortController();
@@ -231,8 +236,18 @@ async function openSettings(): Promise<void> {
       ...connection, setup: true, autoConnect: false, returnToAgent: true,
       relay: undefined, token: undefined, deviceId: undefined, signal: runningAbort.signal,
     }, livePrompts, {
-      load: () => loadCredentials() ?? activeCredentials,
-      clear: () => { const removed = clearCredentials(); forgotten = true; return removed; },
+      // Only use the live credential as fallback BEFORE the owner forgets.
+      // Otherwise opening M again resurrects the old URL/token from RAM.
+      load: () => loadCredentials() ?? (forgotten ? null : activeCredentials),
+      clear: () => {
+        const removed = clearCredentials();
+        forgotten = true;
+        // Stop both active socket and reconnect timer immediately on Forget.
+        // Pausing calls alone would leave the old relay connection alive.
+        pausedClient.stop();
+        livePrompts?.write('Old relay disconnected. Enter the new relay URL below.');
+        return removed;
+      },
       pair: pairDevice,
     });
     if (shuttingDown) return;
@@ -240,7 +255,7 @@ async function openSettings(): Promise<void> {
       shutdown('Saved connection forgotten');
       return;
     }
-    if (next && (next.relayUrl !== activeCredentials.relayUrl || next.deviceId !== activeCredentials.deviceId || next.deviceToken !== activeCredentials.deviceToken)) {
+    if (next && (forgotten || next.relayUrl !== activeCredentials.relayUrl || next.deviceId !== activeCredentials.deviceId || next.deviceToken !== activeCredentials.deviceToken)) {
       pausedClient.stop();
       start(next);
     }

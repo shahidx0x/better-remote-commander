@@ -14,6 +14,7 @@ export function layout(title: string, body: string, width: 'narrow' | 'wide' = '
 export function loginPage(returnTo: string, error?: string): string {
   return layout('Sign in', `<span class="eyebrow">SECURE WORKSPACE</span>
     <h1>Welcome back.</h1><p class="auth-intro">Sign in to your relay console to manage trusted devices, connected apps and secure access.</p>
+    ${returnTo.startsWith('/device/verify') ? `<div class="pairing-login-callout"><strong>Continue device verification</strong><p>Sign in once to review your agent's pairing code. If you signed in on a different hostname, browser sessions cannot be shared across unrelated domains.</p></div>` : ''}
     ${error ? `<div class="auth-alert" role="alert"><span aria-hidden="true">!</span><span>${esc(error)}</span></div>` : ''}
     <form method="post" action="/auth/login" class="auth-form">
       <input type="hidden" name="returnTo" value="${esc(returnTo)}">
@@ -45,31 +46,63 @@ export function consentPage(pendingId: string, clientName: string, redirectUri: 
 }
 
 export function deviceVerifyPage(prefill: string, error?: string): string {
-  return layout('Pair device', `<div class="section-head"><div><span class="brand">DEVICE PAIRING</span>
-    <h1>Connect a new device.</h1><p>Enter the one-time pairing code shown by your local <code>brc-agent</code> terminal.</p></div>
-    <a class="btn secondary" href="/admin">Return to overview</a></div>
-    <div class="panel" style="max-width:680px">
-      ${error ? `<div class="auth-alert" role="alert">${esc(error)}</div>` : ''}
-      <form method="post" action="/device/verify"><label for="pairing-code">Pairing code</label>
-      <input id="pairing-code" class="code" name="user_code" value="${esc(prefill)}" placeholder="XXXX-XXXX" maxlength="9" autocomplete="off" required autofocus>
-      <p style="font-size:12px;margin-top:10px">Check the device name and requested access carefully before approving.</p>
-      <div class="row"><button class="primary" type="submit">Continue to review</button></div></form>
-    </div>`, 'wide');
+  const symbol = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="13" rx="2"/><path d="M8 21h8m-4-3v3"/><path d="m9 11 2 2 4-4"/></svg>';
+  return layout('Pair device', `<div class="pairing-icon">${symbol}</div>
+    <span class="eyebrow">AGENT CONNECTION</span>
+    <h1>Verify your device.</h1>
+    <p class="auth-intro">Enter the one-time code shown in the BRC Agent terminal. Your browser session is already used if you're signed in to this relay.</p>
+    <div class="pairing-stepper" aria-label="Pairing progress">
+      <div class="pairing-step done"><span class="number">✓</span>Request</div>
+      <div class="pairing-step active"><span class="number">2</span>Verify</div>
+      <div class="pairing-step"><span class="number">3</span>Connect</div>
+    </div>
+    ${error ? `<div class="auth-alert" role="alert"><span aria-hidden="true">!</span><span>${esc(error)}</span></div>` : ''}
+    <form method="post" action="/device/verify" class="pairing-form">
+      <label for="pairing-code">ONE-TIME DEVICE CODE</label>
+      <input id="pairing-code" class="pairing-input" name="user_code" value="${esc(prefill)}" placeholder="XXXX-XXXX"
+        maxlength="9" autocapitalize="characters" autocomplete="one-time-code" spellcheck="false" required autofocus>
+      <p class="pairing-sub">The code expires automatically. Always compare it against the code in your own agent window.</p>
+      <button class="primary full" type="submit">Review pairing request <span aria-hidden="true">→</span></button>
+    </form>
+    <div class="pairing-caution"><span class="warn" aria-hidden="true">!</span><div>
+      <strong>Only connect devices you recognize.</strong>
+      <p>Verification does not grant access immediately. You can review the device details and explicitly approve or deny the request next.</p>
+    </div></div>
+    <a class="pairing-back" href="/admin">← Return to workspace</a>`);
 }
 
 export function deviceApprovePage(userCode: string, clientName: string): string {
-  return layout('Approve device', `<div class="section-head"><div><span class="brand">DEVICE PAIRING</span>
-    <h1>Approve this device?</h1><p>Confirm that you initiated the connection before giving it access to your relay.</p></div></div>
-    <div class="panel" style="max-width:700px">
-      <span class="brand">REQUESTING DEVICE</span><h2 style="font-size:21px">${esc(clientName)}</h2>
-      <p>Pairing code: <code>${esc(userCode)}</code></p>
-      <div class="panel" style="background:#fff8ef;border-color:#f2e2c8">
-        <strong>Access warning</strong><p>Once approved, this device can accept tool calls on your behalf. Only approve devices you control.</p>
+  const symbol = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/><path d="m8 11 2 2 5-5"/></svg>';
+  return layout('Approve device', `<div class="pairing-icon">${symbol}</div>
+    <span class="eyebrow">SECURE DEVICE AUTHORIZATION</span>
+    <h1>Approve this device?</h1>
+    <p class="auth-intro">Your agent requested a new connection. Check the device name and one-time code before giving it access.</p>
+    <div class="pairing-stepper" aria-label="Pairing progress">
+      <div class="pairing-step done"><span class="number">✓</span>Request</div>
+      <div class="pairing-step active"><span class="number">2</span>Review</div>
+      <div class="pairing-step"><span class="number">3</span>Connect</div>
+    </div>
+    <div class="pairing-card" role="group" aria-label="Device pairing request">
+      <div class="pairing-card-head"><span class="pairing-card-title">REQUESTING DEVICE</span><span class="pill ok">Signed-in review</span></div>
+      <div class="pairing-client">${esc(clientName)}</div>
+      <p class="pairing-sub">BRC Agent · awaiting your approval</p>
+      <div class="pairing-code-label">VERIFY MATCHING CODE</div>
+      <div class="pairing-code-display">${esc(userCode)}</div>
+      <p class="pairing-sub">Compare this code with the terminal before continuing.</p>
+    </div>
+    <div class="pairing-caution"><span class="warn" aria-hidden="true">!</span><div>
+      <strong>Approving grants remote tool access.</strong>
+      <p>After approval, this device can execute the tools you allow. Deny unfamiliar requests. Approval is never automatic.</p>
+    </div></div>
+    <form method="post" action="/device/approve">
+      <input type="hidden" name="user_code" value="${esc(userCode)}">
+      <div class="pairing-actions">
+        <button class="secondary" name="decision" value="deny" type="submit">Deny request</button>
+        <button class="primary" name="decision" value="allow" type="submit">Approve &amp; connect <span aria-hidden="true">→</span></button>
       </div>
-      <form method="post" action="/device/approve"><input type="hidden" name="user_code" value="${esc(userCode)}">
-        <div class="row"><button class="secondary" name="decision" value="deny" type="submit">Deny device</button>
-        <button class="primary" name="decision" value="allow" type="submit">Approve device</button></div></form>
-    </div>`, 'wide');
+    </form>
+    <p class="pairing-footnote">This action requires your signed-in session and a valid, expiring pairing code.</p>
+    <a class="pairing-back" href="/admin">← Return to workspace</a>`);
 }
 
 export function messagePage(title: string, text: string, ok = true): string {

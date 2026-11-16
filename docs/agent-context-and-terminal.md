@@ -91,6 +91,22 @@ Resolution order: compiled agent next to the BAT → explicit `BRC_AGENT_ROOT` e
 
 Moving the **project itself** requires re-registering its new directory or updating `BRC_AGENT_ROOT`. On a **different computer**, you still need Node.js and a working built checkout or globally installed agent; a BAT cannot package and transport an entire application by itself. If the registered path is missing, a helpful error is shown instead of silently installing dependencies.
 
+## Pairing verification, existing login and changing a relay URL
+
+The desktop BRC Agent opens the verification page **on the exact relay base URL entered in the agent**, even when the relay server advertises a different `PUBLIC_URL`. This helps keep the verification browser on the same origin where the owner logged in.
+
+- Opening `/device/verify?user_code=XXXX-XXXX` while logged in shows the **new, branded one-click review page** with the requesting device's name and code. Confirm the code and click Approve or Deny. There is **no automatic approval** and no need to enter the code again.
+- Opening `/auth/login?returnTo=...` with a valid current session redirects to the intended destination instead of showing the login form again.
+- Verification and approval POSTs both require the session's CSRF token; requests without it fail.
+- A login session is a secure host-only cookie with a 12-hour lifetime. **Different hostnames cannot share that cookie** (for example, `relay.example.com` and `service.provider.com`). If the verification link uses a different hostname or the session expired, signing in there is expected. Use one canonical HTTPS hostname for the admin and the agent, and a stable production `BRC_SESSION_SECRET` across replicas.
+- While the agent is running, press **M → 3 (Forget) → Yes**. This now disconnects the previous relay immediately, cancels its reconnect timer, deletes the old local pairing and asks for a new base URL. Device display name is preserved as the default. A completed new pairing reconnects only to the newly entered relay.
+- **M → 2 (Change)** retains the old connection until the new pairing succeeds; this is intentional to avoid losing a working connection after a failed change.
+- The interactive `START_AGENT.bat`/`--auto-connect` path prioritizes saved pairing over stale ambient `BRC_RELAY` or `BRC_TOKEN` variables. Explicit `--relay` flags and intentionally unattended/`--non-interactive` runs still use their supplied values.
+- The old `SES_RDP_` legacy pairing is not silently resurrected after an intentional forget from the existing `~/.brc` directory.
+- Running `--forget-relay` in **another** terminal clears the saved file but cannot stop a separate already-running agent process. Close that old agent window, or use **M → Forget** inside it, before starting a new instance.
+
+Rebuild the agent after changing its source; redeploy the relay after changing its HTTP pages/routes. Building does not alter or restart an already-running service.
+
 ## Cleaner console, no extra polling
 
 Interactive CMD/Windows Terminal shows a static startup panel containing the device/relay/runtime, a simple live connection indicator and compact live activity. The display does not start a polling loop, write transcripts, render a high-frequency dashboard, or persist tool history.

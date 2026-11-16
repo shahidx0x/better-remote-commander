@@ -195,7 +195,13 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   /* ---------- login / logout / home ---------- */
   const safeReturn = (v: unknown) => (typeof v === 'string' && v.startsWith('/') && !v.startsWith('//') ? v : '/');
 
-  app.get('/auth/login', (req, res) => res.type('html').send(pages.loginPage(safeReturn(req.query.returnTo))));
+  app.get('/auth/login', (req, res) => {
+    const target = safeReturn(req.query.returnTo);
+    // A valid browser session is sufficient; do not request the password again.
+    // Prevent redirect loops from links accidentally targeting /auth/login.
+    if (currentUser(req)) return res.redirect(target === '/' || target.startsWith('/auth/login') ? '/admin' : target);
+    res.type('html').send(pages.loginPage(target));
+  });
   const limiter = new LoginLimiter();
   app.post('/auth/login', async (req, res) => {
     const { username, password, returnTo } = req.body as Record<string, string>;
@@ -287,13 +293,26 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   };
   for (const p of ['/admin', '/auth/clients', '/auth/apikeys', '/device/verify']) app.use(p, withCsrfFields);
 
-  app.get('/device/verify', requireLogin, (req, res) => res.type('html').send(pages.deviceVerifyPage(String(req.query.user_code ?? ''))));
-  app.post('/device/verify', requireLogin, async (req, res) => {
+  app.get('/device/verify', requireLogin, async (req, res) => {
+    const code = typeof req.query.user_code === 'string' ? req.query.user_code.slice(0, 64) : '';
+    // The agent opens a link with the code filled in. For an already signed-in
+    // user, show the device details and approval choice directly (never auto-approve).
+    if (code) {
+      const row = await store.getDeviceCodeByUserCode(code);
+      if (!row || row.expires_at < Date.now() || row.denied)
+        return res.status(404).type('html').send(pages.deviceVerifyPage(code, 'This pairing code is invalid, denied or expired. Start a new pairing from your agent.'));
+      if (row.approved)
+        return res.type('html').send(pages.messagePage('Already approved', 'This pairing is already approved. Return to your agent for the connection status.'));
+      return res.type('html').send(pages.deviceApprovePage(row.user_code, row.client_name));
+    }
+    res.type('html').send(pages.deviceVerifyPage(''));
+  });
+  app.post('/device/verify', requireLogin, requireCsrf, async (req, res) => {
     const row = await store.getDeviceCodeByUserCode(String(req.body.user_code ?? ''));
     if (!row || row.expires_at < Date.now()) return res.status(404).type('html').send(pages.deviceVerifyPage('', 'Code not found or expired.'));
     res.type('html').send(pages.deviceApprovePage(row.user_code, row.client_name));
   });
-  app.post('/device/approve', requireLogin, async (req, res) => {
+  app.post('/device/approve', requireLogin, requireCsrf, async (req, res) => {
     const userId = currentUser(req)!;
     const row = await store.getDeviceCodeByUserCode(String(req.body.user_code ?? ''));
     if (!row || row.expires_at < Date.now()) return res.status(404).type('html').send(pages.messagePage('Not found', 'Code not found or expired.', false));

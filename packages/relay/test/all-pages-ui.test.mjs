@@ -42,10 +42,10 @@ test('OAuth and device pairing keep trust gates, required names and decisions',(
    'name="decision" value="deny"','name="decision" value="allow"','mcp:tools']);
  noInjection(approval);
  const verify=deviceVerifyPage('ABCD-1234','Expired code');
- contains(verify,['class="sidebar"','action="/device/verify"','name="user_code" value="ABCD-1234"',
+ contains(verify,['class="auth-root"','action="/device/verify"','name="user_code" value="ABCD-1234"',
   'maxlength="9"','Expired code']);
  const approved=deviceApprovePage('ABCD-1234','Desktop');
- contains(approved,['action="/device/approve"','name="decision" value="deny"',
+ contains(approved,['class="auth-root"','pairing-stepper','action="/device/approve"','name="decision" value="deny"',
    'name="decision" value="allow"','ABCD-1234']);
  const recovery=oauthClientRecoveryPage('cl-test','https://callback.example','/auth/clients?retry=1',true);
  contains(recovery,['class="auth-root"','href="/auth/clients?retry=1"','callback']);

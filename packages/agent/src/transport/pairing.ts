@@ -77,11 +77,17 @@ export async function pairDevice(opts: PairOptions): Promise<DeviceCredentials> 
   const { status, json: start } = await postJson<StartResponse>(`${base}/device/start`, { client_name: opts.name }, opts.signal);
   if (status !== 200 || typeof start.device_code !== 'string' || !start.device_code || typeof start.user_code !== 'string' || !/^[a-zA-Z0-9-]{4,64}$/.test(start.user_code)) throw new Error(`Relay rejected pairing start (${status}).`);
   if (!Number.isFinite(start.expires_in) || start.expires_in <= 0 || start.expires_in > 3600) throw new Error('Relay returned an invalid pairing expiry.');
-  const page = verificationUrl(start.verification_uri);
-  const complete = start.verification_uri_complete ? verificationUrl(start.verification_uri_complete) : page;
+  // The relay can advertise a different PUBLIC_URL hostname. Opening that
+  // different origin would lose the browser's existing host-only login cookie.
+  // Keep the browser on the exact base URL the user entered and used for /device/start.
+  // The code is still authenticated and approved by the relay, never auto-approved.
+  verificationUrl(start.verification_uri);
+  if (start.verification_uri_complete) verificationUrl(start.verification_uri_complete);
+  const page = verificationUrl(base + '/device/verify');
+  const complete = verificationUrl(page + '?user_code=' + encodeURIComponent(start.user_code));
   opts.log('');
-  opts.log('Pairing required. Open this URL and enter the code:');
-  opts.log(`   ${page}`);
+  opts.log('Pairing required. Open this link to review the device:');
+  opts.log(`   ${complete}`);
   opts.log(`   code: ${start.user_code}   (expires in ${Math.round(start.expires_in / 60)} min)`);
   opts.log('');
   if (opts.openBrowser !== false) {

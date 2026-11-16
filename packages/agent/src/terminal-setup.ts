@@ -104,6 +104,8 @@ export async function resolveStartupConnection(options: ConnectionOptions, io?: 
 
 async function connectionMenu(options: ConnectionOptions, io: SetupIO, deps: ConnectionDependencies, initial: DeviceCredentials | null): Promise<DeviceCredentials | null> {
   let saved = initial;
+  // Forget clears only the endpoint/token, not the user's preferred device label.
+  const previousName = initial?.name ?? options.name;
   io.write('\nBRC Agent | Connection setup');
   io.write('Live activity only. No diagnostic log files are saved.');
   if (options.setup && (options.relay || options.token)) io.write('Setup ignores connection environment/arguments for this run; they are not changed.');
@@ -130,7 +132,7 @@ async function connectionMenu(options: ConnectionOptions, io: SetupIO, deps: Con
         io.write('Your current pairing stays saved until the new pairing succeeds.');
       } else { io.write('Choose 1, 2, 3 or 0.'); continue; }
     }
-    const next = await newConnection(options, io, deps, saved?.name ?? options.name);
+    const next = await newConnection(options, io, deps, saved?.name ?? previousName);
     if (next === 'back') continue;
     return next;
   }
