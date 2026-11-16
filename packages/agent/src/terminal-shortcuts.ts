@@ -3,7 +3,7 @@ import type { Readable, Writable } from 'node:stream';
 import type { DeviceCredentials } from './transport/pairing.js';
 
 export type StartupChoice = 'connect' | 'settings' | 'exit';
-type Shortcut = StartupChoice | 'closed';
+export type Shortcut = StartupChoice | 'closed' | 'status' | 'activity' | 'verbose' | 'help';
 type TerminalInput = Readable & { isTTY?: boolean; isRaw?: boolean; setRawMode?: (mode: boolean) => unknown };
 export const AUTO_CONNECT_DELAY_MS = 4000;
 
@@ -11,7 +11,7 @@ export const AUTO_CONNECT_DELAY_MS = 4000;
 export function listenForTerminalShortcuts(
   input: TerminalInput,
   onChoice: (choice: Shortcut) => void,
-  options: { signal?: AbortSignal; enterConnects?: boolean } = {},
+  options: { signal?: AbortSignal; enterConnects?: boolean; liveCommands?: boolean } = {},
 ): { close(): void } {
   let closed = false, pending = '', discardLine = false, raw = false;
   const wasRaw = !!input.isRaw;
@@ -33,6 +33,12 @@ export function listenForTerminalShortcuts(
     if (value === '\x03') { onChoice('exit'); return; }
     if (/^(?:m|menu|settings)$/i.test(value)) onChoice('settings');
     else if (options.enterConnects && (value === '' || value === '1')) onChoice('connect');
+    else if (options.liveCommands) {
+      if (/^(?:s|status)$/i.test(value)) onChoice('status');
+      else if (/^(?:l|logs|activity)$/i.test(value)) onChoice('activity');
+      else if (/^(?:v|verbose)$/i.test(value)) onChoice('verbose');
+      else if (/^(?:h|help|\?)$/i.test(value)) onChoice('help');
+    }
   };
   const data = (chunk: Buffer | string) => {
     const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
@@ -89,11 +95,11 @@ export async function waitForSavedConnection(
   return new Promise(resolve => {
     let done = false, controls: { close(): void } | undefined;
     const finish = (choice: Shortcut) => {
-      if (done) return;
+      if (done || !['connect','settings','exit','closed'].includes(choice)) return;
       done = true;
       clearTimeout(timer);
       controls?.close();
-      resolve(choice === 'closed' ? 'connect' : choice);
+      resolve(choice === 'closed' ? 'connect' : choice as StartupChoice);
     };
     const timer = setTimeout(() => finish('connect'), delayMs);
     controls = listenForTerminalShortcuts(input, finish, { signal, enterConnects: true });

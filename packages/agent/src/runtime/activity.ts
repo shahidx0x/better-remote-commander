@@ -5,6 +5,7 @@ import os from 'node:os';
 export const RETENTION_MS = 0;
 let stdoutAvailable = true;
 process.stdout.on('error', () => { stdoutAvailable = false; });
+export type ConsoleMode = 'compact' | 'verbose';
 export interface ActivityEvent {
     timestamp: string;
     level: string;
@@ -29,11 +30,14 @@ export class ActivityLog {
     private blocked = false;
     private started = false;
     private consolePauses = 0;
+    private consoleMode: ConsoleMode = process.env.BRC_CONSOLE_MODE === 'verbose' || !process.stdout.isTTY ? 'verbose' : 'compact';
     dropped = 0;
     ioErrors = 0;
     // The legacy third argument is deliberately ignored: disk logging cannot be enabled.
     constructor(readonly home = process.env.BRC_HOME ?? path.join(os.homedir(), '.brc'), private quiet = process.env.BRC_LOG_LEVEL === 'silent', _legacyDisk?: boolean) { }
     get directory(): string { return path.join(this.home, 'logs'); }
+    getConsoleMode(): ConsoleMode { return this.consoleMode; }
+    setConsoleMode(mode: ConsoleMode): void { this.consoleMode = mode; }
     async start(): Promise<void> { if (this.started)
         return; this.started = true; await this.prune(); }
     log(level: string, message: string): void {
@@ -54,12 +58,30 @@ export class ActivityLog {
             this.events.shift();
         if (this.quiet)
             return;
+        // Compact mode halves successful tool chatter by displaying the
+        // completion, not the START and completion. History remains complete.
+        if (this.consoleMode === 'compact' && event.phase === 'START') return;
+        if (this.consoleMode === 'compact' && event.level === 'info' && !event.phase
+            && !/^(Connecting to |Ready: |Disconnected|Relay refused|Device authorization)/.test(event.message)) return;
         if (this.consoleQueue.length >= 200) {
             this.consoleQueue.shift();
             this.dropped++;
         }
         const width = Math.min(160, Math.max(40, (process.stdout.columns || 120) - 1));
-        this.consoleQueue.push(compactLine(`[${new Date(event.timestamp).toTimeString().slice(0, 8)}] ${event.message}`, width) + '\n');
+        const hhmmss = event.timestamp.slice(11, 19);
+        let line = this.consoleMode === 'compact'
+            ? '[' + hhmmss + ']  ' + (event.phase === 'OK' ? '[OK]  ' : event.phase === 'ERROR' ? '[FAIL]  ' : event.level === 'warn' ? '[WARN]  ' : event.level === 'error' ? '[ERROR]  ' : '       ')
+                + (event.phase ? event.tool + (event.ms === undefined ? '' : '  ' + Math.round(event.ms) + 'ms')
+                    + (event.code ? '  ' + event.code : '') : event.message)
+            : '[' + hhmmss + '] ' + event.message;
+        line = compactLine(line, width);
+        // Colors are attached only AFTER sanitizing untrusted log text.
+        if (process.stdout.isTTY && !('NO_COLOR' in process.env) && process.env.BRC_COLOR !== '0') {
+            const code = event.phase === 'ERROR' || event.level === 'error' ? '31'
+                : event.phase === 'OK' ? '32' : event.level === 'warn' ? '33' : '36';
+            line = '\x1b[' + code + 'm' + line + '\x1b[0m';
+        }
+        this.consoleQueue.push(line + '\n');
         this.drainConsole();
     }
     /** Keep a settings prompt readable; queued live lines remain bounded and are never written to disk. */

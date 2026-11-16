@@ -32,6 +32,7 @@ import { setCurrentClient } from './context.js';
 import { activity } from './runtime/activity.js';
 import { projectIndex } from './runtime/project-index.js';
 import { codeGraph } from './runtime/code-graph.js';
+import { consoleBanner, controlHint, connectionPanel, recentActivity, type AgentTerminal } from './terminal-ui.js';
 import { clearCodeCache } from './runtime/code-structure.js';
 import { runPluginCommand } from './plugins/cli-commands.js';
 
@@ -46,9 +47,11 @@ const flag = (name: string) => process.argv.includes(`--${name}`);
 
 const debug = flag('debug') || process.env.BRC_DEBUG === '1';
 if (debug) process.env.BRC_DEBUG = '1';
+if (flag('verbose') || debug) activity.setConsoleMode('verbose');
+else if (flag('compact')) activity.setConsoleMode('compact');
 const log = (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => activity.log(level, msg);
 if (flag('help')) {
-  console.log('Local agent: START_AGENT.cmd or node packages/agent/dist/cli.js\nFirst terminal launch asks for the relay URL and device name. Saved connections start automatically after 4 seconds; Enter connects now, M opens settings.\n--setup opens settings explicitly. M also opens settings while the foreground agent is idle; active tool calls are never interrupted.\n--forget-relay / --logout forget only the local saved URL and pairing, then exit.\n--relay <base-url> keeps scripted pairing available; --non-interactive skips the menu and delay. --auto-connect is the foreground default.\nOther flags: --name <name>, --no-browser, --allow-dir <path> (repeatable), --debug, --install-service, --uninstall-service.\nPlugins: --list-plugins, --add-plugin <id>, --remove-plugin <id>, --enable-plugin <id>, --disable-plugin <id>, --update-plugins, --no-plugins.\nTool START/OK/ERROR status is visible by default. Live-only logging: no log files or persisted tool history.');
+  console.log('Local agent: START_AGENT.cmd or node packages/agent/dist/cli.js\nFirst terminal launch asks for the relay URL and device name. Saved connections start automatically after 4 seconds; Enter connects now, M opens settings.\n--setup opens settings explicitly. M also opens settings while the foreground agent is idle; active tool calls are never interrupted.\n--forget-relay / --logout forget only the local saved URL and pairing, then exit.\n--relay <base-url> keeps scripted pairing available; --non-interactive skips the menu and delay. --auto-connect is the foreground default.\nOther flags: --name <name>, --no-browser, --allow-dir <path> (repeatable), --debug, --compact, --verbose, --install-service, --uninstall-service.\nPlugins: --list-plugins, --add-plugin <id>, --remove-plugin <id>, --enable-plugin <id>, --disable-plugin <id>, --update-plugins, --no-plugins.\nTerminal controls (while live): M settings, S status, L recent activity, V compact/verbose, ? help, Ctrl+C stop. Completed calls and errors are visible in compact TTY mode; --verbose shows START/OK/ERROR. Live-only logging: no saved tool history.');
   process.exit(0);
 }
 
@@ -135,11 +138,13 @@ if (!creds) {
 await startResourceMaintenance();
 setCurrentClient({ name: 'brc-agent', version: AGENT_VERSION });
 const tools = listTools();
-console.log(`brc-agent ${AGENT_VERSION} (core ${CORE_VERSION}) - ${tools.length} tools - "${creds.name}" [${creds.deviceId}] -> ${creds.relayUrl}`);
+const terminalInfo: AgentTerminal = { name: creds.name, relay: creds.relayUrl, deviceId: creds.deviceId, version: AGENT_VERSION, coreVersion: CORE_VERSION, tools: tools.length };
+const visualConsole = !!process.stdout.isTTY && !connection.nonInteractive;
+console.log(visualConsole ? consoleBanner(terminalInfo) : `brc-agent ${AGENT_VERSION} (core ${CORE_VERSION}) - ${tools.length} tools - "${creds.name}" [${creds.deviceId}] -> ${creds.relayUrl}`);
 
 const runningAbort = new AbortController();
 const foregroundControls = !connection.nonInteractive && (connection.interactive || connection.autoConnect);
-const settingsHint = process.stdin.isTTY ? 'M = settings | Ctrl+C = stop' : 'M + Enter = settings | Ctrl+C = stop';
+const settingsHint = controlHint(!!process.stdin.isTTY);
 let activeCredentials: DeviceCredentials = creds;
 let client: WsClient;
 let shortcuts: ReturnType<typeof listenForTerminalShortcuts> | undefined;
@@ -169,8 +174,15 @@ function armShortcuts(): void {
   if (!foregroundControls || shuttingDown || settingsOpen || process.stdin.destroyed || process.stdin.readableEnded) return;
   shortcuts = listenForTerminalShortcuts(process.stdin, choice => {
     if (choice === 'settings') void openSettings();
+    else if (choice === 'status') console.log(connectionPanel(client.status(), { ...terminalInfo, name: activeCredentials.name, relay: activeCredentials.relayUrl }));
+    else if (choice === 'activity') console.log(recentActivity(activity.recent(), 10));
+    else if (choice === 'verbose') {
+      activity.setConsoleMode(activity.getConsoleMode() === 'compact' ? 'verbose' : 'compact');
+      console.log('  Console mode: ' + activity.getConsoleMode() + '. All tool metadata remains in bounded memory.');
+    }
+    else if (choice === 'help') console.log(controlHint(!!process.stdin.isTTY));
     else if (choice === 'exit') shutdown('Ctrl+C');
-  }, { signal: runningAbort.signal });
+  }, { signal: runningAbort.signal, liveCommands: true });
 }
 
 function start(c: DeviceCredentials): void {

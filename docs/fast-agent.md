@@ -107,7 +107,7 @@ Popular generic identities now also cover Lua, R, Julia, Elixir, Erlang, Haskell
 
 ## Bounded memory and storage
 
-Code graphs, filename indexes, parser results and recent activity remain in RAM. There is no persistent context/index database or saved thumbnail cache: disk context-cache usage is zero.
+Code graphs, filename indexes, parser results and recent activity remain in RAM. `context_pack` mode=outline and `code_graph` format=compact are optional dictionary-coded output projections; source can be read on demand, with no external model calls. There is no persistent context/index database or saved thumbnail cache: disk context-cache usage is zero.
 
 Retained context caches have an aggregate estimated-payload budget of 256 MiB, with much smaller individual limits. Parser-cache accounting includes source strings and symbol/import metadata. Cache entries and file watchers expire after five idle minutes; project slots evict least-recently-used idle roots rather than requiring manual clearing. The pool now defaults to one lazy parser worker, with at most two explicitly configured through `BRC_PARSER_WORKERS`, a 16-job queue, idle termination and a 64 MiB V8 old-generation limit per worker.
 

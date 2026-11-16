@@ -585,7 +585,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "context_pack",
-    "description": "USE WHEN: Collect a BOUNDED set of scoped instructions, related declarations and source snippets/hashes in ONE call.\nUSE INSTEAD: For only 2+ known files use read_multiple_files; do not dump an entire repository unnecessarily.\nIMPORTANT: Graph relationships are candidates; no background LLM or database is involved.\nDETAILS: Assemble a bounded coding context in one call: scoped instructions, focused declarations, fresh source snippets/hashes and graph relationship candidates. Works beyond JS/TS; no AI/model call or persistent transcript.",
+    "description": "USE WHEN: Collect BOUNDED project instructions and related context in ONE call. For broad orientation start with mode=outline (compact file IDs, line ranges and edge candidates; no source snippets), then selectively expand exact source with read_code_ranges or read_symbol. Default mode=balanced includes fresh code snippets/hashes.\nUSE INSTEAD: For only 2+ known files use read_multiple_files; do not dump an entire repository unnecessarily.\nIMPORTANT: Outline is representation compression, not model conversation compaction; graph relationships are candidates, and no extra LLM or database is involved.\nDETAILS: Budgeted coding context. mode=outline returns compressed graph/file/symbol IDs, scoped instructions and exact line references with no raw source snippets; expand through read_code_ranges/read_symbol. Default mode=balanced reads fresh source snippets/hashes. Context-aware across languages, no extra LLM calls, saved transcripts or database.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -595,6 +595,14 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
         },
         "focus": {
           "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "balanced",
+            "outline"
+          ],
+          "default": "balanced"
         },
         "query": {
           "type": "string",
@@ -3016,7 +3024,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "code_graph",
-    "description": "USE WHEN: Query, refresh or clear a bounded agent-local multilingual import graph.\nUSE INSTEAD: For immediate code snippets use context_pack/read_code_ranges; do not treat this as a persisted or complete semantic graph.\nDETAILS: Agent-local multilingual file/import graph: query, refresh, status or clear; navigate dependencies/importers. Incrementally reuses unchanged metadata, bounded by files/bytes/time. No graph database or saved source/logs. Edges include confidence and unresolved dependencies remain explicit.",
+    "description": "USE WHEN: Query, refresh or clear a bounded agent-local multilingual import graph. Prefer format=compact for a smaller file/symbol/edge reference map; request format=full when detailed graph metadata matters.\nUSE INSTEAD: For exact source code use context_pack in balanced mode or read_code_ranges/read_symbol; graph outlines are RAM-only metadata, not a persisted semantic graph.\nDETAILS: Agent-local multilingual file/import graph: query, refresh, status or clear; navigate dependencies/importers. Use format=compact for dictionary-coded source references and low token usage, or full for expanded graph details. Incremental RAM-only metadata; no graph database, model proxy or saved source/logs. Edges are candidates with confidence.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3033,6 +3041,20 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
             "clear"
           ],
           "default": "query"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "full",
+            "compact"
+          ],
+          "default": "full"
+        },
+        "maxChars": {
+          "type": "integer",
+          "minimum": 2000,
+          "maximum": 48000,
+          "default": 12000
         },
         "file": {
           "type": "string"

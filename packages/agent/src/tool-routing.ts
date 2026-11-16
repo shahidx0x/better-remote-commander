@@ -294,13 +294,13 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
     instead: 'For actual code inspection use code_outline/read_symbol; never assume every language has semantic AST support.',
   },
   code_graph: {
-    use: 'Query, refresh or clear a bounded agent-local multilingual import graph.',
-    instead: 'For immediate code snippets use context_pack/read_code_ranges; do not treat this as a persisted or complete semantic graph.',
+    use: 'Query, refresh or clear a bounded agent-local multilingual import graph. Prefer format=compact for a smaller file/symbol/edge reference map; request format=full when detailed graph metadata matters.',
+    instead: 'For exact source code use context_pack in balanced mode or read_code_ranges/read_symbol; graph outlines are RAM-only metadata, not a persisted semantic graph.',
   },
   context_pack: {
-    use: 'Collect a BOUNDED set of scoped instructions, related declarations and source snippets/hashes in ONE call.',
+    use: 'Collect BOUNDED project instructions and related context in ONE call. For broad orientation start with mode=outline (compact file IDs, line ranges and edge candidates; no source snippets), then selectively expand exact source with read_code_ranges or read_symbol. Default mode=balanced includes fresh code snippets/hashes.',
     instead: 'For only 2+ known files use read_multiple_files; do not dump an entire repository unnecessarily.',
-    caveat: 'Graph relationships are candidates; no background LLM or database is involved.',
+    caveat: 'Outline is representation compression, not model conversation compaction; graph relationships are candidates, and no extra LLM or database is involved.',
   },
   session_handoff: {
     use: 'Generate a compact RAM-only summary of a current coding session and its verified state.',

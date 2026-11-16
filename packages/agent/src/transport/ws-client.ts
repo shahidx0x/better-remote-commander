@@ -15,6 +15,7 @@ export interface WsClientOptions {
 export class WsClient {
  private ws:WebSocket|null=null;
  private stopped=false;
+ private welcomed=false;
  private settingsPaused=false;
  private callsInFlight=0;
  private backoff:number=DEFAULTS.reconnectMinMs;
@@ -35,8 +36,10 @@ export class WsClient {
   if(!u.pathname.endsWith('/ws'))u.pathname=u.pathname.replace(/\/$/,'')+'/ws';
   return u.toString();
  }
- start():void{if(this.ws)return;this.stopped=false;this.plugins.start();this.connect();}
- stop():void{this.stopped=true;this.plugins.stop();clearTimeout(this.pongTimer);clearTimeout(this.reconnectTimer);this.scheduler.cancelAll('Agent stopping.');const ws=this.ws;this.ws=null;ws?.close(1000,'agent stopped');}
+ start():void{if(this.ws)return;this.stopped=false;this.welcomed=false;this.plugins.start();this.connect();}
+ /** O(1) live console status; no heartbeat poll or network request. */
+ status(){return {online:this.welcomed && this.ws?.readyState===WebSocket.OPEN,connecting:!!this.ws&&this.ws.readyState===WebSocket.CONNECTING,inFlight:this.callsInFlight};}
+ stop():void{this.stopped=true;this.welcomed=false;this.plugins.stop();clearTimeout(this.pongTimer);clearTimeout(this.reconnectTimer);this.scheduler.cancelAll('Agent stopping.');const ws=this.ws;this.ws=null;ws?.close(1000,'agent stopped');}
  /** Pause only when idle: opening settings never cancels an in-flight tool call. */
  pauseForSettings():boolean{if(this.callsInFlight>0)return false;this.settingsPaused=true;return true;}
  resumeAfterSettings():void{this.settingsPaused=false;}
@@ -50,7 +53,7 @@ export class WsClient {
   ws.on('unexpected-response',(_req,res)=>{unauthorized=res.statusCode===401||res.statusCode===403;this.log('error',`Relay refused connection: HTTP ${res.statusCode}`);res.resume();ws.terminate();});
   ws.on('close',(code)=>{
    if(this.ws!==ws)return;
-   clearTimeout(this.pongTimer);this.ws=null;this.scheduler.cancelAll('Relay disconnected; active operations are not automatically retried.');
+   clearTimeout(this.pongTimer);this.ws=null;this.welcomed=false;this.scheduler.cancelAll('Relay disconnected; active operations are not automatically retried.');
    if(this.stopped)return;
    if(code===4401||code===4403||unauthorized){void this.handleUnauthorized();return;}
    this.log('warn',`Disconnected (${code}); reconnecting`);this.retry();
@@ -70,7 +73,7 @@ export class WsClient {
  private async onMessage(raw:Buffer,ws:WebSocket):Promise<void>{
   const msg=parseMessage<RelayMessage>(raw);if(!msg)return;
   switch(msg.type){
-   case 'welcome':if(msg.protocol!==BRC_PROTOCOL_VERSION){this.stop();return;}this.backoff=DEFAULTS.reconnectMinMs;this.unauthorizedCount=0;this.log('info',`Ready: relay ${msg.relayVersion}; ${this.opts.tools.length} tools`);this.plugins.sendStatus();try{this.opts.onConnected?.();}catch{}return;
+   case 'welcome':if(msg.protocol!==BRC_PROTOCOL_VERSION){this.stop();return;}this.welcomed=true;this.backoff=DEFAULTS.reconnectMinMs;this.unauthorizedCount=0;this.log('info',`Ready: relay ${msg.relayVersion}; ${this.opts.tools.length} tools`);this.plugins.sendStatus();try{this.opts.onConnected?.();}catch{}return;
    case 'ping':this.armHeartbeat();this.send({type:'pong',ts:msg.ts},ws);return;
    case 'cancel':if(typeof msg.id==='string')cancelOperation(msg.id);return;
    case 'call':await this.handleCall(msg,ws);return;

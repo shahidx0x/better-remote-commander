@@ -27,8 +27,8 @@ A registered grammar does not mean every declaration construct has an extraction
 The default full profile exposes 70 agent tools plus the relay's `list_devices` (71 total). Existing tools were extended rather than duplicated for each language.
 
 - `language_capabilities`: exact parser/text capabilities, parser cache and graph status.
-- `code_graph`: query/refresh/status/clear a bounded file/import metadata graph; traverse dependencies or importers.
-- `context_pack`: one budgeted response with scoped guidance, declarations, fresh code snippets/hashes and relationship candidates.
+- `code_graph`: query/refresh/status/clear a bounded file/import metadata graph; traverse dependencies or importers. `format=compact` returns smaller dictionary-coded file/symbol/edge references, default `full` retains detail.
+- `context_pack`: default `mode=balanced` returns scoped guidance, declarations, fresh source snippets/hashes and graph candidates. `mode=outline` returns a small retrieval-first reference map without source snippets; expand through `read_code_ranges`/`read_symbol`.
 - `session_handoff`: current goal, scope, changes and verification evidence from a live coding session. Nothing is saved automatically.
 
 `code_outline`, `find_symbols`, `read_symbol`, `replace_symbol`, `code_diagnostics`, `find_references` and `related_files` no longer reject a project merely because it is not JS/TS. Text reference candidates are not semantic references. `related_files` uses confidence labels:

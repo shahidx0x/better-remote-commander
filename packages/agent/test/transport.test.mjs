@@ -70,7 +70,19 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    const preview=await tool('replace_symbol',{path:rs,name:'hello',expected_sha256:symbol.structuredContent.sha256,replacement:'pub fn hello() -> i32 { 2 }'});assert.equal(preview.isError,false);assert.match(await fs.readFile(rs,'utf8'),/1/);
    const related=await tool('related_files',{path:project,file:'App.cs'});assert.equal(related.isError,false);assert.ok(related.structuredContent.edges.some(e=>e.to==='Helper.cs'));
    const context=await tool('context_pack',{path:project,focus:'App.cs',maxChars:8000});assert.equal(context.isError,false);assert.equal(context.structuredContent.persistent,false);
-   const schemas1=await rpc('tools/list',{}),schemas2=await rpc('tools/list',{});assert.deepEqual(schemas1,schemas2);
+   const graphCompact=await tool('code_graph',{path:project,format:'compact',limit:40,maxChars:8000});
+   assert.equal(graphCompact.isError,false,JSON.stringify(graphCompact));
+   assert.equal(graphCompact.structuredContent.format,'graph-outline-v1');
+   assert.ok(graphCompact.structuredContent.files.some(f=>f[0]==='App.cs'));
+   const compactContext=await tool('context_pack',{path:project,focus:'App.cs',mode:'outline',maxChars:7000});
+   assert.equal(compactContext.isError,false,JSON.stringify(compactContext));
+   assert.equal(compactContext.structuredContent.mode,'outline');
+   assert.equal(compactContext.structuredContent.graph.format,'graph-outline-v1');
+   assert.ok(!JSON.stringify(compactContext.structuredContent).includes('return 1'));
+   const schemas1=await rpc('tools/list',{}),schemas2=await rpc('tools/list',{});
+   assert.deepEqual(schemas1,schemas2);
+   assert.ok(schemas1.tools.find(t=>t.name==='context_pack')?.inputSchema.properties.mode);
+   assert.ok(schemas1.tools.find(t=>t.name==='code_graph')?.inputSchema.properties.format);
   });
   await t.test('larger batches and combined mutation/readback pass through MCP',async()=>{
    const files=Array.from({length:24},(_,i)=>`batch-${i}.txt`);

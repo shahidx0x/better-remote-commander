@@ -32,7 +32,7 @@ ChatGPT / Claude / other MCP client
 | Connection options | Standard `/mcp` OAuth, API keys, and revocable private MCP URLs with read-only/full access |
 | Persistence | SQLite by default; optional MongoDB for relay accounts, pairings, plugin metadata, approved skills and model token aggregates |
 | Coding tools | File inspection, hash-checked edits, source navigation, project checks, multi-file batches and live diagnostics |
-| Performance | Fast command-start paths, optimized searches/reads, lazy dependencies, bounded outputs and RTK compression when installed |
+| Performance | Fast command-start paths, optimized searches/reads, optional compact graph/context outlines (with exact source on demand), lazy dependencies, bounded outputs and RTK compression when installed |
 | Jobs | Concurrent tool/command execution and persistent finished background-job history |
 | Coordination | Optional scoped patch submission from real host-native subagents; no built-in LLM spawning |
 | MCP extensions | Extra per-device MCP servers, default plugin setup, marketplace, owner-approved installs and admin controls |
@@ -45,6 +45,7 @@ ChatGPT / Claude / other MCP client
 - **Read, search, edit and transfer files.** Includes multi-file reads, exact edits, git inspection, fast native image previews/contact sheets, PDF tooling and encrypted transfers between paired devices. For images, prefer `read_images` to avoid sending full-resolution originals with `read_file`.
 - **Work inside real codebases.** Project mapping, declarations, syntax-aware navigation, multi-language context, cross-file references, SHA-256 preconditions and manifest-backed verification.
 - **Reduce unnecessary round trips.** `read_multiple_files`, `batch_tools`, `workspace_batch` and `run_parallel` combine suitable work rather than sending many individual MCP calls.
+- **Send compact context first.** `context_pack` with `mode=outline` and `code_graph` with `format=compact` return smaller RAM graph/file/symbol references. Expand exact code only as needed with `read_code_ranges` or `read_symbol`. This is not an LLM proxy, graph database, or persistent conversation compression. [Details and benchmark](docs/agent-context-and-terminal.md).
 - **Run background jobs.** Launch commands or sequential tool steps, wait for completion, inspect results and cancel jobs without keeping one MCP request open.
 - **Connect more MCP servers to a device.** Use Playwright, computer-use, Serena, MarkItDown or another supported server *when actually installed and configured*.
 - **Owner-approved reusable skills.** Import SKILL.md text from reviewed sources, browse the optional skills.sh catalog, and allow AI clients to discover/read approved skills without automatic code execution.
@@ -184,7 +185,9 @@ In another PowerShell window on the device to control:
 .\START_AGENT.cmd --relay http://127.0.0.1:3000 --name "My PC"
 ```
 
-Open `http://127.0.0.1:3000/device/verify`, sign in and approve the displayed code. Later launches can use `.\START_AGENT.cmd` to reuse the saved connection. `.\START_AGENT.cmd --setup` opens connection settings; `--forget-relay` clears only the agent's *local* saved connection, not the relay's paired-device entry.
+Open `http://127.0.0.1:3000/device/verify`, sign in and approve the displayed code. Later launches can use `.\START_AGENT.cmd` to reuse the saved connection. The portable `START_AGENT.bat` can register the built project's location and be copied anywhere on the same Windows computer; see [launcher setup](docs/agent-context-and-terminal.md). `.\START_AGENT.cmd --setup` opens connection settings; `--forget-relay` clears only the agent's *local* saved connection, not the relay's paired-device entry.
+
+On Windows, `START_AGENT.bat --register-only` records the built project path once; then you can copy just the BAT to Desktop/other folders or drives and double-click it. The agent's redesigned interactive terminal supports **M** settings, **S** connection status, **L** recent activity, **V** verbose mode and **?** help. TTY logs default to concise completions/errors. `--verbose` and `--compact` override it without saving logs. On other machines the BAT still needs a built checkout or globally installed agent.
 
 For non-Windows devices, run `node packages/agent/dist/cli.js --relay https://your-domain --name "My Device"` from a built checkout. On supported systems the agent also offers `--install-service` and `--uninstall-service`.
 
@@ -257,6 +260,7 @@ pnpm bench:context
 
 - [Architecture and protocol](docs/architecture.md)
 - [Relay dashboard, approved Skills and provider-reported token analytics](docs/relay-skills-usage.md)
+- [Compact code context and portable Windows agent console](docs/agent-context-and-terminal.md)
 - [Coding-agent setup and diagnostics](docs/coding-agent.md)
 - [Fast batches, images and sandbox](docs/fast-agent.md)
 - [Parallel worker coordination](docs/parallel-workers.md)
