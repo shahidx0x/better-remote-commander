@@ -8,7 +8,9 @@ import { getUsageStats } from './core/tools/usage.js';
 import { buildToolDefinitions, EXCLUDED_TOOLS, type ToolDefinition } from './core/tool-definitions.js';
 import { usageTracker } from './core/utils/usageTracker.js';
 import { BRC_TOOL_HANDLERS, buildBrcToolDefinitions } from './tools/brc-tools.js';
+import { JOB_TOOL_HANDLERS, buildJobToolDefinitions, setJobToolExecutor } from './tools/jobs.js';
 import type { ToolResult } from 'brc-shared';
+import type { ServerResult } from './core/types.js';
 
 type Args = Record<string, unknown>;
 type Handler = (args: Args) => Promise<unknown>;
@@ -43,13 +45,15 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ['list_searches', () => handlers.handleListSearches()],
   // BRC-native tools
   ...Object.entries(BRC_TOOL_HANDLERS),
+  // Workers: background jobs + parallel fan-out
+  ...Object.entries(JOB_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
 
 export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions()]
+    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name));
   }
   return cachedDefs;
@@ -75,3 +79,6 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     return { content: [{ type: 'text', text: `Error in ${name}: ${message}` }], isError: true };
   }
 }
+
+// Job steps run through the same dispatcher (validation, usage tracking, error wrapping).
+setJobToolExecutor(async (name, args) => (await callTool(name, args)) as ServerResult);

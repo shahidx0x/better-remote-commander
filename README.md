@@ -28,6 +28,8 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 - **Multi-edit**: `edit_block` applies several find/replace edits to a file in one call, all-or-nothing.
 - **Blocking search**: `start_search` with `wait: true` returns all results in one call (grep-style).
 - **Ranged multi-file reads**: `read_multiple_files` accepts per-file line ranges.
+- **Workers** (`run_parallel`, `spawn_job`, `wait_jobs`): the AI splits work into pieces that run in parallel
+  on the device as background jobs, then collects the results. No extra model or API key needed.
 - **Safe delete** (`delete_file`) and **git helpers** (`git_status`, `git_diff`, `git_log`).
 - **Fast agent**: heavy document libraries (Excel, PDF, DOCX) load on demand, system info is cached,
   telemetry work is skipped when disabled and usage stats are saved in batches. Startup is ~3x faster with
@@ -42,7 +44,7 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 
 ## Tools available to the AI
 
-The relay adds `list_devices`. The agent provides 32 tools, derived from Desktop Commander plus BRC additions.
+The relay adds `list_devices`. The agent provides 38 tools, derived from Desktop Commander plus BRC additions.
 
 | Category | Tools |
 | --- | --- |
@@ -54,6 +56,7 @@ The relay adds `list_devices`. The agent provides 32 tools, derived from Desktop
 | Commands | `run_command` (one-shot: exit code + stdout/stderr) |
 | Processes | `start_process`, `read_process_output`, `interact_with_process`, `force_terminate`, `list_sessions`, `list_processes`, `kill_process` |
 | Git | `git_status`, `git_diff`, `git_log` |
+| Workers | `run_parallel`, `spawn_job`, `wait_jobs`, `get_job`, `list_jobs`, `cancel_job` |
 | File transfer | `prepare_file_transfer`, `send_file_transfer`, `receive_file_transfer` |
 | Diagnostics | `get_usage_stats`, `get_recent_tool_calls` |
 
@@ -76,6 +79,33 @@ These cut the number of calls the AI needs for common work (each call crosses th
 - **`git_status` / `git_diff` / `git_log`**: compact git output with size caps.
 
 All path arguments respect `allowedDirectories`, and commands respect `blockedCommands`.
+
+### Workers: parallel and background jobs
+
+The AI in your chat (Claude, ChatGPT, ...) stays the only one that thinks. It splits a task into pieces and
+hands them to workers on the device, which run in parallel and report back. This works through the plain MCP
+connector: no API key, no second model.
+
+```
+AI plans the task
+  -> run_parallel / spawn_job x N    (workers run at the same time, on one or many devices)
+  -> wait_jobs                       (collects each worker's result; call again until all are done)
+  -> AI reads the results, decides the next step
+```
+
+- **`run_parallel`**: several tool calls and/or commands at once, all results in one call, in input order.
+  Items: `{tool, args}` (any BRC tool) or `{command, cwd?, timeout_ms?}`. Calls still running after
+  `timeout_ms` (default 90s, max 100s) keep going as background jobs (`wait_jobs({group})`).
+- **`spawn_job`**: start a background job and get its id immediately. A job is one `command` or a list of
+  `steps` run in order (e.g. `edit_block` -> build -> test); a failed step stops the job unless
+  `continue_on_error`. Jobs are not limited by the 2-minute call timeout (default 30 min, max 6 h).
+  Up to 4 jobs run at once (`BRC_MAX_JOBS`), the rest are queued. Use `group` to handle related jobs together.
+- **`wait_jobs`**: wait up to 100s for jobs (`ids`, `group`, or everything pending). `mode: "any"` returns as
+  soon as one more finishes. Each finished job's output is shown once.
+- **`get_job`** (full output), **`list_jobs`**, **`cancel_job`** (kills the process tree).
+
+Job steps go through the normal tool dispatcher, so `allowedDirectories` and `blockedCommands` apply. Finished
+jobs are saved to `$BRC_HOME/jobs/` and are still listed after an agent restart.
 
 ### Encrypted file transfer
 

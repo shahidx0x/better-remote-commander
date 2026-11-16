@@ -87,10 +87,23 @@ export const RunCommandArgsSchema = z.object({
 });
 
 export async function handleRunCommand(args: unknown): Promise<ServerResult> {
+  return runCommandCore(args, { maxTimeoutMs: MAX_TIMEOUT_MS });
+}
+
+/**
+ * Shared implementation of run_command. Background jobs call it with a larger
+ * timeout cap (they are not bound by the relay's per-call timeout) and an
+ * AbortSignal so cancel_job can kill the process tree.
+ */
+export async function runCommandCore(
+  args: unknown,
+  opts: { maxTimeoutMs: number; signal?: AbortSignal; failOnNonZero?: boolean },
+): Promise<ServerResult> {
   const parsed = RunCommandArgsSchema.safeParse(args);
   if (!parsed.success) return text(`Invalid arguments for run_command: ${parsed.error.message}`, true);
   const { command, shell, maxOutputChars } = parsed.data;
-  const timeoutMs = Math.min(parsed.data.timeout_ms, MAX_TIMEOUT_MS);
+  const timeoutMs = Math.min(parsed.data.timeout_ms, opts.maxTimeoutMs);
+  if (opts.signal?.aborted) return text(`Cancelled before start: ${command}`, true);
 
   if (!(await commandManager.validateCommand(command))) {
     return text(`Error: Command not allowed: ${command}`, true);
@@ -141,8 +154,11 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
     }
 
     let timedOut = false;
+    let cancelled = false;
     let settled = false;
     const timer = setTimeout(() => { timedOut = true; killTree(child.pid); }, timeoutMs);
+    const onAbort = () => { cancelled = true; killTree(child.pid); };
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
@@ -153,12 +169,15 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
       const ms = Date.now() - started;
       if (spawnError) {
         resolve(text(`Failed to start command with shell "${shellPath}": ${spawnError.message}`, true));
         return;
       }
-      const status = timedOut
+      const status = cancelled
+        ? 'CANCELLED (process killed)'
+        : timedOut
         ? `TIMED OUT after ${timeoutMs}ms (process killed)`
         : `exit code ${exitCode ?? 'null'}${signal ? ` (signal ${signal})` : ''}`;
       const out = stdout.toString();
@@ -166,7 +185,9 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
       let body = `$ ${command}\n[${status} · ${ms}ms${cwd ? ` · cwd ${cwd}` : ''}]\n`;
       body += out ? `\n--- stdout ---\n${out.replace(/\s+$/, '')}\n` : '\n(no stdout)\n';
       if (err) body += `\n--- stderr ---\n${err.replace(/\s+$/, '')}\n`;
-      resolve(text(body));
+      // run_command never flags a completed process as an error (historical behaviour);
+      // jobs opt in so a failing step can stop the job.
+      resolve(text(body, !!opts.failOnNonZero && (cancelled || timedOut || exitCode !== 0)));
     };
 
     child.on('error', (e) => finish(null, null, e));
