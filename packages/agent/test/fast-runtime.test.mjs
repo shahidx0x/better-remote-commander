@@ -97,6 +97,35 @@ test('image folder list is metadata only and previews are actual resized image b
  const meta=await sharp(Buffer.from(blocks[0].data,'base64')).metadata();assert.ok(meta.width<=320&&meta.height<=320);assert.equal(meta.exif,undefined);assert.ok(blocks[0].mimeType==='image/webp');assert.deepEqual((await fs.readdir(folder)).sort(),['one.png','two.jpg']);
  const sheet=await callTool('read_images',{path:folder,mode:'sheet',files:['one.png','two.jpg']});ok(sheet);assert.equal(sheet.content.filter(b=>b.type==='image').length,1);const m=await sharp(Buffer.from(sheet.content[1].data,'base64')).metadata();assert.equal(m.width,512);assert.equal(m.height,256);
 });
+test('native image batch keeps ordering, budget, first frame, and sheet cell dimensions', async () => {
+ const {default:sharp}=await import('sharp');
+ const folder=p('fast-native-pictures'); await fs.mkdir(folder);
+ const files=[];
+ for(let i=0;i<6;i++){
+  const name='img-'+i+'.png'; files.push(name);
+  await sharp({create:{width:130+i*4,height:95+i*3,channels:4,
+   background:{r:20+i*25,g:40+i*12,b:80+i*9,alpha:0.6}}}).png().toFile(path.join(folder,name));
+ }
+ const preview=await callTool('read_images',{path:folder,mode:'previews',files,maxDimension:256});
+ const data=ok(preview);
+ assert.deepEqual(data.files.map(f=>f.file),files);
+ assert.equal(data.returnedImages,6);
+ assert.ok(data.encodedOutputBytes<=2*1024*1024);
+ assert.deepEqual(data.files.map(f=>f.previewIndex),[0,1,2,3,4,5]);
+ assert.equal(preview.content.filter(b=>b.type==='image').length,6);
+ const sheet=await callTool('read_images',{path:folder,mode:'sheet',files});
+ const summary=ok(sheet);
+ assert.equal(summary.returnedImages,1);
+ assert.ok(summary.encodedOutputBytes<=2*1024*1024);
+ assert.deepEqual(summary.files.map(f=>f.previewIndex),[0,1,2,3,4,5]);
+ const sheetBytes=Buffer.from(sheet.content.find(b=>b.type==='image').data,'base64');
+ const md=await sharp(sheetBytes).metadata();
+ assert.equal(md.width,768);assert.equal(md.height,512);assert.equal(md.exif,undefined);
+ const metadata=ok(await callTool('read_images',{path:folder,mode:'metadata',files}));
+ assert.equal(metadata.returnedImages,0);
+ assert.deepEqual(metadata.files.map(f=>f.file),files);
+ assert.equal(metadata.files.length,6);
+});
 test('image reading rejects disguised SVG and paths outside the requested folder',async()=>{
  await write('pictures/disguised.png','<svg><image href="file:///private"/></svg>');
  const r=await callTool('read_images',{path:p('pictures'),mode:'previews',files:['disguised.png','../A.cs']});assert.equal(r.isError,true);assert.equal(r.content.filter(b=>b.type==='image').length,0);assert.ok(!JSON.stringify(r).includes('public class'));

@@ -42,7 +42,7 @@ ChatGPT / Claude / other MCP client
 ## Main capabilities
 
 - **Control several paired devices.** Each agent connects *outbound* to the relay; use an optional `deviceId` when more than one is online. Pausing or deleting a device is enforced at the relay.
-- **Read, search, edit and transfer files.** Includes multi-file reads, exact edits, git inspection, image previews, PDF tooling and encrypted transfers between paired devices.
+- **Read, search, edit and transfer files.** Includes multi-file reads, exact edits, git inspection, fast native image previews/contact sheets, PDF tooling and encrypted transfers between paired devices. For images, prefer `read_images` to avoid sending full-resolution originals with `read_file`.
 - **Work inside real codebases.** Project mapping, declarations, syntax-aware navigation, multi-language context, cross-file references, SHA-256 preconditions and manifest-backed verification.
 - **Reduce unnecessary round trips.** `read_multiple_files`, `batch_tools`, `workspace_batch` and `run_parallel` combine suitable work rather than sending many individual MCP calls.
 - **Run background jobs.** Launch commands or sequential tool steps, wait for completion, inspect results and cancel jobs without keeping one MCP request open.
@@ -207,6 +207,7 @@ Local test profiles use HTTP on loopback; public deployments need HTTPS and corr
 | `BRC_PLUGINS=none` | Skip agent default-plugin installation/setup |
 | `BRC_PLUGIN_REMOTE_ADMIN=0` | Reject remote plugin changes on the device |
 | `BRC_PARSER_WORKERS` | Configure optional parser-worker pool size |
+| `BRC_IMAGE_WORKERS` | Concurrent native image decodes per preview request (default 2; 1-3 supported) |
 
 See [`.env.example`](.env.example) for relay and tunnel variables. Do not commit a real `.env`, pairing tokens or plugin secrets.
 
@@ -221,6 +222,7 @@ pnpm test:agent
 pnpm test:e2e
 pnpm test
 pnpm bench:io
+pnpm bench:images
 pnpm bench:context
 ```
 

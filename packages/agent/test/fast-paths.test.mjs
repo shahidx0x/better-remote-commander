@@ -66,6 +66,18 @@ test('read_file deep offset in a large file is exact', async () => {
   assert.ok(lines[2].startsWith('line 250002 '), lines[2]);
 });
 
+test('Windows native launch only bypasses cmd for unquoted literal executable argv', async () => {
+ if (process.platform !== 'win32') return;
+ const {planFastExec}=await import('../dist/tools/fast-exec.js');
+ const simple=await planFastExec('powershell.exe','node -v',{...process.env});
+ assert.equal(simple?.kind,'native');
+ assert.equal(path.extname(simple.executable).toLowerCase(),'.exe');
+ assert.deepEqual(simple.args,['-v']);
+ const quoted=await planFastExec('powershell.exe','node -p "1 + 2"',{...process.env});
+ assert.notEqual(quoted?.kind,'native');
+ const pipeline=await planFastExec('powershell.exe','node -v | more',{...process.env});
+ assert.equal(pipeline,null);
+});
 test('run_command keeps exit codes, quoting and shell features', async () => {
   let t = out(await callTool('run_command', { command: 'node -v' }));
   assert.match(t, /exit code 0/);

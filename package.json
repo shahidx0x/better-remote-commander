@@ -27,7 +27,8 @@
     "test": "pnpm test:unit && pnpm test:agent && pnpm test:e2e",
     "test:agent": "node --test packages/agent/test/*.test.mjs",
     "bench:context": "node scripts/benchmark-context.mjs",
-    "bench:io": "node scripts/benchmark-roundtrips.mjs"
+    "bench:io": "node scripts/benchmark-roundtrips.mjs",
+    "bench:images": "node scripts/benchmark-images.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

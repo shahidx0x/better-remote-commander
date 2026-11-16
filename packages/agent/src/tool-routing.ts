@@ -323,9 +323,9 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
     caveat: 'Does not execute, pull, build, or reveal credentials.',
   },
   read_images: {
-    use: 'List local image assets, then view selected resized previews or a contact sheet.',
-    instead: 'For image editing or generation use the proper image tool; for SVG source use text tools.',
-    caveat: 'Do not claim OCR or hidden image contents; first frame only for animated formats.',
+    use: 'List and inspect local raster images with native resized previews or a contact sheet; avoid transferring full-size files over MCP.',
+    instead: 'For exact original image bytes use read_file; for image editing or generation use the proper image tool; for SVG source use text tools.',
+    caveat: 'The first animation frame only is inspected; no OCR or persistent thumbnail cache. A compact preview is not a lossless original.',
   },
   sandbox_run: {
     use: 'Preview/execute an explicitly requested isolated command in an existing local Docker image.',

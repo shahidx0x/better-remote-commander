@@ -29,7 +29,7 @@ export interface FastExecPlan {
   windowsVerbatim?: boolean;
   /** Environment to use instead of the caller's (login env for Unix shells). */
   env?: NodeJS.ProcessEnv;
-  kind: 'cmd' | 'cached-login-env';
+  kind: 'native' | 'cmd' | 'cached-login-env';
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +113,13 @@ function windowsPlan(shellName: string, command: string): FastExecPlan | null {
   const exts = pathExt.length ? pathExt : WIN_EXEC_EXTS;
   const resolved = findOnPath(prog, process.env.PATH ?? process.env.Path, exts);
   if (!resolved || !WIN_EXEC_EXTS.includes(path.extname(resolved).toLowerCase())) return null;
+  // For unquoted, literal argv and a genuine executable, avoid launching cmd.exe at all.
+  // Quotes, interpolation, shell operators, scripts and ambiguous syntax retain the shell.
+  // This is a conservative subset: on Windows it saves one process for common git/node/rg calls.
+  if (['.exe', '.com'].includes(path.extname(resolved).toLowerCase()) &&
+      /^[A-Za-z0-9_./:\\-]+(?:[ \t]+[A-Za-z0-9_./:\\-]+)*$/.test(command.trim())) {
+    return { executable: resolved, args: command.trim().split(/[ \t]+/).slice(1), kind: 'native' };
+  }
   const comspec = process.env.COMSPEC || 'cmd.exe';
   // /d: skip AutoRun registry commands; /s: strip exactly the outer quotes we add.
   return { executable: comspec, args: ['/d', '/s', '/c', `"${command}"`], windowsVerbatim: true, kind: 'cmd' };

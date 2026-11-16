@@ -61,8 +61,11 @@ Input arguments are capped at 8 MiB, before/after snapshots at 16 MiB total, and
 
 ```powershell
 pnpm bench:io
+pnpm bench:images
 pnpm bench:context
 ```
+
+`bench:images` generates six temporary JPEG fixtures, times native `read_images` single/batch/sheet/metadata operations, and removes the fixtures. Its timings exclude the network and AI host. `BRC_IMAGE_WORKERS=1` can reduce memory pressure on lower-RAM devices; the default is 2.
 
 `bench:io` runs a disposable loopback HTTP MCP -> relay -> WebSocket -> separate compiled agent benchmark. It verifies contents/hashes, compares 32 separate reads/writes with batched equivalents, prints median timings across three rounds and cleans up. It writes no benchmark report/log. `bench:context` measures graph reuse separately.
 
@@ -94,7 +97,7 @@ At implementation time Docker was installed on the target PC but its daemon was 
 
 PNG, JPEG, WebP, GIF, AVIF and TIFF inputs are supported when the installed decoder can read them. Only the first animation frame/page is read. Inputs are limited to 16 MiB and 16 megapixels each. Selected previews are resized, auto-oriented, stripped of metadata and returned as real MCP `image` blocks, with a 2 MiB encoded preview budget. Originals are never changed. SVG/XML/HTML masquerading as raster images is refused; inspect SVG source with text tools instead.
 
-The existing sharp dependency loads only when a preview/metadata operation requires it. Its operation cache is disabled and native concurrency is one; image work is serialized with a bounded queue. No OCR, upload, disk thumbnail cache or hidden model call is performed.
+For model-facing inspection, prefer `read_images` over `read_file`: the latter returns the complete original raster bytes, which can be much larger over MCP. Sharp uses native libvips; the library loads lazily and its operation cache remains disabled. Requests are queued (maximum eight) and each request decodes up to **two images concurrently** by default (`BRC_IMAGE_WORKERS=1..3`, clamped to 1-3). A sheet composes raw RGB cells and encodes WebP once instead of re-encoding each tile. The same 16 MiB / 16 MP input and 2 MiB final encoded output limits apply; native image operations are CPU/memory-bounded and cannot remove network or model latency. No OCR, upload, disk thumbnail cache or hidden model call is performed.
 
 ## Languages
 
