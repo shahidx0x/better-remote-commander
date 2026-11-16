@@ -79,3 +79,42 @@ test('run_command keeps exit codes, quoting and shell features', async () => {
   t = out(await callTool('run_command', { command: 'brc-no-such-program-xyz' }));
   assert.doesNotMatch(t, /exit code 0/);
 });
+
+test('list_directory output matches a sequential walk', async () => {
+  const { readdir } = await import('node:fs/promises');
+  async function ref(p, depth, rel = '', top = true) {
+    const out = [];
+    if (depth <= 0) return out;
+    const entries = await readdir(p, { withFileTypes: true });
+    let show = entries, hidden = 0;
+    if (!top && entries.length > 100) { show = entries.slice(0, 100); hidden = entries.length - 100; }
+    for (const e of show) {
+      const d = rel ? path.join(rel, e.name) : e.name;
+      out.push(`${e.isDirectory() ? '[DIR]' : '[FILE]'} ${d}`);
+      if (e.isDirectory() && depth > 1) out.push(...await ref(path.join(p, e.name), depth - 1, d, false));
+    }
+    if (hidden) out.push(`[WARNING] ${rel || path.basename(p)}: ${hidden} items hidden (showing first 100 of ${entries.length} total)`);
+    return out;
+  }
+  const target = path.join(repo, 'packages');
+  const expected = (await ref(target, 3)).join('\n');
+  const t = out(await callTool('list_directory', { path: target, depth: 3 }));
+  assert.ok(t.includes(expected), 'same lines in the same order');
+});
+
+test('edit_block fuzzy fallback gives the same answer inline and in the reused worker', async () => {
+  const { runFuzzySearch } = await import(pathToFileURL(path.join(repo, 'packages/agent/dist/core/tools/fuzzySearchCore.js')).href);
+  const query = 'export function handler77(req, res) { return res.json({ id: 77, ok: false }); }';
+  for (const kb of [10, 300]) { // below and above the inline threshold
+    const p = path.join(scratch, `fuzzy-${kb}.js`);
+    let s = '';
+    for (let i = 0; s.length < kb * 1024; i++) s += `export function handler${i}(req, res) { return res.json({ id: ${i}, ok: true }); }\n`;
+    writeFileSync(p, s);
+    const expected = runFuzzySearch(s, query).result.value; // the matcher run directly on this thread
+    for (let round = 0; round < 2; round++) { // round 2 reuses the idle worker
+      const t = out(await callTool('edit_block', { file_path: p, old_string: query, new_string: 'x' }));
+      assert.match(t, /Search content not found/, `${kb} KB round ${round}`);
+      assert.ok(t.includes(`closest match was "${expected}"`), `${kb} KB round ${round}: ${t.slice(0, 200)}`);
+    }
+  }
+});
