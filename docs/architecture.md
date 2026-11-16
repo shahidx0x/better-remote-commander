@@ -36,6 +36,15 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
 - `result`{id, ok, content | error}               agent -> relay
 - `ping`/`pong` every 20 s; relay marks device offline after 2 missed
 - Multiple devices per user; client picks via `deviceId` arg (as upstream)
+- Plugin additions (still protocol v1; old agents never send `plugins`, so the relay treats them as "no plugin support"
+  and never sends them `plugin_admin`; old relays ignore unknown agent frames):
+  - `plugins` {plugins: PluginStatusSummary[]}             agent -> relay, after `welcome` and (debounced 250 ms) on every plugin state change.
+    Summaries are secret-free (env *names* only). Relay keeps the latest list per device in memory and the last-known copy in sqlite (`device_plugins`).
+  - `plugin_admin` {id, action, pluginId?, plugin?, env?, unsetEnv?}  relay -> agent; action = install | enable | disable | remove | set_env | refresh.
+    `install` carries a full PluginDefinition (npm/pypi exact versions, command, https remote) plus initial env; `set_env` merges `env` and drops `unsetEnv`;
+    `refresh` re-sends `plugins` (with pluginId: also re-reads that plugin's tool list). Only sent for authenticated, CSRF-checked /admin actions.
+  - `plugin_admin_result` {id, ok, error?, plugin?}        agent -> relay. The agent re-validates every definition (shared `validatePluginDefinition`);
+    `BRC_PLUGIN_REMOTE_ADMIN=0` on the device refuses all remote changes.
 
 ## Security
 - Agent never listens on a port; all connections outbound
@@ -118,3 +127,16 @@ Agents anywhere connect outbound only; several agents per relay; `deviceId` sele
 - security headers (nosniff, frame DENY, no-referrer, no-store, HSTS on https), body limits on public endpoints (64 kb forms, 4 kb pairing JSON)
 - SECURITY.md: model, defaults, threat notes
 - rate-limit caveat: e2e-admin locks `admin` for 5 min; the runner uses a fresh relay so it is only an issue when running that script by hand twice
+
+## Plugins: relay admin + marketplace
+- `/admin` shows pending AI plugin requests and a Plugins section per device (status, error, userAction, enable/disable/remove/refresh tools,
+  env form with password inputs; values go to the agent only and are never stored, logged or audited on the relay).
+- `/admin/marketplace` searches the official MCP Registry server side (`plugins/registry.ts`: 8 s timeout, 5 min cache;
+  `BRC_MCP_REGISTRY_URL`, `BRC_MCP_REGISTRY_FIXTURE=<file>` for offline/tests). Mapping: npm stdio -> npm, pypi stdio -> pypi,
+  streamable-http https remote -> remote (URL variables + headers collected in the form), oci -> "not supported (Docker)", non-exact versions not installable.
+  A Custom form takes `pkg@1.2.3`, `pkg==1.2.3`, a command line or an https URL.
+- MCP tools on the relay: `search_mcp_registry` (read-only) and `request_plugin_install` (writes a *pending* row in `plugin_requests`).
+  Nothing is installed until the owner opens the request in /admin, fills in env vars/headers and submits the install form (= approval).
+  Audit rows: `plugin.request(...)`, `plugin.approve(...)`, `plugin.install(...)`, `plugin.reject|enable|disable|remove|refresh|set_env(...)`.
+- New POST routes use a session-bound HMAC CSRF token (`Sessions.csrfToken/verifyCsrf`) in addition to the SameSite=Lax session cookie.
+- Tests: `packages/relay/test/plugins.test.mjs`, `packages/agent/test/plugin-admin.test.mjs`, `scripts/e2e-plugins.mjs` (run by e2e-all).
