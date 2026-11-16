@@ -17,6 +17,7 @@ import { validatePath } from '../core/tools/filesystem.js';
 import { commandManager } from '../core/command-manager.js';
 import { configManager } from '../core/config-manager.js';
 import { getShellSpawnArgs, getRepairedPathExt } from '../core/terminal-manager.js';
+import { planFastExec } from './fast-exec.js';
 import type { ServerResult } from '../core/types.js';
 import type { ToolDefinition } from '../core/tool-definitions.js';
 
@@ -128,9 +129,14 @@ export async function runCommandCore(
   const wrapped = shellName === 'powershell' || shellName === 'pwsh'
     ? `$global:LASTEXITCODE = $null\n${command}\n$__brcOk = $?; if ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $__brcOk) { exit 1 } else { exit 0 }`
     : command;
-  const cfg = getShellSpawnArgs(shellPath, wrapped);
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (isWindows) env.PATHEXT = getRepairedPathExt();
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  if (isWindows) baseEnv.PATHEXT = getRepairedPathExt();
+  // Skip slow shell start-up when it cannot change the result (see fast-exec.ts).
+  const fast = await planFastExec(shellPath, command, baseEnv);
+  const cfg = fast
+    ? { executable: fast.executable, args: fast.args, useShellOption: false as const, windowsVerbatim: fast.windowsVerbatim }
+    : getShellSpawnArgs(shellPath, wrapped);
+  const env = fast?.env ?? baseEnv;
 
   const started = Date.now();
   const stdout = new CappedOutput(Math.floor(maxOutputChars * 0.25), Math.ceil(maxOutputChars * 0.75));

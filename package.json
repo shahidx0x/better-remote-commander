@@ -19,7 +19,7 @@
                     "extract-tools":  "node scripts/extract-tools.mjs",
                     "pack:all":  "pnpm -r --filter \"./packages/*\" exec pnpm pack --pack-destination ../../dist-pack",
                     "publish:all":  "pnpm -r --filter \"./packages/*\" publish --access public",
-                    "test:unit":  "node --test packages/relay/test/unit.test.mjs packages/agent/test/jobs.test.mjs",
+                    "test:unit":  "node --test packages/relay/test/unit.test.mjs packages/agent/test/jobs.test.mjs packages/agent/test/fast-paths.test.mjs",
                     "test:e2e":  "node scripts/e2e-all.mjs",
                     "test":  "pnpm test:unit \u0026\u0026 pnpm test:e2e"
                 },

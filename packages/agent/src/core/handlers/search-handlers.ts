@@ -88,7 +88,7 @@ export async function handleStartSearch(args: unknown): Promise<ServerResult> {
 const WAIT_DEFAULT_TIMEOUT_MS = 30_000;
 const WAIT_MAX_TIMEOUT_MS = 110_000;
 const WAIT_DEFAULT_MAX_RESULTS = 200;
-const WAIT_POLL_MS = 25;
+const WAIT_POLL_MS = 250; // upper bound; waitForActivity wakes earlier on output or exit
 
 type StartSearchArgs = ReturnType<typeof StartSearchArgsSchema.parse>;
 
@@ -111,6 +111,7 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
       timeout: timeoutMs,
       earlyTermination: args.earlyTermination,
       literalSearch: args.literalSearch,
+      skipInitialWait: true,
     });
     sessionId = started.sessionId;
   } catch (error) {
@@ -125,7 +126,7 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
     if (s.isComplete) { stoppedReason = 'complete'; break; }
     if (s.totalMatches >= cap) { stoppedReason = 'cap'; break; }
     if (Date.now() >= deadline) { stoppedReason = 'timeout'; break; }
-    await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
+    await searchManager.waitForActivity(sessionId, Math.min(WAIT_POLL_MS, Math.max(1, deadline - Date.now())));
   }
   if (stoppedReason !== 'complete') searchManager.terminateSearch(sessionId);
 

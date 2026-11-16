@@ -34,6 +34,13 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 - **Fast agent**: heavy document libraries (Excel, PDF, DOCX) load on demand, system info is cached,
   telemetry work is skipped when disabled and usage stats are saved in batches. Startup is ~3x faster with
   ~70% less memory, and per-call overhead dropped from ~160 ms to a few ms.
+- **Fast commands and reads**: simple commands skip the slow shell start-up. On Windows, a plain
+  `program args` command for a real `.exe`/`.cmd` runs through `cmd.exe` instead of PowerShell (~200 ms -> ~50 ms).
+  On macOS and Linux, the bash/zsh login environment is captured once and reused instead of reloading your
+  profile for every command. Anything that needs the shell itself (pipes, variables, aliases, cmdlets, profile
+  functions) still runs in your shell as before; `BRC_FAST_EXEC=0` turns this off. `read_file` finds lines by
+  scanning bytes, so reads deep into large files are fast and exact, and blocking search returns as soon as
+  ripgrep finishes.
 - **OS service install** (`--install-service`) so the agent starts at login.
 - **Security**: login rate limiting, signed session cookies, security headers, blocked-command list and
   `allowedDirectories` on the agent. See `SECURITY.md`.

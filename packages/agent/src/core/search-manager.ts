@@ -52,6 +52,7 @@ export interface SearchSessionOptions {
   timeout?: number;
   earlyTermination?: boolean;  // Stop search early when exact filename match is found
   literalSearch?: boolean;     // Force literal string matching (-F flag) instead of regex
+  skipInitialWait?: boolean;   // BRC: blocking callers wait on events themselves (no 40ms first-chunk wait)
 }
 
 /**
@@ -217,7 +218,7 @@ export interface SearchSessionOptions {
     });
 
     // Only wait for ripgrep first chunk - Excel results merge asynchronously
-    await firstChunk;
+    if (!options.skipInitialWait) await firstChunk;
 
     return {
       sessionId,
@@ -233,6 +234,28 @@ export interface SearchSessionOptions {
    * Read search results with offset-based pagination (like read_file)
    * Supports both range reading and tail behavior
    */
+  /**
+   * BRC: resolve on the next sign of progress (new ripgrep output or process exit) or after ms.
+   * Lets blocking callers react immediately instead of polling on a fixed interval.
+   */
+  waitForActivity(sessionId: string, ms: number): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.isComplete) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const proc = session.process;
+      const done = () => {
+        clearTimeout(timer);
+        proc.stdout?.off('data', done);
+        proc.off('close', done);
+        // let the manager's own data/close handlers run first
+        setImmediate(resolve);
+      };
+      const timer = setTimeout(done, Math.max(1, ms));
+      proc.stdout?.once('data', done);
+      proc.once('close', done);
+    });
+  }
+
   readSearchResults(
     sessionId: string, 
     offset: number = 0, 
