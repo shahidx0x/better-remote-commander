@@ -18,6 +18,8 @@ import { validatePath } from '../core/tools/filesystem.js';
 import { commandManager } from '../core/command-manager.js';
 import { configManager } from '../core/config-manager.js';
 import { getShellSpawnArgs, getRepairedPathExt } from '../core/terminal-manager.js';
+import { planFastExec } from './fast-exec.js';
+import { planRtkCommand, resolveRtk, rtkEnv, annotateRtkOutput, isRtkUsageError } from './rtk.js';
 import type { ServerResult } from '../core/types.js';
 import type { ToolDefinition } from '../core/tool-definitions.js';
 
@@ -30,7 +32,7 @@ const text = (t: string, isError = false): ServerResult => ({ content: [{ type: 
 // ---------------------------------------------------------------------------
 // Bounded output capture: keeps the head and the tail of a stream.
 // ---------------------------------------------------------------------------
-class CappedOutput {
+export class CappedOutput {
   private head = '';
   private tail = '';
   private dropped = 0;
@@ -55,7 +57,7 @@ class CappedOutput {
   }
 }
 
-function killTree(pid: number | undefined): void {
+export function killTree(pid: number | undefined): void {
   if (!pid) return;
   try {
     if (isWindows) {
@@ -85,15 +87,30 @@ export const RunCommandArgsSchema = z.object({
   timeout_ms: z.number().int().min(1).optional().default(60_000),
   shell: z.string().optional(),
   maxOutputChars: z.number().int().min(1_000).max(1_000_000).optional().default(100_000),
+  raw: z.boolean().optional().default(false),
 });
 
 export async function handleRunCommand(args: unknown): Promise<ServerResult> {
+  return runCommandCore(args, { maxTimeoutMs: MAX_TIMEOUT_MS });
+}
+
+/**
+ * Shared implementation of run_command. Background jobs call it with a larger
+ * timeout cap (they are not bound by the relay's per-call timeout) and an
+ * AbortSignal so cancel_job can kill the process tree.
+ */
+export async function runCommandCore(
+  args: unknown,
+  opts: { maxTimeoutMs: number; signal?: AbortSignal; failOnNonZero?: boolean },
+): Promise<ServerResult> {
   const parsed = RunCommandArgsSchema.safeParse(args);
   if (!parsed.success) return text(`Invalid arguments for run_command: ${parsed.error.message}`, true);
   const { command, shell, maxOutputChars } = parsed.data;
-  checkCancelled();
-  const abortSignal = getCallContext()?.signal;
-  const timeoutMs = Math.max(1, Math.min(parsed.data.timeout_ms, MAX_TIMEOUT_MS, (getCallContext()?.deadline ?? (Date.now()+MAX_TIMEOUT_MS))-Date.now()));
+  if (!opts.signal) checkCancelled();
+  if (opts.signal?.aborted) return text('Cancelled before start.', true);
+  const abortSignal = opts.signal ? undefined : getCallContext()?.signal;
+  const remaining = opts.signal ? opts.maxTimeoutMs : Math.max(1, (getCallContext()?.deadline ?? (Date.now() + opts.maxTimeoutMs)) - Date.now());
+  const timeoutMs = Math.max(1, Math.min(parsed.data.timeout_ms, opts.maxTimeoutMs, remaining));
 
   if (!(await commandManager.validateCommand(command))) {
     return text(`Error: Command not allowed: ${command}`, true);
@@ -118,32 +135,46 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
   const wrapped = shellName === 'powershell' || shellName === 'pwsh'
     ? `$global:LASTEXITCODE = $null\n${command}\n$__brcOk = $?; if ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $__brcOk) { exit 1 } else { exit 0 }`
     : command;
-  const cfg = getShellSpawnArgs(shellPath, wrapped);
   const env: NodeJS.ProcessEnv = { ...process.env };
   // A user command is independent of the agent's test-runner process.
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_TEST_REPORTER;
   env.COREPACK_ENABLE_NETWORK = '0';
   if (isWindows) env.PATHEXT = getRepairedPathExt();
+  const fast = await planFastExec(shellPath, command, env);
+  const cfg = fast
+    ? { executable: fast.executable, args: fast.args, windowsVerbatim: fast.windowsVerbatim }
+    : getShellSpawnArgs(shellPath, wrapped);
+  const spawnEnv = fast?.env ?? env;
 
-  const started = Date.now();
-  const stdout = new CappedOutput(Math.floor(maxOutputChars * 0.25), Math.ceil(maxOutputChars * 0.75));
-  const stderr = new CappedOutput(Math.floor(maxOutputChars * 0.1), Math.ceil(maxOutputChars * 0.2));
+  type SpawnCfg = { executable: string; args: string[]; useShellOption?: string | boolean; windowsVerbatim?: boolean };
+  type Outcome = {
+    exitCode: number | null; signal: NodeJS.Signals | null; spawnError?: Error; spawnThrew?: boolean;
+    timedOut: boolean; cancelled: boolean; out: string; err: string; ms: number;
+  };
 
-  return await new Promise<ServerResult>((resolve) => {
+  // Spawn once and collect capped output. Never rejects.
+  const execOnce = (c: SpawnCfg, spawnEnv: NodeJS.ProcessEnv): Promise<Outcome> => new Promise<Outcome>((resolve) => {
+    const started = Date.now();
+    const stdout = new CappedOutput(Math.floor(maxOutputChars * 0.25), Math.ceil(maxOutputChars * 0.75));
+    const stderr = new CappedOutput(Math.floor(maxOutputChars * 0.1), Math.ceil(maxOutputChars * 0.2));
+    const done = (o: Partial<Outcome>) => resolve({
+      exitCode: null, signal: null, timedOut: false, cancelled: false,
+      out: stdout.toString(), err: stderr.toString(), ms: Date.now() - started, ...o,
+    });
     let child;
     try {
-      child = spawn(cfg.executable, cfg.args, {
+      child = spawn(c.executable, c.args, {
         cwd,
-        env,
+        env: spawnEnv,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: !isWindows,
-        ...(cfg.useShellOption ? { shell: cfg.useShellOption } : {}),
-        ...(isWindows && cfg.windowsVerbatim ? { windowsVerbatimArguments: true } : {}),
+        ...(c.useShellOption ? { shell: c.useShellOption } : {}),
+        ...(isWindows && c.windowsVerbatim ? { windowsVerbatimArguments: true } : {}),
       });
     } catch (e) {
-      resolve(text(`Failed to start command: ${e instanceof Error ? e.message : String(e)}`, true));
+      done({ spawnError: e instanceof Error ? e : new Error(String(e)), spawnThrew: true });
       return;
     }
 
@@ -154,6 +185,8 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
     if (abortSignal?.aborted) abort();
     let settled = false;
     const timer = setTimeout(() => { timedOut = true; killTree(child.pid); }, timeoutMs);
+    const onAbort = () => { cancelled = true; killTree(child.pid); };
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
@@ -166,25 +199,58 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
       clearTimeout(timer);
       abortSignal?.removeEventListener('abort', abort);
       const ms = Date.now() - started;
-      if (spawnError) {
-        resolve(text(`Failed to start command with shell "${shellPath}": ${spawnError.message}`, true));
-        return;
-      }
-      const status = cancelled ? 'CANCELLED (process-tree termination requested)' : timedOut
-        ? `TIMED OUT after ${timeoutMs}ms (process killed)`
-        : `exit code ${exitCode ?? 'null'}${signal ? ` (signal ${signal})` : ''}`;
-      const out = stdout.toString();
-      const err = stderr.toString();
-      let body = `$ ${command}\n[${status} · ${ms}ms${cwd ? ` · cwd ${cwd}` : ''}]\n`;
-      body += out ? `\n--- stdout ---\n${out.replace(/\s+$/, '')}\n` : '\n(no stdout)\n';
-      if (err) body += `\n--- stderr ---\n${err.replace(/\s+$/, '')}\n`;
-      const failed = cancelled || timedOut || exitCode !== 0;
-      resolve({ ...text(body, failed), structuredContent: { exitCode, signal, durationMs:ms, timedOut, cancelled, ...(failed ? {error:{code:cancelled?'CANCELLED':timedOut?'TIMEOUT':'COMMAND_FAILED',retryable:false}} : {}) } });
+      opts.signal?.removeEventListener('abort', onAbort);
+      done({ exitCode, signal, spawnError, timedOut, cancelled });
     };
 
     child.on('error', (e) => finish(null, null, e));
     child.on('close', (code, signal) => finish(code, signal));
   });
+
+  const format = (r: Outcome, note?: string): ServerResult => {
+    const { exitCode, signal, cancelled, timedOut } = r;
+    const status = cancelled
+      ? 'CANCELLED (process killed)'
+      : timedOut
+      ? `TIMED OUT after ${timeoutMs}ms (process killed)`
+      : `exit code ${exitCode ?? 'null'}${signal ? ` (signal ${signal})` : ''}`;
+    let body = `$ ${command}\n[${status} · ${r.ms}ms${cwd ? ` · cwd ${cwd}` : ''}]\n`;
+    if (note) body += `${note}\n`;
+    body += r.out ? `\n--- stdout ---\n${r.out.replace(/\s+$/, '')}\n` : '\n(no stdout)\n';
+    if (r.err) body += `\n--- stderr ---\n${r.err.replace(/\s+$/, '')}\n`;
+    // run_command never flags a completed process as an error (historical behaviour);
+    // jobs opt in so a failing step can stop the job.
+    const failed = cancelled || timedOut || exitCode !== 0;
+    return {
+      ...text(body, failed),
+      structuredContent: {
+        exitCode, signal, durationMs: r.ms, timedOut, cancelled,
+        ...(failed ? { error: { code: cancelled ? 'CANCELLED' : timedOut ? 'TIMEOUT' : 'COMMAND_FAILED', retryable: false } } : {}),
+      },
+    };
+  };
+
+  // rtk: compress the output of supported simple commands (see rtk.ts). Falls back to the
+  // normal run when rtk cannot start or rejects the arguments before running anything.
+  const rtkArgs = planRtkCommand({
+    command,
+    raw: parsed.data.raw,
+    posix: !['cmd', 'powershell', 'pwsh'].includes(shellName),
+  });
+  const rtkPath = rtkArgs ? resolveRtk() : null;
+  if (rtkArgs && rtkPath) {
+    const r = await execOnce({ executable: rtkPath, args: rtkArgs }, rtkEnv(env));
+    if (!r.spawnError && !(r.exitCode !== null && isRtkUsageError(r.exitCode, r.err))) {
+      const a = annotateRtkOutput(r.out, r.err);
+      return format({ ...r, out: a.stdout, err: a.stderr }, a.note);
+    }
+    if (opts.signal?.aborted) return format(r);
+  }
+
+  const r = await execOnce(cfg, spawnEnv);
+  if (r.spawnThrew) return text(`Failed to start command: ${r.spawnError?.message}`, true);
+  if (r.spawnError) return text(`Failed to start command with shell "${shellPath}": ${r.spawnError.message}`, true);
+  return format(r);
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +458,8 @@ export function buildBrcToolDefinitions(): ToolDefinition[] {
         'Output is capped (maxOutputChars, default 100000) keeping the beginning and end.',
         'Pass cwd (absolute path, must be inside allowed directories) to choose the working directory.',
         'Blocked commands (config blockedCommands) are rejected.',
+        'Output of common dev commands (git status/log/diff, cargo/go/pytest/vitest/jest/tsc/eslint, npm run, ...)',
+        'may be compressed by rtk; such results say "[compressed by rtk ...]". Pass raw=true for the exact, uncompressed output.',
       ].join('\n'),
       inputSchema: zodToJsonSchema(RunCommandArgsSchema),
       annotations: { title: 'Run Command', readOnlyHint: false, destructiveHint: true, openWorldHint: true },

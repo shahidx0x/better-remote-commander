@@ -43,6 +43,22 @@ CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEG
 CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts);
 `;
 
+/* Plugins: AI install requests awaiting owner approval, and last-known plugin lists per device.
+   Neither table ever holds env values or header values (secrets go straight to the agent). */
+const PLUGIN_SCHEMA = `
+CREATE TABLE IF NOT EXISTS plugin_requests (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, device_id TEXT, client TEXT, registry_name TEXT, custom_type TEXT, custom_spec TEXT, plugin_id TEXT, reason TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, decided_at INTEGER, result TEXT);
+CREATE INDEX IF NOT EXISTS plugin_requests_user ON plugin_requests(user_id, status);
+CREATE TABLE IF NOT EXISTS device_plugins (device_id TEXT PRIMARY KEY, plugins TEXT NOT NULL, updated_at INTEGER NOT NULL);
+`;
+
+export type PluginRequestStatus = 'pending' | 'approved' | 'installed' | 'failed' | 'rejected';
+export interface PluginRequestRow {
+  id: string; user_id: string; device_id: string | null; client: string | null;
+  registry_name: string | null; custom_type: string | null; custom_spec: string | null; plugin_id: string | null;
+  reason: string; status: PluginRequestStatus; created_at: number; decided_at: number | null; result: string | null;
+}
+export const MAX_PENDING_PLUGIN_REQUESTS = 20;
+
 export class SqliteStore {
   readonly db: DatabaseSync;
   readonly auditRetentionMs = 0;
@@ -63,6 +79,7 @@ export class SqliteStore {
     this.db = new DatabaseSync(file);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA busy_timeout = 1000;');
     this.db.exec(SCHEMA);
+    this.db.exec(PLUGIN_SCHEMA);
     this.pruneAudit();
   }
 
@@ -165,6 +182,7 @@ export class SqliteStore {
   deleteDevice(deviceId: string): void {
     this.lastTouches.delete(deviceId);
     this.db.prepare('DELETE FROM devices WHERE device_id = ?').run(deviceId);
+    this.db.prepare('DELETE FROM device_plugins WHERE device_id = ?').run(deviceId);
   }
 
   /* ---------- device pairing codes ---------- */
@@ -299,6 +317,48 @@ export class SqliteStore {
   }
   revokeConnectionLink(userId: string, id: string): boolean {
     return Number(this.statement('DELETE FROM connection_links WHERE id = ? AND user_id = ?').run(id, userId).changes) > 0;
+  }
+
+  /* ---------- plugin install requests (AI -> owner approval) ---------- */
+  createPluginRequest(row: Pick<PluginRequestRow, 'user_id' | 'device_id' | 'client' | 'registry_name' | 'custom_type' | 'custom_spec' | 'plugin_id' | 'reason'>): PluginRequestRow {
+    const pending = this.db.prepare("SELECT COUNT(*) AS n FROM plugin_requests WHERE user_id = ? AND status = 'pending'").get(row.user_id) as { n: number };
+    if (pending.n >= MAX_PENDING_PLUGIN_REQUESTS) throw new Error(`too many pending plugin requests (${pending.n}); ask the owner to review /admin`);
+    const full: PluginRequestRow = { ...row, id: `pr_${randomToken(9)}`, status: 'pending', created_at: Date.now(), decided_at: null, result: null };
+    this.db.prepare('INSERT INTO plugin_requests (id,user_id,device_id,client,registry_name,custom_type,custom_spec,plugin_id,reason,status,created_at,decided_at,result) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(full.id, full.user_id, full.device_id, full.client, full.registry_name, full.custom_type, full.custom_spec, full.plugin_id, full.reason, full.status, full.created_at, full.decided_at, full.result);
+    return full;
+  }
+  /** Same request still pending (dedupe repeated AI calls). */
+  findPendingPluginRequest(userId: string, deviceId: string | null, registryName: string | null, customType: string | null, customSpec: string | null): PluginRequestRow | undefined {
+    return this.db.prepare("SELECT * FROM plugin_requests WHERE user_id = ? AND status = 'pending' AND device_id IS ? AND registry_name IS ? AND custom_type IS ? AND custom_spec IS ?")
+      .get(userId, deviceId, registryName, customType, customSpec) as PluginRequestRow | undefined;
+  }
+  getPluginRequest(id: string): PluginRequestRow | undefined {
+    return this.db.prepare('SELECT * FROM plugin_requests WHERE id = ?').get(id) as PluginRequestRow | undefined;
+  }
+  listPluginRequests(userId: string, opts: { status?: PluginRequestStatus; limit?: number } = {}): PluginRequestRow[] {
+    const limit = opts.limit ?? 50;
+    return (opts.status
+      ? this.db.prepare('SELECT * FROM plugin_requests WHERE user_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?').all(userId, opts.status, limit)
+      : this.db.prepare('SELECT * FROM plugin_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT ?').all(userId, limit)) as unknown as PluginRequestRow[];
+  }
+  /** Move a request to a new status. `from` guards against double decisions. Returns false if not in `from`. */
+  setPluginRequestStatus(id: string, status: PluginRequestStatus, result: string | null = null, from: PluginRequestStatus[] = ['pending', 'approved']): boolean {
+    const placeholders = from.map(() => '?').join(',');
+    const r = this.db.prepare(`UPDATE plugin_requests SET status = ?, result = ?, decided_at = ? WHERE id = ? AND status IN (${placeholders})`)
+      .run(status, result ? result.slice(0, 2000) : null, Date.now(), id, ...from);
+    return Number(r.changes) > 0;
+  }
+
+  /* ---------- last-known plugin lists ---------- */
+  saveDevicePlugins(deviceId: string, plugins: unknown[]): void {
+    this.db.prepare('INSERT INTO device_plugins (device_id, plugins, updated_at) VALUES (?,?,?) ON CONFLICT(device_id) DO UPDATE SET plugins = excluded.plugins, updated_at = excluded.updated_at')
+      .run(deviceId, JSON.stringify(plugins), Date.now());
+  }
+  getDevicePlugins(deviceId: string): { plugins: unknown[]; updated_at: number } | undefined {
+    const row = this.db.prepare('SELECT plugins, updated_at FROM device_plugins WHERE device_id = ?').get(deviceId) as { plugins: string; updated_at: number } | undefined;
+    if (!row) return undefined;
+    try { return { plugins: JSON.parse(row.plugins) as unknown[], updated_at: row.updated_at }; } catch { return undefined; }
   }
 
   close(): void { this.liveAudit=[]; this.statements.clear(); this.lastTouches.clear(); this.db.close(); }

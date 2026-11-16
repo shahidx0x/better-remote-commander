@@ -8,7 +8,11 @@ import { getUsageStats } from './core/tools/usage.js';
 import { buildToolDefinitions, EXCLUDED_TOOLS, type ToolDefinition } from './core/tool-definitions.js';
 import { addToolChoice } from './tool-routing.js';
 import { BRC_TOOL_HANDLERS, buildBrcToolDefinitions } from './tools/brc-tools.js';
+import { JOB_TOOL_HANDLERS, buildJobToolDefinitions, setJobToolExecutor } from './tools/jobs.js';
+import { PLUGIN_TOOL_HANDLERS, buildPluginToolDefinitions } from './tools/plugin-tools.js';
+import { AST_GREP_TOOL_HANDLERS, buildAstGrepToolDefinitions } from './tools/ast-grep.js';
 import type { ToolResult } from 'brc-shared';
+import type { ServerResult } from './core/types.js';
 import { randomUUID } from 'node:crypto';
 import { WORKER_TOOL_HANDLERS, buildWorkerToolDefinitions } from './tools/worker-tools.js';
 import { workerCoordinator } from './runtime/worker-coordination.js';
@@ -58,6 +62,9 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ['list_searches', () => handlers.handleListSearches()],
   // BRC-native tools
   ...Object.entries(BRC_TOOL_HANDLERS),
+  ...Object.entries(JOB_TOOL_HANDLERS),
+  ...Object.entries(PLUGIN_TOOL_HANDLERS),
+  ...Object.entries(AST_GREP_TOOL_HANDLERS),
   ...Object.entries(CODING_TOOL_HANDLERS),
   ...Object.entries(EXPERT_TOOL_HANDLERS),
   ...Object.entries(POLYGLOT_TOOL_HANDLERS),
@@ -70,7 +77,7 @@ let cachedDefs: ToolDefinition[] | null = null;
 
 export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildCodingToolDefinitions(), ...buildExpertToolDefinitions(), ...buildPolyglotToolDefinitions(), ...buildDeveloperToolDefinitions(), ...buildWorkerToolDefinitions()]
+    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildCodingToolDefinitions(), ...buildExpertToolDefinitions(), ...buildPolyglotToolDefinitions(), ...buildDeveloperToolDefinitions(), ...buildWorkerToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name))
       .filter(t => process.env.BRC_TOOL_PROFILE !== 'coding' || !['write_pdf','prepare_file_transfer','send_file_transfer','receive_file_transfer','get_recent_tool_calls','get_usage_stats'].includes(t.name))
       .map(addToolChoice);
@@ -124,3 +131,6 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   activity.tool(out.isError?'ERROR':'OK',name,parent.id,durationMs,error?.code);
   return {...out,_meta:{...out._meta,callId:parent.id,durationMs}};
 }
+
+// Job steps run through the same dispatcher (validation, usage tracking, error wrapping).
+setJobToolExecutor(async (name, args) => (await callTool(name, args)) as ServerResult);

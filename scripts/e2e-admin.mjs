@@ -12,9 +12,13 @@ step('login', r.status === 302 && r.headers.get('location') === '/admin');
 r = await fetch(`${base}/admin`, { headers: { cookie } });
 let html = await r.text();
 const deviceId = html.match(/name="device_id" value="([^"]+)"/)?.[1];
+const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
+step('admin forms carry a csrf token', !!csrf);
 step('admin page', r.status === 200 && !!deviceId && /Recent MCP calls/.test(html), `device=${deviceId}`);
-
 r = await post('/admin/device', { device_id: deviceId, action: 'pause' }, cookie);
+step('POST without csrf token is refused', r.status === 403, `status ${r.status}`);
+
+r = await post('/admin/device', { csrf, device_id: deviceId, action: 'pause' }, cookie);
 html = await (await fetch(`${base}/admin`, { headers: { cookie } })).text();
 step('pause device', r.status === 302 && /paused/i.test(html));
 
@@ -37,19 +41,20 @@ const rpc = async (id) => {
 let call = await rpc(1);
 step('paused device refuses MCP calls', call.status === 200 && call.body?.result?.isError === true && /paused/i.test(call.body?.result?.content?.[0]?.text ?? ''), `status ${call.status}`);
 
-r = await post('/admin/device', { device_id: deviceId, action: 'resume' }, cookie);
+r = await post('/admin/device', { csrf, device_id: deviceId, action: 'resume' }, cookie);
 call = await rpc(2);
 step('resume device -> MCP calls work', call.status === 200 && call.body?.result?.isError !== true, `status ${call.status}`);
 
-r = await post('/admin/device', { device_id: deviceId, action: 'rename', name: 'Eraydin-PC (renamed)' }, cookie);
+r = await post('/admin/device', { csrf, device_id: deviceId, action: 'rename', name: 'Eraydin-PC (renamed)' }, cookie);
 html = await (await fetch(`${base}/admin`, { headers: { cookie } })).text();
 step('rename device', /Eraydin-PC \(renamed\)/.test(html));
-await post('/admin/device', { device_id: deviceId, action: 'rename', name: 'Eraydin-PC' }, cookie);
+await post('/admin/device', { csrf, device_id: deviceId, action: 'rename', name: 'Eraydin-PC' }, cookie);
 
 html = await (await fetch(`${base}/auth/clients`, { headers: { cookie } })).text();
 step('DCR client appears in admin', /admin-test/.test(html) && /https:\/\/x\/cb/.test(html));
-const csrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
-await post('/auth/clients/delete', { client_id: reg.client_id, csrf }, cookie);
+const clientsCsrf = html.match(/name="csrf" value="([^"]+)"/)?.[1];
+step('client admin form has CSRF token', !!clientsCsrf);
+await post('/auth/clients/delete', { client_id: reg.client_id, csrf: clientsCsrf }, cookie);
 
 let last;
 for (let i = 0; i < 6; i++) last = await post('/auth/login', { username: 'admin', password: 'wrong-' + i, returnTo: '/' });

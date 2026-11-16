@@ -3,7 +3,7 @@ const [base, pass, name] = process.argv.slice(2);
 const form = (o) => new URLSearchParams(o);
 let r = await fetch(`${base}/auth/login`, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form({ username: 'admin', password: pass, returnTo: '/' }) });
 const cookie = (r.headers.get('set-cookie') ?? '').split(';')[0];
-r = await fetch(`${base}/auth/apikeys`, { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: form({ name }) });
+r = await fetch(`${base}/auth/apikeys`, { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: form({ name, csrf: (await (await fetch(`${base}/auth/apikeys`, { headers: { cookie } })).text()).match(/name="csrf" value="([^"]+)"/)?.[1] ?? '' }) });
 const raw = (await r.text()).match(/value="(brc_ak_[^"]+)"/)?.[1];
 if (!raw) { console.log('key creation failed'); process.exit(1); }
 const H = { authorization: `Bearer ${raw}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };

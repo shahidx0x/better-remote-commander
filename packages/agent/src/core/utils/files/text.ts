@@ -40,6 +40,55 @@ const READ_PERFORMANCE_THRESHOLDS = {
     CHUNK_SIZE: 8192,             // 8KB chunks for reverse reading
 } as const;
 
+// ---------------------------------------------------------------------------
+// BRC: byte-level line indexing for UTF-8 files.
+// Line boundaries are found with Buffer.indexOf (native memchr) instead of
+// decoding the whole file and splitting strings or walking it with readline.
+// Results match readline (crlfDelay: Infinity): lines split on \n and \r\n.
+// Files containing a lone \r (old Mac line endings) use the original paths.
+// ---------------------------------------------------------------------------
+const NL = 0x0a;
+const CR = 0x0d;
+const SCAN_CHUNK = 1024 * 1024;
+
+/** true if buf has a \r that is not followed by \n (a \r as the last byte of the range is ignored). */
+function hasLoneCR(buf: Buffer, end = buf.length): boolean {
+    let i = buf.indexOf(CR);
+    while (i !== -1 && i < end - 1) {
+        if (buf[i + 1] !== NL) return true;
+        i = buf.indexOf(CR, i + 2);
+    }
+    return false;
+}
+
+/** Same result as TextFileHandler.countLines(buf.toString()) without decoding. */
+function countLinesInBuffer(buf: Buffer): number {
+    if (buf.length === 0) return 0;
+    let n = 0;
+    let i = buf.indexOf(NL);
+    while (i !== -1) { n++; i = buf.indexOf(NL, i + 1); }
+    return buf[buf.length - 1] === NL ? n : n + 1;
+}
+
+/** Byte offset after skipping `lines` lines starting at `from` (buf.length if there are fewer). */
+function lineStartOffset(buf: Buffer, lines: number, from = 0): number {
+    let pos = from;
+    for (let l = 0; l < lines; l++) {
+        const i = buf.indexOf(NL, pos);
+        if (i === -1) return buf.length;
+        pos = i + 1;
+    }
+    return pos;
+}
+
+/** Decode a byte range into lines the way readline would emit them. */
+function bytesToLines(buf: Buffer, start: number, end: number): string[] {
+    if (start >= end) return [];
+    let text = buf.toString('utf8', start, end);
+    if (text.endsWith('\n')) text = text.slice(0, -1);
+    return text.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
+}
+
 /**
  * Text file handler implementation
  * Binary detection is done at the factory level - this handler assumes file is text
@@ -101,11 +150,14 @@ export class TextFileHandler implements FileHandler {
         if (stats.isFile() && stats.size < FILE_SIZE_LIMITS.LINE_COUNT_LIMIT) {
             try {
                 const encoding = await this.detectTextEncoding(path);
-                let content = await fs.readFile(path, encoding);
-                if (encoding === 'utf16le' && content.charCodeAt(0) === 0xfeff) {
-                    content = content.slice(1);
+                let lineCount: number;
+                if (encoding === 'utf8') {
+                    lineCount = countLinesInBuffer(await fs.readFile(path));
+                } else {
+                    let content = await fs.readFile(path, encoding);
+                    if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
+                    lineCount = TextFileHandler.countLines(content);
                 }
-                const lineCount = TextFileHandler.countLines(content);
                 info.metadata!.lineCount = lineCount;
             } catch (error) {
                 // If reading fails, skip line count
@@ -240,6 +292,40 @@ export class TextFileHandler implements FileHandler {
         const stats = await fs.stat(filePath);
         const fileSize = stats.size;
         const encoding = await this.detectTextEncoding(filePath);
+
+        // BRC fast path: UTF-8 files below the line-count limit are read once as bytes;
+        // the total line count and the requested window both come from that one buffer.
+        if (encoding === 'utf8' && fileSize < FILE_SIZE_LIMITS.LINE_COUNT_LIMIT) {
+            const buf = await fs.readFile(filePath, { signal });
+            if (!hasLoneCR(buf)) {
+                const total = countLinesInBuffer(buf);
+                const isNegative = offset < 0;
+                const first = isNegative ? Math.max(0, total - Math.abs(offset)) : offset;
+                const count = isNegative ? Math.abs(offset) : length;
+                const start = lineStartOffset(buf, first);
+                const end = lineStartOffset(buf, count, start);
+                const lines = bytesToLines(buf, start, end);
+                const body = lines.join('\n');
+                const content = includeStatusMessage
+                    ? `${this.generateEnhancedStatusMessage(lines.length, offset, total, isNegative)}\n\n${body}`
+                    : body;
+                return { content, mimeType, metadata: {} };
+            }
+        }
+
+        // BRC fast path: large UTF-8 files, positive offset. Scan chunks for newline bytes to find the
+        // exact window (previously a byte-position estimate that could land on the wrong line).
+        if (encoding === 'utf8' && offset > 0 && fileSize >= FILE_SIZE_LIMITS.LINE_COUNT_LIMIT) {
+            const fast = await this.readWindowByScanning(filePath, offset, length, signal);
+            if (fast) {
+                const body = fast.join('\n');
+                const content = includeStatusMessage
+                    ? `${this.generateEnhancedStatusMessage(fast.length, offset, undefined, false)}\n\n${body}`
+                    : body;
+                return { content, mimeType, metadata: {} };
+            }
+        }
+
         const totalLines = await this.getFileLineCount(filePath, signal, encoding);
 
         // UTF-16LE needs character-aware streaming. Skip the two-byte BOM and keep
@@ -279,6 +365,60 @@ export class TextFileHandler implements FileHandler {
                     return await this.readFromStartWithReadline(filePath, offset, length, mimeType, includeStatusMessage, totalLines, signal);
                 }
             }
+        }
+    }
+
+    /**
+     * BRC: lines [offset, offset+length) of a large UTF-8 file, found by scanning 1 MB chunks for
+     * newline bytes; only the requested window is decoded. Returns null (caller falls back to the
+     * original readers) if a lone \r is seen before the window is complete.
+     */
+    private async readWindowByScanning(
+        filePath: string,
+        offset: number,
+        length: number,
+        signal?: AbortSignal
+    ): Promise<string[] | null> {
+        const fd = await fs.open(filePath, 'r');
+        try {
+            const chunk = Buffer.allocUnsafe(SCAN_CHUNK);
+            let filePos = 0;
+            let line = 0;               // line number at the scan position
+            const parts: Buffer[] = []; // bytes of the requested window
+            let collected = 0;          // complete lines collected
+            for (;;) {
+                if (signal?.aborted) {
+                    const err = new Error('Read aborted') as NodeJS.ErrnoException;
+                    err.code = 'ABORT_ERR';
+                    throw err;
+                }
+                const { bytesRead } = await fd.read(chunk, 0, SCAN_CHUNK, filePos);
+                if (bytesRead === 0) break;
+                if (hasLoneCR(chunk, bytesRead)) return null;
+                let pos = 0;
+                while (line < offset) {
+                    const i = chunk.indexOf(NL, pos);
+                    if (i === -1 || i >= bytesRead) { pos = bytesRead; break; }
+                    pos = i + 1;
+                    line++;
+                }
+                if (line >= offset) {
+                    const winStart = pos;
+                    while (collected < length) {
+                        const i = chunk.indexOf(NL, pos);
+                        if (i === -1 || i >= bytesRead) { pos = bytesRead; break; }
+                        pos = i + 1;
+                        collected++;
+                    }
+                    if (pos > winStart) parts.push(Buffer.from(chunk.subarray(winStart, pos)));
+                    if (collected >= length) break;
+                }
+                filePos += bytesRead;
+            }
+            const window = Buffer.concat(parts);
+            return bytesToLines(window, 0, window.length);
+        } finally {
+            await fd.close();
         }
     }
 

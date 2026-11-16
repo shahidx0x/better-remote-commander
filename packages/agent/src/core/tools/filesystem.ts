@@ -741,28 +741,43 @@ export async function createDirectory(dirPath: string): Promise<void> {
 
 export async function listDirectory(dirPath: string, depth: number = 2): Promise<string[]> {
     const validPath = await validatePath(dirPath);
-    const results: string[] = [];
 
     const MAX_NESTED_ITEMS = 100; // Maximum items to show per nested directory
+    // BRC: subdirectories are read concurrently (bounded, to stay clear of EMFILE);
+    // results are assembled in the same order as a sequential walk.
+    const MAX_CONCURRENT_READDIR = 32;
+    let active = 0;
+    const waiting: (() => void)[] = [];
+    async function readdirLimited(p: string) {
+        if (active >= MAX_CONCURRENT_READDIR) await new Promise<void>((r) => waiting.push(r));
+        active++;
+        try {
+            return await fs.readdir(p, { withFileTypes: true });
+        } finally {
+            active--;
+            waiting.shift()?.();
+        }
+    }
 
-    async function listRecursive(currentPath: string, currentDepth: number, relativePath: string = '', isTopLevel: boolean = true): Promise<void> {
-        if (currentDepth <= 0) return;
+    async function listRecursive(currentPath: string, currentDepth: number, relativePath: string = '', isTopLevel: boolean = true): Promise<string[]> {
+        const out: string[] = [];
+        if (currentDepth <= 0) return out;
 
         let entries;
         try {
-            entries = await fs.readdir(currentPath, { withFileTypes: true });
+            entries = await readdirLimited(currentPath);
         } catch (error) {
             const err = error as NodeJS.ErrnoException;
             const displayPath = relativePath || path.basename(currentPath);
             // Distinguish "not found" from "permission denied" so AI and UI get accurate info.
             if (err.code === 'ENOENT') {
-                results.push(`[NOT_FOUND] ${displayPath} — path does not exist`);
+                out.push(`[NOT_FOUND] ${displayPath} — path does not exist`);
             } else if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ETIMEDOUT') {
-                results.push(`[DENIED] ${displayPath} — not accessible (permission denied, cloud-only file, or Full Disk Access not granted)`);
+                out.push(`[DENIED] ${displayPath} — not accessible (permission denied, cloud-only file, or Full Disk Access not granted)`);
             } else {
-                results.push(`[DENIED] ${displayPath}`);
+                out.push(`[DENIED] ${displayPath}`);
             }
-            return;
+            return out;
         }
 
         // Apply filtering for nested directories (not top level)
@@ -775,36 +790,40 @@ export async function listDirectory(dirPath: string, depth: number = 2): Promise
             filteredCount = totalEntries - MAX_NESTED_ITEMS;
         }
 
-        for (const entry of entriesToShow) {
+        // Start all subdirectory walks first, then collect them in entry order.
+        const children = entriesToShow.map((entry) => {
+            if (!entry.isDirectory() || currentDepth <= 1) return null;
             const fullPath = path.join(currentPath, entry.name);
             const displayPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
-
-            // Add this entry to results
-            results.push(`${entry.isDirectory() ? "[DIR]" : "[FILE]"} ${displayPath}`);
-
-            // If it's a directory and we have depth remaining, recurse
-            if (entry.isDirectory() && currentDepth > 1) {
+            return (async () => {
                 try {
                     // Validate the path before recursing
                     await validatePath(fullPath);
-                    await listRecursive(fullPath, currentDepth - 1, displayPath, false);
-                } catch (error) {
-                    // If validation fails or we can't access it, it will be marked as denied
-                    // when we try to read it in the recursive call
-                    continue;
+                } catch {
+                    // If validation fails, skip it (as before)
+                    return [] as string[];
                 }
-            }
+                return listRecursive(fullPath, currentDepth - 1, displayPath, false);
+            })();
+        });
+
+        for (let i = 0; i < entriesToShow.length; i++) {
+            const entry = entriesToShow[i];
+            const displayPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+            out.push(`${entry.isDirectory() ? "[DIR]" : "[FILE]"} ${displayPath}`);
+            const child = children[i];
+            if (child) for (const line of await child) out.push(line);
         }
 
         // Add warning message if items were filtered
         if (filteredCount > 0) {
             const displayPath = relativePath || path.basename(currentPath);
-            results.push(`[WARNING] ${displayPath}: ${filteredCount} items hidden (showing first ${MAX_NESTED_ITEMS} of ${totalEntries} total)`);
+            out.push(`[WARNING] ${displayPath}: ${filteredCount} items hidden (showing first ${MAX_NESTED_ITEMS} of ${totalEntries} total)`);
         }
+        return out;
     }
 
-    await listRecursive(validPath, depth, '', true);
-    return results;
+    return listRecursive(validPath, depth, '', true);
 }
 
 export async function moveFile(sourcePath: string, destinationPath: string): Promise<void> {

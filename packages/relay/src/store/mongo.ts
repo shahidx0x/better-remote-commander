@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { hashPassword, randomToken, sha256, type UserRow, type ClientRow, type AuthCodeRow, type TokenRow,
   type DeviceRow, type DeviceCodeRow, type AuditRow, type ConnectionLinkRow } from './sqlite.js';
 import type { RelayStore } from './types.js';
+import { MAX_PENDING_PLUGIN_REQUESTS, type PluginRequestStatus, type PluginRequestRow } from './sqlite.js';
 
 export class MongoStore implements RelayStore {
   readonly auditRetentionMs = 0;
@@ -53,6 +54,8 @@ export class MongoStore implements RelayStore {
       this.col('device_codes').createIndex({ user_code: 1 }, { unique: true }),
       this.col('api_keys').createIndex({ user_id: 1, prefix: 1 }),
       this.col('tokens').createIndex({ client_id: 1, user_id: 1 }),
+      this.col('plugin_requests').createIndex({ user_id: 1, status: 1, created_at: -1 }),
+      this.col('device_plugins').createIndex({ updated_at: -1 }),
     ];
     // TTL indexes remove expired records without a background relay database process.
     for (const name of ['auth_codes', 'device_codes', 'connection_links', 'tokens']) {
@@ -177,6 +180,7 @@ export class MongoStore implements RelayStore {
   async deleteDevice(deviceId: string): Promise<void> {
     this.lastTouches.delete(deviceId);
     await this.col('devices').deleteOne({ _id: deviceId });
+    await this.col('device_plugins').deleteOne({ _id: deviceId });
   }
 
   /* ---------- device pairing ---------- */
@@ -288,6 +292,41 @@ export class MongoStore implements RelayStore {
       this.col('tokens').deleteMany({ expires_at: { $lte: now - 7 * 86_400_000 } }),
     ]);
   }
+
+  /* ---------- plugin install requests (AI -> owner approval) ---------- */
+  async createPluginRequest(row: Pick<PluginRequestRow, 'user_id' | 'device_id' | 'client' | 'registry_name' | 'custom_type' | 'custom_spec' | 'plugin_id' | 'reason'>): Promise<PluginRequestRow> {
+    const count = await this.col('plugin_requests').countDocuments({ user_id: row.user_id, status: 'pending' }, { limit: MAX_PENDING_PLUGIN_REQUESTS });
+    if (count >= MAX_PENDING_PLUGIN_REQUESTS) throw new Error('Too many pending plugin requests; ask the owner to review /admin');
+    const full: PluginRequestRow = { ...row, id: 'pr_' + randomToken(9), status: 'pending', created_at: Date.now(), decided_at: null, result: null };
+    await this.col('plugin_requests').insertOne({ _id: full.id, ...full });
+    return full;
+  }
+  async findPendingPluginRequest(userId: string, deviceId: string | null, registryName: string | null, customType: string | null, customSpec: string | null): Promise<PluginRequestRow | undefined> {
+    return MongoStore.row<PluginRequestRow>(await this.col('plugin_requests').findOne({ user_id: userId, status: 'pending', device_id: deviceId, registry_name: registryName, custom_type: customType, custom_spec: customSpec }));
+  }
+  async getPluginRequest(id: string): Promise<PluginRequestRow | undefined> {
+    return MongoStore.row<PluginRequestRow>(await this.col('plugin_requests').findOne({ _id: id }));
+  }
+  async listPluginRequests(userId: string, opts: { status?: PluginRequestStatus; limit?: number } = {}): Promise<PluginRequestRow[]> {
+    const limit = Math.min(100, Math.max(1, Math.trunc(opts.limit ?? 50)));
+    const docs = await this.col('plugin_requests').find({ user_id: userId, ...(opts.status ? { status: opts.status } : {}) }).sort({ created_at: -1 }).limit(limit).toArray();
+    return docs.map(d => MongoStore.row<PluginRequestRow>(d)!);
+  }
+  async setPluginRequestStatus(id: string, status: PluginRequestStatus, result: string | null = null, from: PluginRequestStatus[] = ['pending', 'approved']): Promise<boolean> {
+    if (!from.length) return false;
+    const update = await this.col('plugin_requests').updateOne({ _id: id, status: { $in: from } }, { $set: { status, result: result ? result.slice(0, 2000) : null, decided_at: Date.now() } });
+    return update.modifiedCount > 0;
+  }
+  /* ---------- last-known plugin lists, never secret values ---------- */
+  async saveDevicePlugins(deviceId: string, plugins: unknown[]): Promise<void> {
+    await this.col('device_plugins').updateOne({ _id: deviceId }, { $set: { plugins, updated_at: Date.now() } }, { upsert: true });
+  }
+  async getDevicePlugins(deviceId: string): Promise<{ plugins: unknown[]; updated_at: number } | undefined> {
+    const row = await this.col('device_plugins').findOne({ _id: deviceId });
+    if (!row) return undefined;
+    return { plugins: Array.isArray(row.plugins) ? row.plugins : [], updated_at: Number(row.updated_at || 0) };
+  }
+
   async close(): Promise<void> {
     this.liveAudit.length = 0;
     this.lastTouches.clear();

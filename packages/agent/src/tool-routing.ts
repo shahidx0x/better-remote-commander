@@ -332,6 +332,53 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
     instead: 'For ordinary trusted builds use run_command/run_project_checks; not a replacement for device security.',
     caveat: 'No implicit image pull/build, no network; preview by default, execute flag required.',
   },
+  run_parallel: {
+    use: 'Run multiple INDEPENDENT commands or BRC tool operations concurrently on the same device.',
+    instead: 'For lengthy background work use spawn_job and wait_jobs; for small independent existing tool reads use batch_tools.',
+    caveat: 'Each step still obeys agent-side access checks and command restrictions.',
+  },
+  spawn_job: {
+    use: 'Start a bounded background command or sequence of BRC tools that may exceed the normal MCP call timeout.',
+    instead: 'For short synchronous commands use run_command; for independent parallel steps use run_parallel.',
+    caveat: 'Returns a job ID, not a completed result; follow with wait_jobs or get_job.',
+  },
+  wait_jobs: {
+    use: 'Wait for completion of specific background jobs, or a known job group.',
+    instead: 'For a single completed job use get_job; for quick commands use run_command.',
+  },
+  get_job: {
+    use: 'Inspect the current state and outputs of a known job ID.',
+    instead: 'For many job statuses use list_jobs; for waiting use wait_jobs.',
+  },
+  list_jobs: {
+    use: 'List active and recent background jobs, optionally filtered by group or status.',
+    instead: 'For the output of one job use get_job; for foreground terminal processes use list_sessions.',
+  },
+  cancel_job: {
+    use: 'Cancel a specific job or group when explicitly requested or necessary.',
+    instead: 'For ordinary BRC call cancellation use cancel_operation; for terminal sessions use force_terminate.',
+    caveat: 'Killing a command cannot undo changes it already made.',
+  },
+  list_plugin_tools: {
+    use: 'Discover extra MCP servers installed on this device and inspect one plugin’s tool schemas.',
+    instead: 'For built-in commands/files use BRC tools; to invoke a plugin tool use call_plugin_tool.',
+    caveat: 'An unavailable or uninstalled plugin is not a working capability.',
+  },
+  call_plugin_tool: {
+    use: 'Invoke a specific tool of an installed MCP plugin on the device.',
+    instead: 'Call list_plugin_tools first to obtain plugin ID, tool name, and expected input schema.',
+    caveat: 'Third-party plugins may have side effects; obtain user authorization where needed.',
+  },
+  ast_search: {
+    use: 'Search source code by syntax tree shape, ignoring formatting and irrelevant text occurrences.',
+    instead: 'Use start_search for plain text/files; use find_symbols for declarations.',
+    caveat: 'Requires installed ast-grep binary; check plugin availability.',
+  },
+  ast_rewrite: {
+    use: 'Preview or apply an AST-aware code transformation by structural pattern.',
+    instead: 'For small exact edits use edit_block; for multi-file hash-checked operations use workspace_batch.',
+    caveat: 'Dry-run first, inspect the diff, and execute only when changes are authorized.',
+  },
   worker_tasks: {
     use: 'Coordinate 2–4 independent scopes ONLY when the AI host actually provides separately running workers with BRC access.',
     instead: 'Do not pretend this tool spawns LLM workers; for one model use batch_tools/workspace_batch.',

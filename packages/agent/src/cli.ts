@@ -4,7 +4,18 @@
  *   brc-agent --relay https://rdp.example.com [--name "My PC"] [--no-browser] [--debug]
  *   brc-agent --logout                 remove saved credentials
  *   brc-agent --relay <url> --token <t> --device-id <id>   (dev: skip pairing, pre-issued token)
- * Env: BRC_RELAY, BRC_NAME, BRC_TOKEN, BRC_DEVICE_ID, BRC_HOME, BRC_DEBUG
+ *   brc-agent --install-service | --uninstall-service       run as a background service (saved credentials)
+ *   brc-agent --no-plugins             run without plugin set-up (no default plugin installs this run)
+ *
+ * Plugins (each prints a result and exits):
+ *   brc-agent --list-plugins
+ *   brc-agent --add-plugin <id>        re-add a default plugin (playwright, computer-use, ast-grep, rtk, serena, markitdown)
+ *   brc-agent --add-plugin <id> --npm <pkg>@<ver> | --pypi <pkg>==<ver> | --command "<cmd> <args...>" | --url <https url>
+ *                                      [--env KEY=VALUE ...] [--name "<display name>"]
+ *   brc-agent --remove-plugin <id>
+ *   brc-agent --enable-plugin <id> | --disable-plugin <id>
+ *   brc-agent --update-plugins         latest versions for the default plugins, then reinstall them
+ * Env: BRC_RELAY, BRC_NAME, BRC_TOKEN, BRC_DEVICE_ID, BRC_HOME, BRC_DEBUG, BRC_PLUGINS=none (same as --no-plugins)
  */
 import os from 'node:os';
 import { workerCoordinator } from './runtime/worker-coordination.js';
@@ -22,8 +33,9 @@ import { activity } from './runtime/activity.js';
 import { projectIndex } from './runtime/project-index.js';
 import { codeGraph } from './runtime/code-graph.js';
 import { clearCodeCache } from './runtime/code-structure.js';
+import { runPluginCommand } from './plugins/cli-commands.js';
 
-const AGENT_VERSION = '2.0.5';
+const AGENT_VERSION = '2.0.7';
 
 function arg(name: string, env?: string, def?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -36,9 +48,12 @@ const debug = flag('debug') || process.env.BRC_DEBUG === '1';
 if (debug) process.env.BRC_DEBUG = '1';
 const log = (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => activity.log(level, msg);
 if (flag('help')) {
-  console.log('Local agent: START_AGENT.cmd or node packages/agent/dist/cli.js\nFirst terminal launch asks for the relay URL and device name. Saved connections start automatically after 4 seconds; Enter connects now, M opens settings.\n--setup opens settings explicitly. M also opens settings while the foreground agent is idle; active tool calls are never interrupted.\n--forget-relay / --logout forget only the local saved URL and pairing, then exit.\n--relay <base-url> keeps scripted pairing available; --non-interactive skips the menu and delay. --auto-connect is the foreground default.\nOther flags: --name <name>, --no-browser, --allow-dir <path> (repeatable), --debug, --install-service, --uninstall-service.\nTool START/OK/ERROR status is visible by default. Live-only logging: no log files or persisted tool history.');
+  console.log('Local agent: START_AGENT.cmd or node packages/agent/dist/cli.js\nFirst terminal launch asks for the relay URL and device name. Saved connections start automatically after 4 seconds; Enter connects now, M opens settings.\n--setup opens settings explicitly. M also opens settings while the foreground agent is idle; active tool calls are never interrupted.\n--forget-relay / --logout forget only the local saved URL and pairing, then exit.\n--relay <base-url> keeps scripted pairing available; --non-interactive skips the menu and delay. --auto-connect is the foreground default.\nOther flags: --name <name>, --no-browser, --allow-dir <path> (repeatable), --debug, --install-service, --uninstall-service.\nPlugins: --list-plugins, --add-plugin <id>, --remove-plugin <id>, --enable-plugin <id>, --disable-plugin <id>, --update-plugins, --no-plugins.\nTool START/OK/ERROR status is visible by default. Live-only logging: no log files or persisted tool history.');
   process.exit(0);
 }
+
+const pluginExit = await runPluginCommand(process.argv.slice(2), debug);
+if (pluginExit !== null) process.exit(pluginExit);
 
 if (flag('logout') || flag('forget-relay')) {
   try {
@@ -57,7 +72,7 @@ if (flag('install-service') || flag('uninstall-service')) {
     if (flag('uninstall-service')) { console.log(uninstallService()); process.exit(0); }
     if (!loadCredentials()) { console.error('Pair first: run the agent once interactively with --relay <url>, then --install-service.'); process.exit(2); }
     // Service uses saved credentials; only pass through policy/debug flags.
-    const keep = new Set(['--debug', '--allow-dir']);
+    const keep = new Set(['--debug', '--allow-dir', '--no-plugins']);
     const passthrough: string[] = [];
     const argv = process.argv.slice(2);
     for (let i = 0; i < argv.length; i++) {
@@ -131,6 +146,22 @@ let shortcuts: ReturnType<typeof listenForTerminalShortcuts> | undefined;
 let livePrompts: ReturnType<typeof createTerminalPrompts> | undefined;
 let settingsOpen = false;
 let shuttingDown = false;
+let pluginSetupStarted = false;
+function startPluginSetup(): void {
+  if (pluginSetupStarted || flag('no-plugins') || process.env.BRC_PLUGINS === 'none') return;
+  pluginSetupStarted = true;
+  void (async () => {
+    const [{ registerInstaller }, { ensureDefaultPlugins }] = await Promise.all([
+      import('./plugins/installer.js'), import('./plugins/first-run.js'),
+    ]);
+    registerInstaller();
+    const setup = await ensureDefaultPlugins(log);
+    if (setup.defined.length) log('info', 'Default plugins added: ' + setup.defined.join(', '));
+    if (setup.queued.length) log('info', 'Plugin setup running: ' + setup.queued.join(', '));
+    await setup.done;
+    if (setup.queued.length) log('info', 'Plugin setup completed.');
+  })().catch(e => log('warn', 'Plugin initialization failed: ' + (e instanceof Error ? e.message : String(e))));
+}
 
 function armShortcuts(): void {
   shortcuts?.close();
@@ -147,6 +178,7 @@ function start(c: DeviceCredentials): void {
   const nextClient: WsClient = new WsClient({
     relayUrl: c.relayUrl, token: c.deviceToken, deviceId: c.deviceId, name: c.name,
     agentVersion: AGENT_VERSION, coreVersion: CORE_VERSION, tools, callTool, log,
+    onConnected: () => { if (!pluginSetupStarted) setImmediate(startPluginSetup); },
     onUnauthorized: async () => {
       if (shuttingDown || client !== nextClient) return true;
       if (c.pairedAt === 'manual' || !foregroundControls || settingsOpen) return false;

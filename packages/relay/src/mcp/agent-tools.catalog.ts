@@ -885,7 +885,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "run_command",
-    "description": "USE WHEN: Run a ONE-SHOT command (git, build, test, package manager) and get its final exit code and bounded output.\nUSE INSTEAD: For interactive or long-running sessions use start_process; for discovered project checks use run_project_checks; for ordinary reads use read_multiple_files.\nIMPORTANT: A claimed build or test pass requires actual exit code 0, not merely a command being started.\nDETAILS: Run a shell command to completion and return its exit code, stdout and stderr in ONE call.\nPrefer this over start_process + read_process_output for non-interactive commands\n(builds, tests, git, package managers, scripts, one-off queries).\nUse start_process/interact_with_process only for interactive or long-running sessions (REPLs, servers).\nstdin is closed, so commands that prompt for input will fail fast instead of hanging.\ntimeout_ms defaults to 60000 (max 110000); on timeout the whole process tree is killed.\nOutput is capped (maxOutputChars, default 100000) keeping the beginning and end.\nPass cwd (absolute path, must be inside allowed directories) to choose the working directory.\nBlocked commands (config blockedCommands) are rejected.",
+    "description": "USE WHEN: Run a ONE-SHOT command (git, build, test, package manager) and get its final exit code and bounded output.\nUSE INSTEAD: For interactive or long-running sessions use start_process; for discovered project checks use run_project_checks; for ordinary reads use read_multiple_files.\nIMPORTANT: A claimed build or test pass requires actual exit code 0, not merely a command being started.\nDETAILS: Run a shell command to completion and return its exit code, stdout and stderr in ONE call.\nPrefer this over start_process + read_process_output for non-interactive commands\n(builds, tests, git, package managers, scripts, one-off queries).\nUse start_process/interact_with_process only for interactive or long-running sessions (REPLs, servers).\nstdin is closed, so commands that prompt for input will fail fast instead of hanging.\ntimeout_ms defaults to 60000 (max 110000); on timeout the whole process tree is killed.\nOutput is capped (maxOutputChars, default 100000) keeping the beginning and end.\nPass cwd (absolute path, must be inside allowed directories) to choose the working directory.\nBlocked commands (config blockedCommands) are rejected.\nOutput of common dev commands (git status/log/diff, cargo/go/pytest/vitest/jest/tsc/eslint, npm run, ...)\nmay be compressed by rtk; such results say \"[compressed by rtk ...]\". Pass raw=true for the exact, uncompressed output.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -909,6 +909,10 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
           "minimum": 1000,
           "maximum": 1000000,
           "default": 100000
+        },
+        "raw": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [
@@ -1771,6 +1775,562 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
     "annotations": {
       "title": "Git Log",
       "readOnlyHint": true
+    }
+  },
+  {
+    "name": "run_parallel",
+    "description": "USE WHEN: Run multiple INDEPENDENT commands or BRC tool operations concurrently on the same device.\nUSE INSTEAD: For lengthy background work use spawn_job and wait_jobs; for small independent existing tool reads use batch_tools.\nIMPORTANT: Each step still obeys agent-side access checks and command restrictions.\nDETAILS: Run several tool calls and/or shell commands AT THE SAME TIME on this device and get all results in ONE call.\nUse it whenever you would otherwise make several independent calls in a row: reading many files, several searches,\ngit_status in many repos, running lint + typecheck + tests together, etc.\nEach item is {tool, args} (any BRC tool, args exactly as for a direct call) or {command, cwd?, timeout_ms?}.\nResults come back in input order. Items still running at timeout_ms (default 90s, max 100s) continue as\nbackground jobs; collect them with wait_jobs({group}). Commands that exit non-zero are reported as failed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "calls": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Shell command to run (non-interactive; stdin is closed)."
+                  },
+                  "cwd": {
+                    "type": "string",
+                    "description": "Working directory (absolute, inside allowed directories)."
+                  },
+                  "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Per-command timeout. Default: whatever is left of the job timeout."
+                  },
+                  "shell": {
+                    "type": "string"
+                  },
+                  "raw": {
+                    "type": "boolean",
+                    "description": "Bypass rtk output compression (full output)."
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 120
+                  }
+                },
+                "required": [
+                  "command"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Name of any BRC tool, e.g. read_file, edit_block, start_search, git_diff, run_command."
+                  },
+                  "args": {
+                    "type": "object",
+                    "additionalProperties": {},
+                    "default": {},
+                    "description": "Arguments for that tool, exactly as you would pass them directly."
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 120
+                  }
+                },
+                "required": [
+                  "tool"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 50,
+          "description": "Items run concurrently: {tool, args} or {command, cwd?, timeout_ms?}."
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16,
+          "default": 8
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 100000,
+          "default": 90000,
+          "description": "How long to wait for results. Calls still running then continue as background jobs."
+        },
+        "output_chars": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 50000,
+          "default": 4000,
+          "description": "Max output characters shown per call."
+        }
+      },
+      "required": [
+        "calls"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "Run in parallel",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "spawn_job",
+    "description": "USE WHEN: Start a bounded background command or sequence of BRC tools that may exceed the normal MCP call timeout.\nUSE INSTEAD: For short synchronous commands use run_command; for independent parallel steps use run_parallel.\nIMPORTANT: Returns a job ID, not a completed result; follow with wait_jobs or get_job.\nDETAILS: Start a background worker job on this device and return its id immediately.\nUse for work that takes longer than one call (builds, test suites, installs, long scripts) or to run several\nworkstreams in parallel: spawn one job per piece, then call wait_jobs. A job is either a single \"command\"\nor \"steps\": a list run in order, each {command, cwd?, timeout_ms?} or {tool, args} (e.g. edit_block then run tests).\nA failed step stops the job unless continue_on_error=true. Jobs are not limited by the 2-minute call timeout\n(default limit 30 min, max 6 h). Up to 4 jobs run at once; more are queued.\nGive related jobs the same \"group\" to wait for or cancel them together.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Shortcut for a one-command job. Use either command or steps."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for the command shortcut."
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Shell command to run (non-interactive; stdin is closed)."
+                  },
+                  "cwd": {
+                    "type": "string",
+                    "description": "Working directory (absolute, inside allowed directories)."
+                  },
+                  "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Per-command timeout. Default: whatever is left of the job timeout."
+                  },
+                  "shell": {
+                    "type": "string"
+                  },
+                  "raw": {
+                    "type": "boolean",
+                    "description": "Bypass rtk output compression (full output)."
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 120
+                  }
+                },
+                "required": [
+                  "command"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Name of any BRC tool, e.g. read_file, edit_block, start_search, git_diff, run_command."
+                  },
+                  "args": {
+                    "type": "object",
+                    "additionalProperties": {},
+                    "default": {},
+                    "description": "Arguments for that tool, exactly as you would pass them directly."
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 120
+                  }
+                },
+                "required": [
+                  "tool"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 50,
+          "description": "Sequence run in order: each item is {command, cwd?, timeout_ms?} or {tool, args}."
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Short human name shown in results, e.g. \"unit tests\"."
+        },
+        "group": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "Group name; wait_jobs/cancel_job/list_jobs can target a whole group."
+        },
+        "continue_on_error": {
+          "type": "boolean",
+          "default": false,
+          "description": "Keep running later steps after a failed step (default: stop)."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 21600000,
+          "default": 1800000,
+          "description": "Whole-job time limit (default 30 min, max 6 h)."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "Spawn background job",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "wait_jobs",
+    "description": "USE WHEN: Wait for completion of specific background jobs, or a known job group.\nUSE INSTEAD: For a single completed job use get_job; for quick commands use run_command.\nDETAILS: Wait (up to timeout_ms, default 60s, max 100s) for background jobs and return their results.\nSelect jobs by ids or group; with neither, waits for all unfinished jobs plus finished ones not yet reported.\nmode=all (default) returns when every selected job is done; mode=any returns as soon as one more finishes,\nso you can react to results one by one. Each finished job's output is shown once; if some are still running,\ncall wait_jobs again.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Job ids to wait for."
+        },
+        "group": {
+          "type": "string",
+          "description": "Wait for every job in this group."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "all",
+            "any"
+          ],
+          "default": "all",
+          "description": "all: return when every selected job is done. any: return as soon as one more finishes."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000,
+          "default": 60000
+        },
+        "output_chars": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 50000,
+          "default": 3000,
+          "description": "Max output characters shown per step."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "Wait for jobs",
+      "readOnlyHint": true
+    }
+  },
+  {
+    "name": "get_job",
+    "description": "USE WHEN: Inspect the current state and outputs of a known job ID.\nUSE INSTEAD: For many job statuses use list_jobs; for waiting use wait_jobs.\nDETAILS: Get the status and full step outputs of one background job (larger output limit than wait_jobs).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "output_chars": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 200000,
+          "default": 20000
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "Get job",
+      "readOnlyHint": true
+    }
+  },
+  {
+    "name": "list_jobs",
+    "description": "USE WHEN: List active and recent background jobs, optionally filtered by group or status.\nUSE INSTEAD: For the output of one job use get_job; for foreground terminal processes use list_sessions.\nDETAILS: List background jobs (newest first), optionally filtered by group or status (queued, running, succeeded, failed, cancelled, timed_out, active, finished). Includes recent jobs from before an agent restart.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "group": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "active",
+            "finished"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 50
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "List jobs",
+      "readOnlyHint": true
+    }
+  },
+  {
+    "name": "cancel_job",
+    "description": "USE WHEN: Cancel a specific job or group when explicitly requested or necessary.\nUSE INSTEAD: For ordinary BRC call cancellation use cancel_operation; for terminal sessions use force_terminate.\nIMPORTANT: Killing a command cannot undo changes it already made.\nDETAILS: Cancel queued or running background jobs by ids, by group, or all=true. Running commands are killed with their whole process tree.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "group": {
+          "type": "string"
+        },
+        "all": {
+          "type": "boolean",
+          "default": false,
+          "description": "Cancel every queued or running job."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "Cancel jobs",
+      "readOnlyHint": false,
+      "destructiveHint": true
+    }
+  },
+  {
+    "name": "list_plugin_tools",
+    "description": "USE WHEN: Discover extra MCP servers installed on this device and inspect one plugin’s tool schemas.\nUSE INSTEAD: For built-in commands/files use BRC tools; to invoke a plugin tool use call_plugin_tool.\nIMPORTANT: An unavailable or uninstalled plugin is not a working capability.\nDETAILS: List plugins installed on this device (extra MCP servers such as browser automation, desktop control,\ncode intelligence or document conversion) and their status. Pass {\"plugin\":\"<id>\"} to get that plugin's\ntools with their full input schemas, then use call_plugin_tool. Check here whenever a task needs a\ncapability the core tools do not have (web browser, screen/mouse/keyboard, symbol navigation, Office/PDF files...).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "plugin": {
+          "type": "string",
+          "description": "Plugin id. Omit to list all plugins; pass one to get its tools with full input schemas."
+        },
+        "refresh": {
+          "type": "boolean",
+          "default": false,
+          "description": "Re-read the tool list from the running plugin instead of the cache."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "List plugin tools",
+      "readOnlyHint": true
+    }
+  },
+  {
+    "name": "call_plugin_tool",
+    "description": "USE WHEN: Invoke a specific tool of an installed MCP plugin on the device.\nUSE INSTEAD: Call list_plugin_tools first to obtain plugin ID, tool name, and expected input schema.\nIMPORTANT: Third-party plugins may have side effects; obtain user authorization where needed.\nDETAILS: Call a tool of a plugin on this device: {\"plugin\":\"<id>\",\"tool\":\"<name>\",\"args\":{...}}. Get ids, tool names and input schemas from list_plugin_tools first. The plugin starts on first use (can take a few seconds).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "plugin": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plugin id, from list_plugin_tools."
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Tool name inside that plugin."
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": {},
+          "default": {},
+          "description": "Arguments, following the tool's input schema from list_plugin_tools."
+        }
+      },
+      "required": [
+        "plugin",
+        "tool"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "Call plugin tool",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "ast_search",
+    "description": "USE WHEN: Search source code by syntax tree shape, ignoring formatting and irrelevant text occurrences.\nUSE INSTEAD: Use start_search for plain text/files; use find_symbols for declarations.\nIMPORTANT: Requires installed ast-grep binary; check plugin availability.\nDETAILS: Structural code search with ast-grep: matches syntax trees, not text, so it ignores formatting, comments and strings\nthat merely contain the words. Use it instead of regex search for code shapes (calls, definitions, imports, JSX...).\nPattern syntax: write the code you are looking for; $NAME matches exactly one AST node (expression, identifier, ...),\n$$$NAME matches zero or more nodes (arguments, statements), $_ matches any node without capturing.\nReusing a name ($A ... $A) requires the same code in both places. Whitespace and formatting do not matter.\nExamples: {\"pattern\":\"callTool($NAME, $ARGS)\",\"lang\":\"ts\",\"path\":\"/repo/src\"} finds every two-argument callTool call;\n{\"pattern\":\"console.log($$$ARGS)\",\"lang\":\"js\",\"path\":\"/repo\"} finds console.log calls with any arguments.\nReturns \"file:line:col: matched code [captures]\" relative to path. Respects .gitignore. maxResults default 200;\ncontextLines shows surrounding source. Alternatively pass rule = an ast-grep YAML rule (id, language, rule) for\nrelational queries (inside / has / not).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "minLength": 1,
+          "description": "AST pattern, written as code. $X = one node, $$$X = zero or more nodes, $_ = wildcard."
+        },
+        "rule": {
+          "type": "string",
+          "description": "Alternative to pattern: an ast-grep YAML rule (id, language, rule: {...})."
+        },
+        "lang": {
+          "type": "string",
+          "description": "Language of the pattern, e.g. ts, tsx, js, py, rust, go, java, c, cpp, cs, rb, kotlin, swift, html, css. Omit to infer from file extensions."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Directory or file to search (absolute; inside allowed directories)."
+        },
+        "globs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Include/exclude globs, e.g. [\"**/*.ts\", \"!**/*.test.ts\"]."
+        },
+        "maxResults": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000,
+          "default": 200
+        },
+        "contextLines": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "default": 0,
+          "description": "Source lines to show around each match."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 100000,
+          "default": 60000
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "AST Search",
+      "readOnlyHint": true
+    }
+  },
+  {
+    "name": "ast_rewrite",
+    "description": "USE WHEN: Preview or apply an AST-aware code transformation by structural pattern.\nUSE INSTEAD: For small exact edits use edit_block; for multi-file hash-checked operations use workspace_batch.\nIMPORTANT: Dry-run first, inspect the diff, and execute only when changes are authorized.\nDETAILS: Structural code rewrite with ast-grep. DRY RUN BY DEFAULT: returns a unified diff and counts without changing\nfiles; call again with dry_run=false to write the changes.\nPattern syntax: write the code you are looking for; $NAME matches exactly one AST node (expression, identifier, ...),\n$$$NAME matches zero or more nodes (arguments, statements), $_ matches any node without capturing.\nReusing a name ($A ... $A) requires the same code in both places. Whitespace and formatting do not matter.\nMeta-variables captured by pattern can be used in rewrite.\nExamples: {\"pattern\":\"oldApi($A, $B)\",\"rewrite\":\"newApi({ a: $A, b: $B })\",\"lang\":\"ts\",\"path\":\"/repo/src\"};\n{\"pattern\":\"assertEquals($X, $Y)\",\"rewrite\":\"assert $X == $Y\",\"lang\":\"py\",\"path\":\"/repo/tests\"}.\nAlternatively pass rule = an ast-grep YAML rule with a fix (id, language, rule: {...}, fix: ...).\nlang is required with pattern. globs narrows files. Respects .gitignore.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "minLength": 1,
+          "description": "AST pattern to match (use with rewrite and lang)."
+        },
+        "rewrite": {
+          "type": "string",
+          "description": "Replacement code; may reuse meta-variables from the pattern ($X, $$$X)."
+        },
+        "rule": {
+          "type": "string",
+          "description": "Alternative to pattern/rewrite: an ast-grep YAML rule with a fix (id, language, rule: {...}, fix: ...)."
+        },
+        "lang": {
+          "type": "string",
+          "description": "Language of the pattern (required with pattern), e.g. ts, tsx, js, py, rust, go, java."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Directory or file to rewrite (absolute; inside allowed directories)."
+        },
+        "globs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Include/exclude globs, e.g. [\"src/**/*.ts\", \"!**/*.d.ts\"]."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "default": true,
+          "description": "Default true: only preview (diff + counts). Set false to write the files."
+        },
+        "contextLines": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "default": 2,
+          "description": "Context lines in the diff."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 100000,
+          "default": 60000
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "AST Rewrite",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
     }
   },
   {

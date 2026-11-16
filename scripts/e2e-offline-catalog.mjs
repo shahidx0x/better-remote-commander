@@ -17,7 +17,7 @@ async function rpc(endpoint, headers, method, params, id) {
 }
 const health = await (await fetch(base + '/health')).json();
 step('testing while zero devices are connected', health.devices === 0);
-step('health advertises stable tool count for deployment diagnostics', health.mcpTools === 71);
+step('health advertises stable tool count for deployment diagnostics', health.mcpTools === 83);
 const reg = await (await fetch(base + '/register', { method: 'POST', headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
     client_name: 'offline-catalog-e2e', redirect_uris: ['https://tools.example.test/oauth/callback'],
@@ -52,8 +52,8 @@ const H = { authorization: 'Bearer ' + tok.access_token };
 const listed = await rpc(base + '/mcp', H, 'tools/list', {}, 1);
 const publishedTools = listed.msg?.result?.tools ?? [];
 const names = publishedTools.map(t => t.name);
-step('all 71 tools describe WHEN to use them and WHAT to use instead',
-  publishedTools.length === 71 && publishedTools.every(t => t.description.startsWith('USE WHEN: ') && t.description.includes('USE INSTEAD: ')));
+step('all 83 tools describe WHEN to use them and WHAT to use instead',
+  publishedTools.length === 83 && publishedTools.every(t => t.description.startsWith('USE WHEN: ') && t.description.includes('USE INSTEAD: ')));
 step('a single-run command is not confused with an interactive process',
   publishedTools.find(t => t.name === 'run_command')?.description.includes('ONE-SHOT command')
   && publishedTools.find(t => t.name === 'start_process')?.description.includes('run_command'));

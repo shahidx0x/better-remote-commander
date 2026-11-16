@@ -28,6 +28,8 @@ Claude / ChatGPT  ──HTTPS (OAuth 2.0)──▶  relay (your server or PC)  �
 - **Multi-edit**: `edit_block` applies several find/replace edits to a file in one call, all-or-nothing.
 - **Blocking search**: `start_search` with `wait: true` returns all results in one call (grep-style).
 - **Ranged multi-file reads**: `read_multiple_files` accepts per-file line ranges.
+- **Workers** (`run_parallel`, `spawn_job`, `wait_jobs`): the AI splits work into pieces that run in parallel
+  on the device as background jobs, then collects the results. No extra model or API key needed.
 - **Safe delete** (`delete_file`) and **git helpers** (`git_status`, `git_diff`, `git_log`).
 - **Fast agent**: heavy document libraries (Excel, PDF, DOCX) load on demand, system info is cached,
   parser libraries load lazily, diagnostic telemetry is disabled, and activity metrics stay in memory.
@@ -50,11 +52,13 @@ Set `BRC_TOOL_PROFILE=coding` before starting the agent to hide document/transfe
 
 ## Tools available to the AI
 
-The relay adds `list_devices`. The agent provides 70 tools, derived from Desktop Commander plus BRC additions.
+The relay adds `list_devices`, `search_mcp_registry`, and `request_plugin_install`. The agent provides 80 tools, derived from Desktop Commander plus BRC additions.
 
 | Category | Tools |
 | --- | --- |
 | Devices | `list_devices` |
+| Plugins | `list_plugin_tools`, `call_plugin_tool` (agent); `search_mcp_registry`, `request_plugin_install` (relay) |
+| Code structure | `ast_search`, `ast_rewrite` (ast-grep) |
 | Config | `get_config`, `set_config_value` |
 | Files | `read_file`, `read_multiple_files`, `write_file`, `create_directory`, `list_directory`, `move_file`, `delete_file`, `get_file_info` |
 | Editing | `edit_block` (single or multi-edit), `write_pdf` |
@@ -62,6 +66,7 @@ The relay adds `list_devices`. The agent provides 70 tools, derived from Desktop
 | Commands | `run_command` (one-shot: exit code + stdout/stderr) |
 | Processes | `start_process`, `read_process_output`, `interact_with_process`, `force_terminate`, `list_sessions`, `list_processes`, `kill_process` |
 | Git | `git_status`, `git_diff`, `git_log` |
+| Workers | `run_parallel`, `spawn_job`, `wait_jobs`, `get_job`, `list_jobs`, `cancel_job` |
 | File transfer | `prepare_file_transfer`, `send_file_transfer`, `receive_file_transfer` |
 | Coding workflows | `read_code_file`, `read_code_context`, `edit_files`, `batch_tools`, `verify_project`, `project_index`, `agent_status`, `cancel_operation` |
 | Project context | `project_context`, `project_preferences`, `project_map`, `vscode_tasks` |
@@ -90,6 +95,33 @@ These cut the number of calls the AI needs for common work (each call crosses th
 
 All path arguments respect `allowedDirectories`, and commands respect `blockedCommands`.
 
+### Workers: parallel and background jobs
+
+The AI in your chat (Claude, ChatGPT, ...) stays the only one that thinks. It splits a task into pieces and
+hands them to workers on the device, which run in parallel and report back. This works through the plain MCP
+connector: no API key, no second model.
+
+```
+AI plans the task
+  -> run_parallel / spawn_job x N    (workers run at the same time, on one or many devices)
+  -> wait_jobs                       (collects each worker's result; call again until all are done)
+  -> AI reads the results, decides the next step
+```
+
+- **`run_parallel`**: several tool calls and/or commands at once, all results in one call, in input order.
+  Items: `{tool, args}` (any BRC tool) or `{command, cwd?, timeout_ms?}`. Calls still running after
+  `timeout_ms` (default 90s, max 100s) keep going as background jobs (`wait_jobs({group})`).
+- **`spawn_job`**: start a background job and get its id immediately. A job is one `command` or a list of
+  `steps` run in order (e.g. `edit_block` -> build -> test); a failed step stops the job unless
+  `continue_on_error`. Jobs are not limited by the 2-minute call timeout (default 30 min, max 6 h).
+  Up to 4 jobs run at once (`BRC_MAX_JOBS`), the rest are queued. Use `group` to handle related jobs together.
+- **`wait_jobs`**: wait up to 100s for jobs (`ids`, `group`, or everything pending). `mode: "any"` returns as
+  soon as one more finishes. Each finished job's output is shown once.
+- **`get_job`** (full output), **`list_jobs`**, **`cancel_job`** (kills the process tree).
+
+Job steps go through the normal tool dispatcher, so `allowedDirectories` and `blockedCommands` apply. Finished
+jobs are saved to `$BRC_HOME/jobs/` and are still listed after an agent restart.
+
 ### Encrypted file transfer
 
 Move a file from one paired device to another without routing it through the relay. The encrypted blob is hosted temporarily on tmpfiles.org:
@@ -99,6 +131,40 @@ Move a file from one paired device to another without routing it through the rel
    it returns a `transferToken` holding the download URL and a wrapped key (never the raw AES key).
 3. `receive_file_transfer` on the destination with the `receiveId` and `transferToken`.
    It downloads, authenticates, decrypts and saves the file.
+
+### Plugins: extra MCP servers on your devices
+
+The agent can run other MCP servers on the device and pass their tools to your AI through two tools,
+`list_plugin_tools` and `call_plugin_tool`, so the tool list stays small. Plugins start the first time they are used.
+
+**Installed automatically on first start** (in the background, once; later starts only check files on disk):
+
+| Plugin | What the AI gets | Default |
+| --- | --- | --- |
+| `playwright` ([Playwright MCP](https://github.com/microsoft/playwright-mcp)) | Control a real browser (uses your Chrome/Edge if installed) | on |
+| `computer-use` ([computer-use-mcp](https://github.com/domdomegg/computer-use-mcp)) | Screenshots, mouse and keyboard | on for Windows and Linux (skipped without a display), **off on macOS** |
+| `ast-grep` | Powers `ast_search` / `ast_rewrite` | on |
+| `rtk` ([rtk](https://github.com/rtk-ai/rtk), open-source `rtk-oss` build) | Shorter command output in `run_command` (`raw=true` for full output) | on |
+| `serena` ([Serena](https://github.com/oraios/serena), GPL-3.0) | Go to definition, find references, symbol edits | on, needs Python |
+| `markitdown` ([MarkItDown MCP](https://github.com/microsoft/markitdown)) | PDF, Word, Excel, PowerPoint to Markdown | on, needs Python |
+
+Everything goes into `~/.brc` (`$BRC_HOME`): no Docker, no admin rights, no PATH changes. Versions are pinned and
+downloaded programs are checked against a sha256. For the Python plugins the agent uses your Python 3.10+ if it has
+one, otherwise it downloads [uv](https://github.com/astral-sh/uv) and a private Python into `~/.brc`. Only if both
+fail does it ask you to install Python (the python.org installer is downloaded but never run for you; on Linux it
+shows the package-manager command). On macOS, `computer-use` also needs Screen Recording and Accessibility permission.
+
+**Marketplace**: `/admin/marketplace` searches the official [MCP Registry](https://registry.modelcontextprotocol.io)
+and installs npm, PyPI or hosted (https) servers on the devices you pick; Docker-only servers are not supported.
+A Custom form adds any npm package, PyPI package, command or URL. API keys you enter go straight to the device
+(stored in `~/.brc/plugins.json`, mode 0600) and are never stored on the relay. The AI can search the registry and
+*request* an install with `request_plugin_install`, but nothing is installed until you approve it in `/admin`.
+Plugins run with your user account's permissions; BRC's `allowedDirectories` do not apply inside a plugin.
+
+**Agent flags**: `--list-plugins`, `--add-plugin <id>` (or `--add-plugin <id> --npm pkg@1.2.3 | --pypi pkg==1.2.3 |
+--command "cmd args" | --url https://... [--env KEY=VALUE]`), `--remove-plugin <id>`, `--enable-plugin <id>`,
+`--disable-plugin <id>`, `--update-plugins`, `--no-plugins` (or `BRC_PLUGINS=none`). Set
+`BRC_PLUGIN_REMOTE_ADMIN=0` on a device to refuse plugin changes from the relay.
 
 ## Install
 

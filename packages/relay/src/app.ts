@@ -8,6 +8,7 @@
  *   POST /device/start, POST /device/poll, GET|POST /device/verify, POST /device/approve
  *   ALL  /mcp                   Streamable HTTP (bearer, stateless per request)
  *   WS   /ws                    agent socket (device token)
+ *   GET  /admin, /admin/marketplace, POST /admin/plugins/*  (see plugins/admin-routes.ts)
  */
 import express, { type Request, type Response, type NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
@@ -29,6 +30,9 @@ import { BUNDLED_AGENT_TOOL_CATALOG } from './mcp/agent-tools.catalog.js';
 import * as pages from './pages/html.js';
 import * as adminPages from './pages/admin.js';
 import { LoginLimiter } from './auth/rate-limit.js';
+import { RegistryClient } from './plugins/registry.js';
+import { registerPluginRoutes } from './plugins/admin-routes.js';
+import { PLUGIN_RELAY_TOOLS } from './mcp/plugin-tools.js';
 
 export interface RelayConfig {
   port: number;
@@ -58,7 +62,7 @@ export function loadConfig(): RelayConfig {
     sessionSecret: env.BRC_SESSION_SECRET ?? '',
     adminUser: env.BRC_ADMIN_USER ?? 'admin',
     adminPassword: env.BRC_ADMIN_PASSWORD ?? '',
-    relayVersion: '2.0.5',
+    relayVersion: '2.0.7',
   };
 }
 
@@ -75,6 +79,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   catch (error) { await store.close(); throw error; }
   const sessions = new Sessions(cfg.sessionSecret, cfg.publicUrl.startsWith('https://'));
   const hub = new DeviceHub(cfg.relayVersion, log);
+  const registry = RegistryClient.fromEnv();
   const publicUrl = new URL(cfg.publicUrl);
 
   const app = express();
@@ -216,7 +221,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
       catch { return res.status(503).json({ ok: false, storage: 'mongodb', error: 'database_unavailable' }); }
     }
     res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl,
-      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1, storage: cfg.mongoUri ? 'mongodb' : 'sqlite', relayInstance: hub.instanceId });
+      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.length + 1 + PLUGIN_RELAY_TOOLS.length, storage: cfg.mongoUri ? 'mongodb' : 'sqlite', relayInstance: hub.instanceId });
   });
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */
@@ -247,6 +252,34 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
 
   const requireLogin = (req: Request, res: Response, next: NextFunction) =>
     currentUser(req) ? next() : res.redirect(`/auth/login?returnTo=${encodeURIComponent(req.originalUrl)}`);
+
+  // CSRF for the signed-in forms (device pairing approval, device admin, API keys, OAuth clients).
+  // Pages get a session-bound hidden `csrf` field added to every POST form that lacks one;
+  // POST handlers then require it (the plugin routes check it themselves).
+  const withCsrfFields = (req: Request, res: Response, next: NextFunction) => {
+    const token = sessions.csrfToken(req);
+    if (!token) return next();
+    const send = res.send.bind(res);
+    res.send = ((body: unknown) => {
+      if (typeof body === 'string' && body.includes('<form')) {
+        body = body.replace(/<form method="post"[^>]*>/g, (tag: string, offset: number, all: string) => {
+          const end = all.indexOf('</form>', offset);
+          const inner = all.slice(offset, end === -1 ? undefined : end);
+          return inner.includes('name="csrf"') ? tag : `${tag}<input type="hidden" name="csrf" value="${token}">`;
+        });
+      }
+      return send(body as never);
+    }) as typeof res.send;
+    next();
+  };
+  const requireCsrf = (req: Request, res: Response, next: NextFunction) => {
+    if (req.get('sec-fetch-site') === 'cross-site' || !sessions.checkCsrf(req, (req.body as Record<string, unknown> | undefined)?.csrf)) {
+      log('warn', `CSRF check failed for ${req.path} from ${req.ip}`);
+      return res.status(403).type('html').send(pages.messagePage('Request blocked', 'This form expired or came from another site. Go back, reload the page and try again.', false));
+    }
+    next();
+  };
+  for (const p of ['/admin', '/auth/clients', '/auth/apikeys', '/device/verify']) app.use(p, withCsrfFields);
 
   app.get('/device/verify', requireLogin, (req, res) => res.type('html').send(pages.deviceVerifyPage(String(req.query.user_code ?? ''))));
   app.post('/device/verify', requireLogin, async (req, res) => {
@@ -317,7 +350,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
   const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
-    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access);
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access, { registry, publicUrl: cfg.publicUrl });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {
@@ -348,6 +381,9 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
     await handleMcp(req, res, link.user_id, `link:${link.id}`, link.mode);
   });
 
+  /* ---------- plugins: marketplace, per-device plugin admin, AI install requests ---------- */
+  const pluginUi = registerPluginRoutes({ app, hub, store, sessions, registry, requireLogin, log });
+
   /* ---------- admin dashboard ---------- */
   app.get('/admin', requireLogin, async (req, res) => {
     const userId = currentUser(req)!;
@@ -355,9 +391,9 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
     const devices = (await store.listDevices(userId)).map((d) => ({ ...d, online: online.has(d.device_id) }));
     const names = new Map(devices.map((d) => [d.device_id, d.name]));
     const audit = (await store.recentAudit(userId, 100)).map((a) => ({ ts: a.ts, device: names.get(a.device_id ?? '') ?? (a.device_id ?? '?').slice(0, 8), client: a.client, tool: a.tool, ok: a.ok, ms: a.ms, error: a.error }));
-    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, await store.auditStats(userId)));
+    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, await store.auditStats(userId), await pluginUi.adminSections(req, userId), pluginUi.flash(req)));
   });
-  app.post('/admin/device', requireLogin, async (req, res) => {
+  app.post('/admin/device', requireLogin, requireCsrf, async (req, res) => {
     const userId = currentUser(req)!;
     const { device_id, action, name } = req.body as Record<string, string>;
     const dev = await store.getDevice(String(device_id ?? ''));

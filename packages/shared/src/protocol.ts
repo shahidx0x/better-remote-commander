@@ -4,6 +4,8 @@
  */
 export const BRC_PROTOCOL_VERSION = 1;
 
+import type { PluginAdminAction, PluginDefinition, PluginStatusSummary } from './plugins.js';
+
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -54,7 +56,22 @@ export interface ResultMessage {
 
 export interface PongMessage { type: 'pong'; ts: number }
 
-export type AgentMessage = HelloMessage | ResultMessage | PongMessage;
+/**
+ * Plugin status report (agent -> relay). Sent after `welcome` and whenever plugin state changes
+ * (debounced). Old agents never send it; the relay then treats the device as "no plugin support".
+ */
+export interface PluginsMessage { type: 'plugins'; plugins: PluginStatusSummary[] }
+
+/** Outcome of one `plugin_admin` request (agent -> relay). */
+export interface PluginAdminResultMessage {
+  type: 'plugin_admin_result';
+  id: string;
+  ok: boolean;
+  error?: string;
+  plugin?: PluginStatusSummary;
+}
+
+export type AgentMessage = HelloMessage | ResultMessage | PongMessage | PluginsMessage | PluginAdminResultMessage;
 
 /* ---------- relay -> agent ---------- */
 export interface WelcomeMessage {
@@ -82,8 +99,17 @@ export interface ErrorMessage {
   fatal?: boolean;
 }
 
+export interface PluginAdminMessage {
+  type: 'plugin_admin';
+  id: string;
+  action: PluginAdminAction;
+  pluginId?: string;
+  plugin?: PluginDefinition;
+  env?: Record<string, string>;
+  unsetEnv?: string[];
+}
 export interface CancelMessage { type: 'cancel'; id: string; reason?: string }
-export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage | CancelMessage;
+export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage | CancelMessage | PluginAdminMessage;
 
 export const DEFAULTS = {
   pingIntervalMs: 20_000,

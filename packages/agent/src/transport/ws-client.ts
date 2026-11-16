@@ -4,11 +4,13 @@ import { DEFAULTS,BRC_PROTOCOL_VERSION,parseMessage,type AgentMessage,type Relay
 import { withCallContext } from '../context.js';
 import { OperationScheduler,cancelOperation } from '../runtime/operations.js';
 import { AgentError,failure } from '../runtime/errors.js';
+import { PluginAdmin } from './plugin-admin.js';
 export interface WsClientOptions {
  relayUrl:string;token:string;deviceId:string;name:string;agentVersion:string;coreVersion:string;tools:ToolDefinition[];
  callTool:(name:string,args:Record<string,unknown>)=>Promise<unknown>;
  log?:(level:'info'|'warn'|'error'|'debug',msg:string)=>void;
  onUnauthorized?:()=>Promise<boolean>;
+ onConnected?:()=>void;
 }
 export class WsClient {
  private ws:WebSocket|null=null;
@@ -22,8 +24,9 @@ export class WsClient {
  private scheduler=new OperationScheduler(Math.min(16,Math.max(1,Number(process.env.BRC_MAX_CONCURRENCY)||4)),32);
  private seen=new Map<string,number>();
  private readonly log:NonNullable<WsClientOptions['log']>;
+ private readonly plugins:PluginAdmin;
  readonly wsUrl:string;
- constructor(private readonly opts:WsClientOptions){this.log=opts.log??(()=>{});this.wsUrl=WsClient.toWsUrl(opts.relayUrl);}
+ constructor(private readonly opts:WsClientOptions){this.log=opts.log??(()=>{});this.wsUrl=WsClient.toWsUrl(opts.relayUrl);this.plugins=new PluginAdmin(m=>this.send(m),this.log);}
  static toWsUrl(url:string):string{
   const u=new URL(url);
   if(!['http:','https:','ws:','wss:'].includes(u.protocol)||u.username||u.password||u.search||u.hash)throw new Error('Use a relay base URL without credentials, query or fragment.');
@@ -32,8 +35,8 @@ export class WsClient {
   if(!u.pathname.endsWith('/ws'))u.pathname=u.pathname.replace(/\/$/,'')+'/ws';
   return u.toString();
  }
- start():void{if(this.ws)return;this.stopped=false;this.connect();}
- stop():void{this.stopped=true;clearTimeout(this.pongTimer);clearTimeout(this.reconnectTimer);this.scheduler.cancelAll('Agent stopping.');const ws=this.ws;this.ws=null;ws?.close(1000,'agent stopped');}
+ start():void{if(this.ws)return;this.stopped=false;this.plugins.start();this.connect();}
+ stop():void{this.stopped=true;this.plugins.stop();clearTimeout(this.pongTimer);clearTimeout(this.reconnectTimer);this.scheduler.cancelAll('Agent stopping.');const ws=this.ws;this.ws=null;ws?.close(1000,'agent stopped');}
  /** Pause only when idle: opening settings never cancels an in-flight tool call. */
  pauseForSettings():boolean{if(this.callsInFlight>0)return false;this.settingsPaused=true;return true;}
  resumeAfterSettings():void{this.settingsPaused=false;}
@@ -67,10 +70,11 @@ export class WsClient {
  private async onMessage(raw:Buffer,ws:WebSocket):Promise<void>{
   const msg=parseMessage<RelayMessage>(raw);if(!msg)return;
   switch(msg.type){
-   case 'welcome':if(msg.protocol!==BRC_PROTOCOL_VERSION){this.stop();return;}this.backoff=DEFAULTS.reconnectMinMs;this.unauthorizedCount=0;this.log('info',`Ready: relay ${msg.relayVersion}; ${this.opts.tools.length} tools`);return;
+   case 'welcome':if(msg.protocol!==BRC_PROTOCOL_VERSION){this.stop();return;}this.backoff=DEFAULTS.reconnectMinMs;this.unauthorizedCount=0;this.log('info',`Ready: relay ${msg.relayVersion}; ${this.opts.tools.length} tools`);this.plugins.sendStatus();try{this.opts.onConnected?.();}catch{}return;
    case 'ping':this.armHeartbeat();this.send({type:'pong',ts:msg.ts},ws);return;
    case 'cancel':if(typeof msg.id==='string')cancelOperation(msg.id);return;
    case 'call':await this.handleCall(msg,ws);return;
+   case 'plugin_admin':await this.plugins.handle(msg);return;
    case 'error':this.log('error',`Relay error ${msg.code}`);if(msg.fatal)this.stop();return;
   }
  }
