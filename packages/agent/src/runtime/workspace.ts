@@ -66,3 +66,55 @@ export async function textFile(file: string, max = 2 * 1024 * 1024) {
     const bytes = await readBounded(file, max);
     return { path: file, bytes, text: decodeCode(bytes), sha256: sha256(bytes) };
 }
+
+// ---- BEGIN sandbox helpers (from PR #1): IGNORED_DIRS, sensitive, listProjectFiles ----
+import { spawn as sandboxSpawn } from 'node:child_process';
+import { getRipgrepPath as sandboxRipgrepPath } from '../core/utils/ripgrep-resolver.js';
+import { checkCancelled as sandboxCheckCancelled, getCallContext as sandboxCallContext } from '../context.js';
+export const IGNORED_DIRS = ['.git', 'node_modules', '.next', 'dist', 'build', 'coverage', '.turbo', '.venv', 'venv', '__pycache__', 'target', 'obj', '.vs', '.gradle', '.dart_tool', '.pub-cache'];
+export function sensitive(file: string): boolean {
+    const b = path.basename(file).toLowerCase();
+    return /^\.env(?:\.|$)/.test(b) || /^(?:id_rsa|id_ed25519|credentials|secrets?)(?:\.|$)/.test(b) || /\.(?:pem|p12|pfx|key)$/.test(b);
+}
+/** Non-ignored project files (relative, forward slashes) via ripgrep; sensitive names are skipped. Bounded by count, bytes and time. */
+export async function listProjectFiles(root: string, limit = 5000): Promise<{ files: string[]; truncated: boolean }> {
+    root = await rootPath(root);
+    const rg = await sandboxRipgrepPath();
+    sandboxCheckCancelled();
+    const signal = sandboxCallContext()?.signal;
+    return new Promise((resolve, reject) => {
+        const args = ['--files', '--hidden', '--null', '--no-config', ...IGNORED_DIRS.flatMap(d => ['-g', `!**/${d}/**`]), '-g', '!**/bin/Debug/**', '-g', '!**/bin/Release/**', '--', '.'];
+        const child = sandboxSpawn(rg, args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        const files: string[] = [];
+        let buffer = '', bytes = 0, truncated = false, error = '', timedOut = false;
+        const abort = () => child.kill();
+        const timer = setTimeout(() => { timedOut = true; child.kill(); }, 15000);
+        signal?.addEventListener('abort', abort, { once: true });
+        const clean = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (chunk: string) => {
+            if (truncated) return;
+            bytes += Buffer.byteLength(chunk);
+            if (bytes > 4 * 1024 * 1024) { truncated = true; child.kill(); return; }
+            buffer += chunk;
+            const parts = buffer.split('\0');
+            buffer = parts.pop() ?? '';
+            for (let name of parts) {
+                name = name.replace(/\\/g, '/').replace(/^\.\//, '');
+                if (!name || sensitive(name)) continue;
+                if (files.length >= limit) { truncated = true; child.kill(); break; }
+                files.push(name);
+            }
+        });
+        child.stderr.on('data', (b: Buffer) => { error = (error + b).slice(0, 1000); });
+        child.on('error', e => { clean(); reject(e); });
+        child.on('close', code => {
+            clean();
+            if (signal?.aborted) reject(signal.reason);
+            else if (timedOut) reject(new AgentError('SEARCH_TIMEOUT', 'Project enumeration timed out. Narrow the project root.'));
+            else if (code !== 0 && code !== 1 && !truncated) reject(new AgentError('SEARCH_FAILED', error || 'Project enumeration failed.'));
+            else resolve({ files: files.sort(), truncated });
+        });
+    });
+}
+// ---- END sandbox helpers ----

@@ -12,6 +12,7 @@ import { JOB_TOOL_HANDLERS, buildJobToolDefinitions, setJobToolExecutor } from '
 import { PLUGIN_TOOL_HANDLERS, buildPluginToolDefinitions } from './tools/plugin-tools.js';
 import { AST_GREP_TOOL_HANDLERS, buildAstGrepToolDefinitions } from './tools/ast-grep.js';
 import { WORKSPACE_TOOL_HANDLERS, buildWorkspaceToolDefinitions } from './tools/workspace-batch.js';
+import { SANDBOX_TOOL_HANDLERS, buildSandboxToolDefinitions } from './tools/sandbox-tools.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
 import { randomUUID } from 'node:crypto';
@@ -62,13 +63,15 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(AST_GREP_TOOL_HANDLERS),
   // Hash-checked multi-file edit/read batch
   ...Object.entries(WORKSPACE_TOOL_HANDLERS),
+  // Optional restricted Docker sandbox (preview by default)
+  ...Object.entries(SANDBOX_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
 
 export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildWorkspaceToolDefinitions()]
+    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildWorkspaceToolDefinitions(), ...buildSandboxToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name));
   }
   return cachedDefs;
