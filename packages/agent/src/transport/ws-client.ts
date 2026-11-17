@@ -9,7 +9,7 @@ import {
   type AgentMessage, type RelayMessage, type CallMessage, type DeviceInfo, type ToolDefinition,
 } from 'brc-shared';
 import { withCallContext } from '../context.js';
-import { failure } from '../runtime/errors.js';
+import { AgentError, failure } from '../runtime/errors.js';
 import { PluginAdmin } from './plugin-admin.js';
 import { boundedAgentFrame } from './result-budget.js';
 
@@ -35,6 +35,9 @@ export class WsClient {
   private backoff: number = DEFAULTS.reconnectMinMs;
   private pongTimer: NodeJS.Timeout | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private welcomed = false;
+  private settingsPaused = false;
+  private callsInFlight = 0;
   private lastUnauthorized = false;
   private unauthorizedCount = 0;
   private readonly log: NonNullable<WsClientOptions['log']>;
@@ -55,10 +58,20 @@ export class WsClient {
     return u.toString();
   }
 
+  /** O(1) live status for the console; no network request. */
+  status(): { online: boolean; connecting: boolean; inFlight: number } {
+    return { online: this.welcomed && this.ws?.readyState === WebSocket.OPEN, connecting: !!this.ws && this.ws.readyState === WebSocket.CONNECTING, inFlight: this.callsInFlight };
+  }
+
+  /** Pause only when idle, so opening local settings never cancels an in-flight tool call. */
+  pauseForSettings(): boolean { if (this.callsInFlight > 0) return false; this.settingsPaused = true; return true; }
+  resumeAfterSettings(): void { this.settingsPaused = false; }
+
   start(): void { this.stopped = false; this.plugins.start(); this.connect(); }
 
   stop(): void {
     this.stopped = true;
+    this.welcomed = false;
     this.plugins.stop();
     this.clearPongTimer();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -98,6 +111,7 @@ export class WsClient {
       if (this.ws !== ws) return; // stale socket (replaced or stopped)
       this.clearPongTimer();
       this.ws = null;
+      this.welcomed = false;
       if (this.stopped) return;
       if (code === 4401 || code === 4403 || this.lastUnauthorized) {
         this.lastUnauthorized = false;
@@ -121,7 +135,7 @@ export class WsClient {
       this.stopped = false;
     }
     const wait = Math.min(DEFAULTS.reconnectMaxMs, 10_000 * this.unauthorizedCount);
-    this.log('error', `Unauthorized (code ${code}); retry in ${wait} ms`);
+    this.log('error', `Device authorization rejected (code ${code}); approve pairing or revoke this agent; retry in ${wait} ms`);
     this.scheduleConnect(wait);
   }
 
@@ -135,7 +149,8 @@ export class WsClient {
     if (!msg) return this.log('warn', 'Dropped malformed frame');
     switch (msg.type) {
       case 'welcome':
-        this.log('info', `Relay ${msg.relayVersion} (protocol ${msg.protocol})`);
+        this.welcomed = true;
+        this.log('info', `Ready: relay ${msg.relayVersion} (protocol ${msg.protocol}); ${this.opts.tools.length} tools`);
         this.plugins.sendStatus();
         return;
       case 'ping':
@@ -155,12 +170,17 @@ export class WsClient {
 
   private async handleCall(msg: CallMessage): Promise<void> {
     this.log('debug', `call ${msg.id} ${msg.tool}`);
+    if (this.settingsPaused) {
+      this.send({ type: 'result', id: msg.id, result: failure(new AgentError('SETTINGS_OPEN', 'Local connection settings are open on the device; this call was not executed. Retry shortly.', true), msg.id) });
+      return;
+    }
+    this.callsInFlight++;
     try {
       const result = await withCallContext({ id: msg.id, client: msg.client ?? null, remote: true }, () => this.opts.callTool(msg.tool, msg.args ?? {}));
       this.send({ type: 'result', id: msg.id, result: result as never });
     } catch (err) {
       this.send({ type: 'result', id: msg.id, result: failure(err, msg.id) });
-    }
+    } finally { this.callsInFlight--; }
   }
 
   private send(msg: AgentMessage): void {
