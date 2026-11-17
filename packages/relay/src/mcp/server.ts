@@ -37,6 +37,7 @@ const READ_ONLY_TOOLS = new Set([
   // code navigation (read-only, memory-only caches)
   'read_code_file', 'code_outline', 'find_symbols', 'read_symbol', 'find_references', 'related_files',
   'project_context', 'project_map', 'context_pack', 'code_graph', 'language_capabilities',
+  'session_handoff', 'code_diagnostics', 'review_changes', 'test_impact', 'vscode_tasks', 'docker_inventory', 'docker_inspect',
   'discover_checks', // lists runnable checks; never runs them
 ]);
 /** Relay-level tools a read-only link may call. */
