@@ -33,7 +33,11 @@ const READ_ONLY_TOOLS = new Set([
   'read_file', 'read_multiple_files', 'list_directory', 'get_file_info',
   'git_status', 'git_diff', 'git_log',
   'start_search', 'get_more_search_results', 'stop_search', 'list_searches',
-  'ast_search',
+  'ast_search', 'read_images',
+  // code navigation (read-only, memory-only caches)
+  'read_code_file', 'code_outline', 'find_symbols', 'read_symbol', 'find_references', 'related_files',
+  'project_context', 'project_map', 'context_pack', 'code_graph', 'language_capabilities',
+  'discover_checks', // lists runnable checks; never runs them
 ]);
 /** Relay-level tools a read-only link may call. */
 const READ_ONLY_RELAY_TOOLS = new Set(['list_devices', 'search_mcp_registry']);
