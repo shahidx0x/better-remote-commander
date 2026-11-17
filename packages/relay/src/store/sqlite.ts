@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
-import type { UsageRecord, UsageDay, McpEstimateDelta } from '../features/usage.js';
+import type { UsageRecord, UsageDay, McpEstimateDelta, McpEstimateExtra } from '../features/usage.js';
 import type { SkillRow, SkillRequest } from '../features/skills.js';
 
 /** Allowed lifetimes (days) of a private connection link. Capped at 90: a URL is a bearer credential. */
@@ -349,6 +349,9 @@ CREATE INDEX IF NOT EXISTS skill_requests_user ON skill_requests(user_id, create
 CREATE TABLE IF NOT EXISTS model_usage (id TEXT NOT NULL, user_id TEXT NOT NULL, day TEXT NOT NULL, ts INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, PRIMARY KEY (user_id, id));
 CREATE INDEX IF NOT EXISTS model_usage_user_day ON model_usage(user_id, day);
 CREATE TABLE IF NOT EXISTS mcp_estimate_daily (user_id TEXT NOT NULL, day TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, partial_calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, day));`);
+    // Additive migration: exact wire bytes + tokenizer-match counters (aggregates only).
+    const have = new Set((this.db.prepare('PRAGMA table_info(mcp_estimate_daily)').all() as { name: string }[]).map((c) => c.name));
+    for (const c of ['to_agent_bytes', 'from_agent_bytes', 'matched_calls', 'universal_calls']) if (!have.has(c)) this.db.exec('ALTER TABLE mcp_estimate_daily ADD COLUMN ' + c + ' INTEGER NOT NULL DEFAULT 0');
     this.extrasReady = true;
   }
   saveSkill(r: SkillRow): void {
@@ -399,14 +402,14 @@ CREATE TABLE IF NOT EXISTS mcp_estimate_daily (user_id TEXT NOT NULL, day TEXT N
   }
   recordMcpEstimates(rows: McpEstimateDelta[]): void {
     this.ensureExtras();
-    const st = this.db.prepare('INSERT INTO mcp_estimate_daily (user_id,day,input_tokens,output_tokens,calls,partial_calls) VALUES (?,?,?,?,?,?) ON CONFLICT(user_id,day) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens, output_tokens=output_tokens+excluded.output_tokens, calls=calls+excluded.calls, partial_calls=partial_calls+excluded.partial_calls');
+    const st = this.db.prepare('INSERT INTO mcp_estimate_daily (user_id,day,input_tokens,output_tokens,calls,partial_calls,to_agent_bytes,from_agent_bytes,matched_calls,universal_calls) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,day) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens, output_tokens=output_tokens+excluded.output_tokens, calls=calls+excluded.calls, partial_calls=partial_calls+excluded.partial_calls, to_agent_bytes=to_agent_bytes+excluded.to_agent_bytes, from_agent_bytes=from_agent_bytes+excluded.from_agent_bytes, matched_calls=matched_calls+excluded.matched_calls, universal_calls=universal_calls+excluded.universal_calls');
     this.db.exec('BEGIN');
-    try { for (const r of rows) st.run(r.user_id, r.day, r.input_tokens, r.output_tokens, r.calls, r.partial_calls); this.db.exec('COMMIT'); }
+    try { for (const r of rows) st.run(r.user_id, r.day, r.input_tokens, r.output_tokens, r.calls, r.partial_calls, r.to_agent_bytes ?? 0, r.from_agent_bytes ?? 0, r.matched_calls ?? 0, r.universal_calls ?? 0); this.db.exec('COMMIT'); }
     catch (e) { this.db.exec('ROLLBACK'); throw e; }
   }
-  mcpEstimateDays(userId: string, sinceDay: string): (UsageDay & { partial_calls: number })[] {
+  mcpEstimateDays(userId: string, sinceDay: string): (UsageDay & McpEstimateExtra)[] {
     this.ensureExtras();
-    return this.db.prepare('SELECT day, input_tokens, output_tokens, calls AS reports, partial_calls FROM mcp_estimate_daily WHERE user_id = ? AND day >= ? ORDER BY day').all(userId, sinceDay) as unknown as (UsageDay & { partial_calls: number })[];
+    return this.db.prepare('SELECT day, input_tokens, output_tokens, calls AS reports, partial_calls, to_agent_bytes, from_agent_bytes, matched_calls, universal_calls FROM mcp_estimate_daily WHERE user_id = ? AND day >= ? ORDER BY day').all(userId, sinceDay) as unknown as (UsageDay & McpEstimateExtra)[];
   }
   /** Retention: drop usage aggregates older than 400 days. */
   pruneUsage(now = Date.now()): void {

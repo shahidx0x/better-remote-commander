@@ -2,7 +2,12 @@
 export interface UsageRecord { id: string; user_id: string; ts: number; day: string; provider: string; model: string; input_tokens: number; output_tokens: number }
 export interface UsageDay { day: string; input_tokens: number; output_tokens: number; reports: number }
 /** Aggregated counts only. Never tool names, arguments or results. */
-export interface McpEstimateDelta { user_id: string; day: string; input_tokens: number; output_tokens: number; calls: number; partial_calls: number }
+export interface McpEstimateDelta { user_id: string; day: string; input_tokens: number; output_tokens: number; calls: number; partial_calls: number;
+  /** Exact UTF-8 bytes of agent WebSocket call/result frames (no content). Optional: absent = 0. */
+  to_agent_bytes?: number; from_agent_bytes?: number;
+  /** Calls counted with a recognised model-hint encoding vs the universal fallback. */
+  matched_calls?: number; universal_calls?: number }
+export interface McpEstimateExtra { partial_calls: number; to_agent_bytes: number; from_agent_bytes: number; matched_calls: number; universal_calls: number }
 
 const DAY = 86_400_000;
 export const utcDay = (t: number) => new Date(Math.floor(t / DAY) * DAY).toISOString().slice(0, 10);
