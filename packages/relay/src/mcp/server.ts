@@ -11,10 +11,11 @@ import { invokeTool, listUserDevices, type InvokeContext } from './invoke.js';
 import { PLUGIN_RELAY_TOOLS, handlePluginRelayTool, type PluginToolDeps } from './plugin-tools.js';
 import { SKILL_RELAY_TOOLS, SKILL_TOOL_NAMES, SKILL_READ_ONLY_TOOLS, handleSkillRelayTool } from './skill-tools.js';
 import type { McpTrafficEstimator } from '../features/mcp-estimates.js';
+import { profileAdvertises, type ToolProfile } from './tool-profiles.js';
 
 export type McpContext = InvokeContext;
 /** Opt-in extras; both default off. */
-export interface McpFeatures { skills?: boolean; estimator?: McpTrafficEstimator }
+export interface McpFeatures { skills?: boolean; estimator?: McpTrafficEstimator; toolProfile?: ToolProfile }
 
 export const DEVICE_ID_PROP = {
   deviceId: { type: 'string', description: 'Target device id (from list_devices). Required when more than one device is online; may be omitted when only one device is connected.' },
@@ -63,14 +64,15 @@ export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
 /** `plugins` enables the marketplace tools (search_mcp_registry, request_plugin_install). */
 export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string, plugins?: Omit<PluginToolDeps, 'hub' | 'store'>, access: 'read' | 'full' = 'full', features: McpFeatures = {}): Server {
   const skills = !!features.skills;
+  const profile: ToolProfile = features.toolProfile ?? 'full'; // advertising only; call handling below ignores it
   const allowedReadOnly = (n: string) => readOnlyToolAllowed(n) || (skills && SKILL_READ_ONLY_TOOLS.has(n));
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { online, tools } = liveTools(hub, store, ctx.userId);
-    const relayTools = [...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : [])].filter((t) => access !== 'read' || allowedReadOnly(t.name));
+    const relayTools = [...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : [])].filter((t) => (access !== 'read' || allowedReadOnly(t.name)) && profileAdvertises(profile, t.name));
     const reserved = new Set([...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : [])].map((t) => t.name));
-    const visible = tools.filter((t) => !reserved.has(t.name) && (access !== 'read' || readOnlyToolAllowed(t.name)))
+    const visible = tools.filter((t) => !reserved.has(t.name) && (access !== 'read' || readOnlyToolAllowed(t.name)) && profileAdvertises(profile, t.name))
       .map((t) => (access === 'read' ? { ...t, annotations: { ...t.annotations, readOnlyHint: true, destructiveHint: false } } : t));
     const note = access === 'read' ? ' THIS CONNECTION IS READ-ONLY: only the advertised read tools may be used.' : '';
     return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.${note}` }, ...relayTools, ...visible] };

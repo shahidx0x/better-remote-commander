@@ -31,6 +31,7 @@ import { RegistryClient } from './plugins/registry.js';
 import { registerPluginRoutes } from './plugins/admin-routes.js';
 import { registerSkillsRoutes } from './features/skills-routes.js';
 import { registerUsageRoutes, usageSection } from './features/usage-routes.js';
+import { resolveToolProfile, profileAdvertises } from './mcp/tool-profiles.js';
 import { McpTrafficEstimator, mcpEstimatesEnabled } from './features/mcp-estimates.js';
 
 export interface RelayConfig {
@@ -75,6 +76,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const publicUrl = new URL(cfg.publicUrl);
   // Opt-in features, all OFF unless their env var is set to 1.
   const skillsOn = process.env.BRC_SKILLS === '1';
+  const toolProfile = resolveToolProfile();
   const estimator = new McpTrafficEstimator(store, log, mcpEstimatesEnabled());
 
   const app = express();
@@ -204,7 +206,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     res.type('html').send(pages.homePage(cfg.publicUrl, !!userId, devices));
   });
 
-  app.get('/health', (_req, res) => res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl }));
+  app.get('/health', (_req, res) => res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl, mcpToolProfile: toolProfile, mcpTools: new Set(hub.list().flatMap((d) => (hub.get(d.deviceId)?.tools ?? []).map((t) => t.name)).filter((n) => profileAdvertises(toolProfile, n))).size }));
 
   /* ---------- device pairing (OAuth device-authorization style) ---------- */
   app.post('/device/start', express.json({ limit: '4kb' }), (req, res) => {
@@ -323,7 +325,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
   const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
-    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log }, access, { skills: skillsOn, estimator });
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log }, access, { skills: skillsOn, estimator, toolProfile });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {
@@ -394,9 +396,6 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const csrf = sessions.csrfToken(req);
     try {
       const publicUrl = new URL(cfg.publicUrl);
-  // Opt-in features, all OFF unless their env var is set to 1.
-  const skillsOn = process.env.BRC_SKILLS === '1';
-  const estimator = new McpTrafficEstimator(store, log, mcpEstimatesEnabled());
       if (publicUrl.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(publicUrl.hostname)) throw new Error('A public connection URL requires HTTPS.');
       const mode = req.body?.mode === 'full' ? 'full' : req.body?.mode === 'read' ? 'read' : null;
       if (!mode) throw new Error('Choose a valid access level.');
