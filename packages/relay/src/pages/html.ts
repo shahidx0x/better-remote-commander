@@ -1,25 +1,33 @@
-/** Server-rendered HTML pages for the relay (no framework, no JS needed). */
+/**
+ * Server-rendered HTML pages for the relay (no framework, no client JS, no external assets).
+ * Every dynamic value goes through esc(); POST forms must start with `<form method="post"` so
+ * app.ts can add the session `csrf` hidden field.
+ */
+import { CSS, sidebar } from './theme.js';
 
 export const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
-export function layout(title: string, body: string, width: 'narrow' | 'wide' = 'narrow'): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(title)} · Better Remote Commander (BRC)</title>
-<style>
-:root{color-scheme:light dark;--bg:#f3f5f7;--panel:#fff;--panel2:#f8fafc;--text:#121826;--muted:#687386;--line:#e4e8ef;--brand:#2563eb;--brand2:#1d4ed8;--ok:#15803d;--err:#dc2626;--shadow:0 18px 50px rgba(15,23,42,.08)}*{box-sizing:border-box}body{font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:radial-gradient(circle at top left,#eef4ff 0,transparent 32%),var(--bg);color:var(--text);display:flex;min-height:100vh;align-items:flex-start;justify-content:center;padding:38px 18px}a{color:var(--brand);text-decoration:none}a:hover{text-decoration:underline}
-@media(prefers-color-scheme:dark){:root{--bg:#0b1020;--panel:#111827;--panel2:#172033;--text:#eef2ff;--muted:#9aa6ba;--line:#263247;--brand:#60a5fa;--brand2:#3b82f6;--shadow:0 18px 50px rgba(0,0,0,.32)}body{background:radial-gradient(circle at top left,#16223d 0,transparent 34%),var(--bg)}input,textarea{background:#0d1424;color:var(--text)}}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:28px 30px;width:min(${width === 'wide' ? '1120px' : '480px'},96vw);box-shadow:var(--shadow)}h1{font-size:22px;line-height:1.2;font-weight:700;margin:0 0 6px;letter-spacing:-.02em}h2{font-size:15px;margin:0 0 10px}p{margin:8px 0;color:var(--muted)}.brand{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--brand);margin-bottom:16px}.muted{color:var(--muted)}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-label{display:block;font-size:12px;font-weight:600;margin:13px 0 5px;color:var(--muted)}input,textarea{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font:inherit;outline:none}input:focus,textarea:focus{border-color:var(--brand);box-shadow:0 0 0 3px color-mix(in srgb,var(--brand) 14%,transparent)}input.code{font:22px/1 ui-monospace,monospace;letter-spacing:.2em;text-align:center;text-transform:uppercase}.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.row>a{display:flex}button{padding:9px 13px;border-radius:10px;border:1px solid transparent;font:600 13px/1.2 inherit;cursor:pointer;transition:.15s ease}button:hover{transform:translateY(-1px)}.primary{background:var(--brand);color:#fff}.primary:hover{background:var(--brand2)}.secondary{background:var(--panel2);border-color:var(--line);color:inherit}.danger{color:var(--err)}.err{color:var(--err)}.ok{color:var(--ok)}.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:3px 8px;background:var(--panel2);font-size:12px}.dot{width:7px;height:7px;border-radius:50%;background:currentColor}ul{padding-left:18px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 5px}table{width:100%;border-collapse:separate;border-spacing:0}th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}.panel{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.stat strong{display:block;font-size:24px;letter-spacing:-.03em}.section{margin-top:24px}.section-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.device-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.device{padding:15px;border:1px solid var(--line);border-radius:14px;background:var(--panel2)}.device-top{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}.actions button{padding:7px 10px}@media(max-width:760px){body{padding:16px 10px}.card{padding:20px}.grid,.device-grid{grid-template-columns:1fr}.table-wrap{overflow:auto}.section-head{align-items:flex-start;flex-direction:column}}
-</style></head><body><div class="card"><div class="brand">Better Remote Commander (BRC)</div>${body}</div></body></html>`;
+/** 'auth' = centred card (sign-in, consent, pairing, messages); 'narrow'/'wide' = admin shell with sidebar. */
+export type PageKind = 'auth' | 'narrow' | 'wide';
+
+export function layout(title: string, body: string, kind: PageKind = 'narrow'): string {
+  const head = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark"><title>${esc(title)} · Better Remote Commander (BRC)</title><style>${CSS}</style></head><body><a class="skip" href="#main">Skip to content</a>`;
+  if (kind === 'auth') {
+    return `${head}<main class="auth" id="main"><div class="auth-card"><div class="brand">Better Remote Commander (BRC)</div>${body}</div></main></body></html>`;
+  }
+  return `${head}<div class="shell">${sidebar(title)}<div class="main"><header class="topbar"><div class="crumb">Workspace / <strong>${esc(title)}</strong></div>
+<div class="top-right"><a class="btn secondary optional" href="/device/verify">Pair device</a><a class="btn secondary" href="/auth/logout">Sign out</a></div></header>
+<main class="content ${kind}" id="main">${body}</main></div></div></body></html>`;
 }
 
 export function loginPage(returnTo: string, error?: string): string {
   return layout('Sign in', `<h1>Sign in</h1><p>Sign in to your BRC relay.</p>
-${error ? `<p class="err">${esc(error)}</p>` : ''}
+${error ? `<p class="err" role="alert">${esc(error)}</p>` : ''}
 <form method="post" action="/auth/login"><input type="hidden" name="returnTo" value="${esc(returnTo)}">
-<label>Username</label><input name="username" autocomplete="username" required autofocus>
-<label>Password</label><input name="password" type="password" autocomplete="current-password" required>
-<div class="row"><button class="primary" type="submit">Sign in</button></div></form>`);
+<label for="login-user">Username</label><input id="login-user" name="username" autocomplete="username" required autofocus>
+<label for="login-pass">Password</label><input id="login-pass" name="password" type="password" autocomplete="current-password" required>
+<div class="row"><button class="primary" type="submit">Sign in</button></div></form>`, 'auth');
 }
 
 export function consentPage(pendingId: string, clientName: string, redirectUri: string, scopes: string[]): string {
@@ -27,15 +35,15 @@ export function consentPage(pendingId: string, clientName: string, redirectUri: 
 <p><strong>${esc(clientName)}</strong> wants to control your paired devices through this relay.</p>
 <p>Redirect: <code>${esc(redirectUri)}</code></p><p>Scopes: ${scopes.map((s) => `<code>${esc(s)}</code>`).join(' ')}</p>
 <form method="post" action="/auth/consent"><input type="hidden" name="pending" value="${esc(pendingId)}">
-<div class="row"><button class="secondary" name="decision" value="deny">Deny</button><button class="primary" name="decision" value="allow">Allow</button></div></form>`);
+<div class="row"><button class="secondary" name="decision" value="deny">Deny</button><button class="primary" name="decision" value="allow">Allow</button></div></form>`, 'auth');
 }
 
 export function deviceVerifyPage(prefill: string, error?: string): string {
   return layout('Pair device', `<h1>Pair a device</h1><p>Enter the code shown by <code>brc-agent</code>.</p>
-${error ? `<p class="err">${esc(error)}</p>` : ''}
-<form method="post" action="/device/verify"><label>Pairing code</label>
-<input class="code" name="user_code" value="${esc(prefill)}" placeholder="XXXX-XXXX" maxlength="9" required autofocus>
-<div class="row"><button class="primary" type="submit">Continue</button></div></form>`);
+${error ? `<p class="err" role="alert">${esc(error)}</p>` : ''}
+<form method="post" action="/device/verify"><label for="pair-code">Pairing code</label>
+<input id="pair-code" class="code" name="user_code" value="${esc(prefill)}" placeholder="XXXX-XXXX" maxlength="9" autocomplete="off" required autofocus>
+<div class="row"><button class="primary" type="submit">Continue</button><a class="btn secondary" href="/admin">Back to admin</a></div></form>`, 'auth');
 }
 
 export function deviceApprovePage(userCode: string, clientName: string): string {
@@ -43,21 +51,25 @@ export function deviceApprovePage(userCode: string, clientName: string): string 
 <p>Device <strong>${esc(clientName)}</strong> asks to join your relay with code <code>${esc(userCode)}</code>.</p>
 <p>Once approved it can run tools on that machine on your behalf.</p>
 <form method="post" action="/device/approve"><input type="hidden" name="user_code" value="${esc(userCode)}">
-<div class="row"><button class="secondary" name="decision" value="deny">Deny</button><button class="primary" name="decision" value="allow">Approve</button></div></form>`);
+<div class="row"><button class="secondary" name="decision" value="deny">Deny</button><button class="primary" name="decision" value="allow">Approve</button></div></form>`, 'auth');
 }
 
 export function messagePage(title: string, text: string, ok = true): string {
-  return layout(title, `<h1>${esc(title)}</h1><p class="${ok ? 'ok' : 'err'}">${esc(text)}</p><p>You can close this window.</p>`);
+  return layout(title, `<h1>${esc(title)}</h1><p class="${ok ? 'ok' : 'err'}" role="status">${esc(text)}</p><p>You can close this window.</p>`, 'auth');
 }
 
 export function homePage(publicUrl: string, loggedIn: boolean, devices: { device_id: string; name: string; platform: string | null; online: boolean; paused: number }[]): string {
-  const list = devices.length
-    ? `<ul>${devices.map((d) => `<li><code>${esc(d.name)}</code> ${esc(d.platform ?? '')} — ${d.online ? '<span class="ok">online</span>' : 'offline'}${d.paused ? ' (paused)' : ''}</li>`).join('')}</ul>`
-    : '<p>No devices paired yet.</p>';
+  if (!loggedIn) {
+    return layout('Relay', `<h1>BRC relay</h1><p>MCP: <code>${esc(publicUrl)}/mcp</code></p>
+<div class="row"><a class="btn primary" href="/auth/login?returnTo=/">Sign in</a></div>`, 'auth');
+  }
+  const cards = devices.length
+    ? `<div class="device-grid">${devices.map((d) => `<div class="device"><div class="device-top"><div><h3><code>${esc(d.name)}</code></h3><p>${esc(d.platform ?? 'Unknown platform')}</p></div>${d.online ? '<span class="pill ok"><span class="dot"></span>online</span>' : '<span class="pill muted"><span class="dot"></span>offline</span>'}</div>${d.paused ? '<p><span class="pill err">paused</span></p>' : ''}</div>`).join('')}</div>`
+    : '<div class="empty">No devices paired yet.</div>';
   return layout('Relay', `<h1>BRC relay</h1>
-<p>MCP: <code>${esc(publicUrl)}/mcp</code></p>
-${loggedIn ? `<p>Devices:</p>${list}<div class="row"><a href="/admin"><button class="primary">Admin</button></a><a href="/device/verify"><button class="secondary">Pair a device</button></a><a href="/auth/clients"><button class="secondary">OAuth clients</button></a><a href="/auth/logout"><button class="secondary">Sign out</button></a></div>`
-  : `<div class="row"><a href="/auth/login?returnTo=/"><button class="primary">Sign in</button></a></div>`}`);
+<div class="panel"><p class="muted" style="margin-top:0">MCP endpoint</p><p><code>${esc(publicUrl)}/mcp</code></p></div>
+<div class="section"><div class="section-head"><div><h2>Devices</h2><p>${devices.length} paired device${devices.length === 1 ? '' : 's'}</p></div></div>${cards}</div>
+<div class="row"><a class="btn primary" href="/admin">Admin</a><a class="btn secondary" href="/device/verify">Pair a device</a><a class="btn secondary" href="/auth/clients">OAuth clients</a><a class="btn secondary" href="/auth/logout">Sign out</a></div>`);
 }
 
 /** Shown to an unauthenticated visitor whose OAuth client or callback is not registered. Nothing is registered here. */
@@ -68,7 +80,7 @@ export function oauthClientRecoveryPage(clientId: string, redirectUri: string, r
 <p>An application asked to connect to your relay, but this client or callback address is not registered. Nothing has been approved.</p>
 <p>Callback host: <strong>${esc(host)}</strong></p><p>Client ID: <code>${esc(clientId)}</code><br>Full callback: <code>${esc(redirectUri)}</code></p>
 <p class="err">Only approve a website you trust to receive authorization codes for your devices.</p>
-<div class="row"><a href="${esc(recoveryPath)}"><button class="primary">Review request as admin</button></a></div>`);
+<div class="row"><a class="btn primary" href="${esc(recoveryPath)}">Review request as admin</a></div>`, 'auth');
 }
 
 export function clientsPage(clients: { client_id: string; name: string; redirect_uris: string[]; hasSecret: boolean; created_at: number }[], recovery?: { authorizeUrl: string; clientId: string; redirectUri: string }, feedback?: { ok: boolean; message: string }): string {
@@ -80,14 +92,15 @@ export function clientsPage(clients: { client_id: string; name: string; redirect
 <form method="post" action="/auth/clients/import"><input type="hidden" name="authorization_url" value="${esc(recovery.authorizeUrl)}">
 <label for="rc-name">Display name (optional)</label><input id="rc-name" name="client_name" maxlength="80" placeholder="ChatGPT">
 <label for="rc-pw">Confirm your admin password</label><input id="rc-pw" name="password" type="password" autocomplete="current-password" required>
-<label><input type="checkbox" name="trust" value="yes" required> I recognize and trust <strong>${esc(recoveryHost)}</strong></label>
+<label for="rc-trust"><input id="rc-trust" type="checkbox" name="trust" value="yes" required> I recognize and trust <strong>${esc(recoveryHost)}</strong></label>
 <div class="row"><button class="primary" type="submit">Approve callback</button></div></form></div>` : '';
-  const note = feedback ? `<p class="${feedback.ok ? 'ok' : 'err'}" role="status">${esc(feedback.message)}</p>` : '';
+  const note = feedback ? `<div class="panel" role="status"><p class="${feedback.ok ? 'ok' : 'err'}" style="margin:0">${esc(feedback.message)}</p></div>` : '';
   const rows = clients.length
-    ? `<ul>${clients.map((c) => `<li><strong>${esc(c.name)}</strong><br><code>${esc(c.client_id)}</code>${c.hasSecret ? ' · confidential' : ' · public (PKCE)'}<br><small>${c.redirect_uris.map(esc).join('<br>')}</small>
-<form method="post" action="/auth/clients/delete" style="display:inline"><input type="hidden" name="client_id" value="${esc(c.client_id)}"><button class="secondary danger" style="padding:4px 10px;margin-top:6px" onclick="return confirm('Delete client and revoke its tokens?')">Delete</button></form></li>`).join('')}</ul>`
-    : '<p>No OAuth clients yet. ChatGPT and Claude register automatically when you connect the MCP endpoint.</p>';
-  return layout('OAuth clients', `<h1>OAuth clients</h1>
-<p>These clients are created automatically through OAuth Dynamic Client Registration. No custom callback URL is required here.</p>
-${note}${review}${rows}<p><a href="/admin">Back</a></p>`);
+    ? `<div class="device-grid">${clients.map((c) => `<div class="device"><div class="device-top"><div><h3>${esc(c.name)}</h3><p><code>${esc(c.client_id)}</code></p></div><span class="pill">${c.hasSecret ? 'Confidential' : 'Public (PKCE)'}</span></div>
+<p><small>${c.redirect_uris.map(esc).join('<br>')}</small></p>
+<form method="post" action="/auth/clients/delete"><input type="hidden" name="client_id" value="${esc(c.client_id)}"><div class="actions"><button class="secondary danger" onclick="return confirm('Delete client and revoke its tokens?')">Delete</button></div></form></div>`).join('')}</div>`
+    : '<div class="empty">No OAuth clients yet. ChatGPT and Claude register automatically when you connect the MCP endpoint.</div>';
+  return layout('OAuth clients', `<div class="section-head"><div><h1>OAuth clients</h1>
+<p>These clients are created automatically through OAuth Dynamic Client Registration. No custom callback URL is required here.</p></div><a class="btn secondary" href="/admin">Back</a></div>
+${note}${review}${rows}`);
 }
