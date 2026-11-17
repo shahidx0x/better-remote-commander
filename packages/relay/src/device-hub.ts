@@ -58,6 +58,8 @@ export class DeviceHub {
   onHello?: (device: DeviceInfo, tools: ToolDefinition[]) => void;
   /** Called with every (sanitised) plugin report, e.g. to persist the last-known list. */
   onPlugins?: (deviceId: string, plugins: PluginStatusSummary[]) => void;
+  /** Exact UTF-8 payload bytes of tool call/result frames per owner. Counts only, no content; observer errors are swallowed. */
+  onWireTraffic?: (ownerId: string, direction: 'to-agent' | 'from-agent', bytes: number) => void;
 
   constructor(private readonly relayVersion: string, private readonly log: (l: string, m: string) => void) {
     this.heartbeat = setInterval(() => this.tick(), DEFAULTS.pingIntervalMs);
@@ -116,6 +118,7 @@ export class DeviceHub {
         clearTimeout(p.timer);
         p.cleanup();
         const resultBytes = Buffer.isBuffer(raw) ? raw.length : Array.isArray(raw) ? raw.reduce((n, b) => n + b.length, 0) : (raw as ArrayBuffer).byteLength;
+          try { this.onWireTraffic?.(dev.ownerId, 'from-agent', resultBytes); } catch { /* telemetry must not alter tool execution */ }
         if (msg.error) p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
         else if (resultBytes > RESULT_FORWARD_LIMIT) {
           // Protects the MCP stream even when the agent is old and has no result cap.
@@ -196,7 +199,8 @@ export class DeviceHub {
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, socket: dev.socket, cleanup });
       opts.signal?.addEventListener('abort', abort, { once: true });
-      this.sendTo(dev.socket, { type: 'call', id, tool, args, client: opts.client, timeoutMs });
+      const sentBytes = this.sendTo(dev.socket, { type: 'call', id, tool, args, client: opts.client, timeoutMs });
+      if (sentBytes) try { this.onWireTraffic?.(dev.ownerId, 'to-agent', sentBytes); } catch { /* observer failure must not interrupt execution */ }
     });
   }
 
@@ -254,9 +258,9 @@ export class DeviceHub {
     }
   }
 
-  private sendTo(socket: WebSocket, msg: RelayMessage): void {
-    if (socket.readyState !== socket.OPEN) return;
-    try { socket.send(JSON.stringify(msg)); } catch { socket.terminate(); }
+  private sendTo(socket: WebSocket, msg: RelayMessage): number {
+    if (socket.readyState !== socket.OPEN) return 0;
+    try { const frame = JSON.stringify(msg); socket.send(frame); return this.onWireTraffic ? Buffer.byteLength(frame) : 0; } catch { socket.terminate(); return 0; }
   }
 
   close(): void {

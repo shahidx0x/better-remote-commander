@@ -63,7 +63,7 @@ test('enabled estimator aggregates counts per user/day in a worker, batches writ
     assert.equal(d.reports,7);assert.ok(d.input_tokens>0&&d.output_tokens>0);
     assert.equal(store.mcpEstimateDays('u2','2000-01-01')[0].reports,1);
     const cols=store.db.prepare('PRAGMA table_info(mcp_estimate_daily)').all().map(c=>c.name).sort();
-    assert.deepEqual(cols,['calls','day','input_tokens','output_tokens','partial_calls','user_id']);
+    assert.deepEqual(cols,['calls','day','from_agent_bytes','input_tokens','matched_calls','output_tokens','partial_calls','to_agent_bytes','universal_calls','user_id']);
     assert.equal(store.db.prepare('SELECT COUNT(*) n FROM mcp_estimate_daily').get().n,2,'one row per user/day');
   }finally{store.close();}
   for(const f of readdirSync(dir))assert.ok(!readFileSync(path.join(dir,f)).includes(SECRET),'no tool content on disk ('+f+')');

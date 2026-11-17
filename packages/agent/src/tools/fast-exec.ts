@@ -29,7 +29,7 @@ export interface FastExecPlan {
   windowsVerbatim?: boolean;
   /** Environment to use instead of the caller's (login env for Unix shells). */
   env?: NodeJS.ProcessEnv;
-  kind: 'cmd' | 'cached-login-env';
+  kind: 'native' | 'cmd' | 'cached-login-env';
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +97,8 @@ const PS_ALIASES_AND_CMD_BUILTINS = new Set([
 ]);
 
 const WIN_EXEC_EXTS = ['.exe', '.com', '.cmd', '.bat'];
+const NATIVE_EXTS = new Set(['.exe', '.com']);
+const NATIVE_ARGV = /^[A-Za-z0-9_.:\\\/-]+(?:[ \t]+[A-Za-z0-9_.:\\\/-]+)*$/;
 
 function windowsPlan(shellName: string, command: string): FastExecPlan | null {
   if (shellName !== 'powershell' && shellName !== 'pwsh') return null;
@@ -113,6 +115,15 @@ function windowsPlan(shellName: string, command: string): FastExecPlan | null {
   const exts = pathExt.length ? pathExt : WIN_EXEC_EXTS;
   const resolved = findOnPath(prog, process.env.PATH ?? process.env.Path, exts);
   if (!resolved || !WIN_EXEC_EXTS.includes(path.extname(resolved).toLowerCase())) return null;
+  // Native launch (skips cmd.exe) ONLY when it is provably equivalent: a bare program name that
+  // resolved to an absolute .exe/.com on PATH, and arguments made solely of characters that need no
+  // quoting for CreateProcess and mean nothing to cmd.exe (no quotes, & | < > ( ) % ^ ! = , ; spaces
+  // inside a token, wildcards). Everything else keeps the cmd.exe path. PS_SPECIAL above already
+  // rejected the shell metacharacters; this allow-list is the second, stricter gate.
+  if (NATIVE_EXTS.has(path.extname(resolved).toLowerCase()) && path.isAbsolute(resolved) &&
+      !/[\\/]/.test(prog) && NATIVE_ARGV.test(command.trim())) {
+    return { executable: resolved, args: command.trim().split(/[ \t]+/).slice(1), kind: 'native' };
+  }
   const comspec = process.env.COMSPEC || 'cmd.exe';
   // /d: skip AutoRun registry commands; /s: strip exactly the outer quotes we add.
   return { executable: comspec, args: ['/d', '/s', '/c', `"${command}"`], windowsVerbatim: true, kind: 'cmd' };

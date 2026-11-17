@@ -70,7 +70,7 @@ export function visibleMcpText(tool: string, args: unknown, result: unknown): { 
   return { modelInputText: inp.parts.join(''), modelOutputText: out.parts.join(''), partial: inp.partial || out.partial };
 }
 
-type Reply = { id: number; input: number; output: number; partial: boolean };
+type Reply = { id: number; input: number; output: number; partial: boolean; matched?: boolean };
 type Job = { user_id: string; day: string };
 
 export const mcpEstimatesEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => env.BRC_MCP_TOKEN_ESTIMATES === '1';
@@ -101,7 +101,11 @@ export class McpTrafficEstimator {
   private merge(d: McpEstimateDelta): void {
     const key = d.user_id + '|' + d.day;
     const e = this.pending.get(key);
-    if (e) { e.input_tokens += d.input_tokens; e.output_tokens += d.output_tokens; e.calls += d.calls; e.partial_calls += d.partial_calls; }
+    if (e) {
+      e.input_tokens += d.input_tokens; e.output_tokens += d.output_tokens; e.calls += d.calls; e.partial_calls += d.partial_calls;
+      e.to_agent_bytes = (e.to_agent_bytes ?? 0) + (d.to_agent_bytes ?? 0); e.from_agent_bytes = (e.from_agent_bytes ?? 0) + (d.from_agent_bytes ?? 0);
+      e.matched_calls = (e.matched_calls ?? 0) + (d.matched_calls ?? 0); e.universal_calls = (e.universal_calls ?? 0) + (d.universal_calls ?? 0);
+    }
     else this.pending.set(key, { ...d });
   }
   private missed(job: Job): void { this.merge({ ...job, input_tokens: 0, output_tokens: 0, calls: 1, partial_calls: 1 }); }
@@ -116,10 +120,21 @@ export class McpTrafficEstimator {
     if (!job) return;
     this.outstanding.delete(r.id);
     if (!Number.isSafeInteger(r.input) || !Number.isSafeInteger(r.output) || r.input < 0 || r.output < 0) return this.missed(job);
-    this.merge({ ...job, input_tokens: r.input, output_tokens: r.output, calls: 1, partial_calls: r.partial ? 1 : 0 });
+    this.merge({ ...job, input_tokens: r.input, output_tokens: r.output, calls: 1, partial_calls: r.partial ? 1 : 0, matched_calls: r.matched ? 1 : 0, universal_calls: r.matched ? 0 : 1 });
   }
-  /** Called after tool completion; fire-and-forget, never throws. */
-  track(userId: string, tool: string, args: unknown, result: unknown): void {
+  /**
+   * Exact UTF-8 payload bytes of an agent call/result frame (DeviceHub.onWireTraffic). O(1) in-memory
+   * aggregate, written in batches with the estimates. Counts only; never throws; no-op when disabled.
+   */
+  trackWireBytes(userId: string, direction: 'to-agent' | 'from-agent', bytes: number): void {
+    try {
+      if (!this.enabled || this.stopping || !Number.isSafeInteger(bytes) || bytes < 0) return;
+      this.merge({ user_id: userId, day: utcDay(Date.now()), input_tokens: 0, output_tokens: 0, calls: 0, partial_calls: 0,
+        to_agent_bytes: direction === 'to-agent' ? bytes : 0, from_agent_bytes: direction === 'from-agent' ? bytes : 0 });
+    } catch { /* never affect tool execution */ }
+  }
+  /** Called after tool completion; fire-and-forget, never throws. modelHint is an unverified X-BRC-Model value. */
+  track(userId: string, tool: string, args: unknown, result: unknown, modelHint?: string): void {
     try {
       if (!this.enabled || this.stopping) return;
       const job = { user_id: userId, day: utcDay(Date.now()) };
@@ -131,7 +146,7 @@ export class McpTrafficEstimator {
         try {
           const t = visibleMcpText(tool, args, result);
           if (!this.worker) { this.outstanding.delete(id); this.missed(job); return; }
-          this.worker.postMessage({ id, model_input_text: t.modelInputText, model_output_text: t.modelOutputText, partial: t.partial });
+          this.worker.postMessage({ id, model_input_text: t.modelInputText, model_output_text: t.modelOutputText, partial: t.partial, model_hint: typeof modelHint === 'string' ? modelHint.slice(0, 100) : undefined });
         } catch { this.outstanding.delete(id); this.missed(job); }
       });
     } catch { /* never affect tool execution */ }
