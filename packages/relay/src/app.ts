@@ -72,6 +72,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const admin = store.upsertUser(cfg.adminUser, cfg.adminPassword);
   const sessions = new Sessions(cfg.sessionSecret, cfg.publicUrl.startsWith('https://'));
   const hub = new DeviceHub(cfg.relayVersion, log);
+  if (mcpEstimatesEnabled()) hub.onWireTraffic = (owner, direction, bytes) => estimator.trackWireBytes(owner, direction, bytes);
   const registry = RegistryClient.fromEnv();
   const publicUrl = new URL(cfg.publicUrl);
   // Opt-in features, all OFF unless their env var is set to 1.
@@ -325,7 +326,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
   const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
-    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log }, access, { skills: skillsOn, estimator, toolProfile });
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log }, access, { skills: skillsOn, estimator, toolProfile, modelHint: typeof req.headers['x-brc-model'] === 'string' ? req.headers['x-brc-model'] : undefined });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {

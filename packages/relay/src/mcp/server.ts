@@ -15,7 +15,7 @@ import { profileAdvertises, type ToolProfile } from './tool-profiles.js';
 
 export type McpContext = InvokeContext;
 /** Opt-in extras; both default off. */
-export interface McpFeatures { skills?: boolean; estimator?: McpTrafficEstimator; toolProfile?: ToolProfile }
+export interface McpFeatures { skills?: boolean; estimator?: McpTrafficEstimator; modelHint?: string; toolProfile?: ToolProfile }
 
 export const DEVICE_ID_PROP = {
   deviceId: { type: 'string', description: 'Target device id (from list_devices). Required when more than one device is online; may be omitted when only one device is connected.' },
@@ -97,7 +97,7 @@ export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpCont
     }
     const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined, { signal: extra.signal });
     if (!out.ok) return { content: [{ type: 'text', text: out.message }], isError: true };
-    features.estimator?.track(ctx.userId, name, args, out.result);
+    features.estimator?.track(ctx.userId, name, args, out.result, features.modelHint);
     // structuredContent carries machine-readable error codes / continuation hints from the agent.
     return { content: out.result.content, isError: out.result.isError ?? false,
       ...(out.result.structuredContent ? { structuredContent: out.result.structuredContent } : {}),
