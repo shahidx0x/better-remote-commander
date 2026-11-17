@@ -1,6 +1,6 @@
 {
     "name":  "brc-relay",
-    "version":  "2.0.13",
+    "version":  "2.0.14",
     "description":  "BRC relay - self-hosted MCP + REST server that routes tool calls to paired device agents",
     "license":  "MIT",
     "type":  "module",
