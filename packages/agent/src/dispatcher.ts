@@ -21,6 +21,8 @@ import { EDIT_TOOL_HANDLERS, buildEditToolDefinitions } from './tools/edit-tools
 import { DEV_EXTRA_TOOL_HANDLERS, buildDevExtraToolDefinitions } from './tools/dev-extras.js';
 import { invalidateNavCaches } from './runtime/nav-cache.js';
 import { WORKER_TOOL_HANDLERS, buildWorkerToolDefinitions } from './tools/worker-tools.js';
+import { OPS_TOOL_HANDLERS, buildOpsToolDefinitions, setBatchInvoker } from './tools/ops-tools.js';
+import { recordToolFailure } from './runtime/failure-log.js';
 import { workerCoordinator } from './runtime/worker-coordination.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
@@ -86,6 +88,8 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(DEV_EXTRA_TOOL_HANDLERS),
   // Optional host-native worker coordination (RAM-only)
   ...Object.entries(WORKER_TOOL_HANDLERS),
+  // Operations: batch_tools, agent_status, cancel_operation
+  ...Object.entries(OPS_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
@@ -102,6 +106,7 @@ export function listTools(): ToolDefinition[] {
       ...buildEditToolDefinitions(),
       ...buildCheckToolDefinitions(),
       ...buildDevExtraToolDefinitions(),
+      ...buildOpsToolDefinitions(),
     ]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && (!isTermuxRuntime() || availableOnTermux(t.name)));
   }
@@ -159,7 +164,15 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   const durationMs = Math.round(performance.now() - start);
   const code = (out.structuredContent?.error as { code?: string } | undefined)?.code;
   activity.tool(out.isError ? 'ERROR' : 'OK', name, parent.id, durationMs, code);
+  // Opt-in (BRC_ERROR_LOG=1) metadata-only failure log; unknown tool names are never recorded (caller-controlled text).
+  if (out.isError) recordToolFailure({ tool: TOOL_HANDLERS.has(name) ? name : 'unknown', code: code ?? 'TOOL_FAILED', durationMs, callId: parent.id });
   return { ...out, _meta: { ...(out as { _meta?: Record<string, unknown> })._meta, callId: parent.id, durationMs } } as ToolResult;
 }
 // Job steps run through the same dispatcher (validation, usage tracking, error wrapping).
-setJobToolExecutor(async (name, args) => (await callTool(name, args)) as ServerResult);
+setJobToolExecutor(async (name, args) => {
+  // A job step must not run batch_tools (batches and jobs never nest).
+  if (name === 'batch_tools') return failure(new AgentError('NESTED_BATCH', 'batch_tools cannot be run from a job step.')) as ServerResult;
+  return (await callTool(name, args)) as ServerResult;
+});
+// batch_tools runs its nested calls through the same dispatcher (validation, locks, usage tracking, error wrapping).
+setBatchInvoker(callTool);

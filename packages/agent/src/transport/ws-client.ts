@@ -11,6 +11,8 @@ import {
 } from 'brc-shared';
 import { withCallContext } from '../context.js';
 import { AgentError, failure } from '../runtime/errors.js';
+import { OperationScheduler, cancelOperation } from '../runtime/operations.js';
+import { QUEUE_BYPASS_TOOLS } from '../tools/ops-tools.js';
 import { PluginAdmin } from './plugin-admin.js';
 import { boundedAgentFrame } from './result-budget.js';
 
@@ -28,7 +30,14 @@ export interface WsClientOptions {
   onUnauthorized?: () => Promise<boolean>;
   /** Called after each successful connect (hello sent). */
   onConnected?: () => void;
+  /** Max tool calls executing at once (default 4, env BRC_MAX_CONCURRENCY, hard cap 16). */
+  concurrency?: number;
+  /** Max calls waiting for a slot before BUSY is returned (default 32). */
+  queueLimit?: number;
 }
+
+export const MAX_CONCURRENCY_CAP = 16;
+const DEADLINE_MARGIN_MS = 5_000;
 
 export class WsClient {
   private ws: WebSocket | null = null;
@@ -43,6 +52,8 @@ export class WsClient {
   private callsInFlight = 0;
   private lastUnauthorized = false;
   private unauthorizedCount = 0;
+  /** Bounded admission: deadlines include queue time; agent_status/cancel_operation/stop_search/force_terminate bypass it. */
+  private readonly scheduler: OperationScheduler;
   private readonly log: NonNullable<WsClientOptions['log']>;
   readonly wsUrl: string;
   /** Plugin status reports + relay-driven plugin administration (protocol additions, v1-compatible). */
@@ -50,6 +61,8 @@ export class WsClient {
 
   constructor(private readonly opts: WsClientOptions) {
     this.log = opts.log ?? (() => {});
+    const wanted = Math.floor(opts.concurrency ?? (Number(process.env.BRC_MAX_CONCURRENCY) || 4));
+    this.scheduler = new OperationScheduler(Math.min(MAX_CONCURRENCY_CAP, Math.max(1, wanted)), Math.max(0, opts.queueLimit ?? 32));
     this.wsUrl = WsClient.toWsUrl(opts.relayUrl);
     this.plugins = new PluginAdmin((m) => this.send(m), this.log);
   }
@@ -76,6 +89,7 @@ export class WsClient {
     this.stopped = true;
     this.welcomed = false;
     this.plugins.stop();
+    this.scheduler.cancelAll('Agent stopping.');
     this.clearPongTimer();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
@@ -115,6 +129,7 @@ export class WsClient {
       this.clearPongTimer();
       this.ws = null;
       this.welcomed = false;
+      this.scheduler.cancelQueued('Relay disconnected before this call started.'); // results could not be delivered anyway
       if (this.stopped) return;
       if (code === 4401 || code === 4403 || this.lastUnauthorized) {
         this.lastUnauthorized = false;
@@ -161,7 +176,7 @@ export class WsClient {
         this.send({ type: 'pong', ts: msg.ts });
         return;
       case 'cancel':
-        if (typeof msg.id === 'string') this.inflight.get(msg.id)?.abort(new AgentError('CANCELLED', 'Cancelled by the relay.'));
+        if (typeof msg.id === 'string' && !cancelOperation(msg.id)) this.inflight.get(msg.id)?.abort(new AgentError('CANCELLED', 'Cancelled by the relay.'));
         return;
       case 'call':
         return this.handleCall(msg);
@@ -180,11 +195,25 @@ export class WsClient {
       this.send({ type: 'result', id: msg.id, result: failure(new AgentError('SETTINGS_OPEN', 'Local connection settings are open on the device; this call was not executed. Retry shortly.', true), msg.id) });
       return;
     }
+    if (this.inflight.has(msg.id)) { this.send({ type: 'result', id: msg.id, result: failure(new AgentError('DUPLICATE_CALL', 'Duplicate call id; not executed again.'), msg.id) }); return; }
     this.callsInFlight++;
     const controller = new AbortController();
     this.inflight.set(msg.id, controller);
+    const received = performance.now();
+    let started = received;
     try {
-      const result = await withCallContext({ id: msg.id, client: msg.client ?? null, remote: true, signal: controller.signal }, () => this.opts.callTool(msg.tool, msg.args ?? {}));
+      // The relay gives up at timeoutMs; answer slightly earlier with a structured TIMEOUT. Queue time counts.
+      const relayTimeout = Math.min(Number(msg.timeoutMs) > 0 ? Number(msg.timeoutMs) : DEFAULTS.callTimeoutMs, 600_000);
+      const timeout = Math.max(1_000, relayTimeout - DEADLINE_MARGIN_MS);
+      const deadline = Date.now() + timeout;
+      const run = (signal: AbortSignal) => {
+        started = performance.now();
+        return withCallContext({ id: msg.id, client: msg.client ?? null, remote: true, signal, deadline }, () => this.opts.callTool(msg.tool, msg.args ?? {}));
+      };
+      let result = QUEUE_BYPASS_TOOLS.has(msg.tool)
+        ? await run(controller.signal)
+        : await this.scheduler.run(msg.id, msg.tool, timeout, run);
+      if (result && typeof result === 'object') result = { ...(result as object), _meta: { ...((result as { _meta?: object })._meta), agentQueueMs: Math.max(0, Math.round(started - received)) } };
       this.send({ type: 'result', id: msg.id, result: result as never });
     } catch (err) {
       this.send({ type: 'result', id: msg.id, result: failure(err, msg.id) });
