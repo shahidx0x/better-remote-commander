@@ -53,7 +53,7 @@ export function loadConfig(): RelayConfig {
     sessionSecret: env.BRC_SESSION_SECRET ?? '',
     adminUser: env.BRC_ADMIN_USER ?? 'admin',
     adminPassword: env.BRC_ADMIN_PASSWORD ?? '',
-    relayVersion: '2.0.12',
+    relayVersion: '2.0.13',
   };
 }
 
