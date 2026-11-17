@@ -1,6 +1,6 @@
 {
     "name":  "brc-shared",
-    "version":  "2.0.9",
+    "version":  "2.0.10",
     "description":  "Better Remote Commander (BRC) shared protocol types and tool schemas",
     "license":  "MIT",
     "type":  "module",

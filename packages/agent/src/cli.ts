@@ -34,7 +34,7 @@ import { listenForTerminalShortcuts } from './terminal-shortcuts.js';
 import { createTerminalPrompts, resolveStartupConnection, shouldPromptForConnection, type ConnectionOptions } from './terminal-setup.js';
 import { consoleBanner, controlHint, connectionPanel, recentActivity, type AgentTerminal } from './terminal-ui.js';
 
-const AGENT_VERSION = '2.0.9';
+const AGENT_VERSION = '2.0.10';
 
 function arg(name: string, env?: string, def?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
