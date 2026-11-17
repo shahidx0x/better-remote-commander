@@ -6,6 +6,7 @@ import { ServerResult } from '../types.js';
 import { analyzeProcessState, cleanProcessOutput, formatProcessStateMessage, ProcessState } from '../utils/process-detection.js';
 import * as os from 'os';
 import { configManager } from '../config-manager.js';
+import { selectRunCommandShell } from '../../tools/command-shell.js';
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
@@ -168,6 +169,23 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
     }
   }
 
+  const configuredShell=shellUsed;
+  const shellChoice=selectRunCommandShell(commandToRun,configuredShell,parsed.data.shell!==undefined);
+  if(shellChoice.error){
+    const suggested=shellChoice.suggestedShell
+      ? {command:commandToRun,shell:shellChoice.suggestedShell,timeout_ms:parsed.data.timeout_ms}
+      : null;
+    return {
+      isError:true,
+      content:[{type:'text',text:'SHELL_SYNTAX: '+shellChoice.error+
+        (suggested?'\nSUGGESTED CALL (not executed): start_process('+JSON.stringify(suggested)+')':'')}],
+      structuredContent:{error:{code:'SHELL_SYNTAX',message:shellChoice.error,retryable:false},
+        commandExecuted:false,shell:configuredShell,platform:process.platform,
+        recovery:{automaticRetry:false,suggestion:shellChoice.error,
+          ...(suggested?{next:{tool:'start_process',args:suggested}}:{})}}
+    };
+  }
+  shellUsed=shellChoice.shell;
   const result = await terminalManager.executeCommand(
     commandToRun,
     parsed.data.timeout_ms,
@@ -177,8 +195,11 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
 
   if (result.pid === -1) {
     return {
-      content: [{ type: "text", text: result.output }],
-      isError: true,
+      content: [{type:'text',text:'SHELL_START_FAILED: '+result.output+'\nNEXT ACTION: Check shell executable, command permissions and PATH. No process started.'}],
+      isError:true,
+      structuredContent:{error:{code:'SHELL_START_FAILED',message:result.output.slice(0,1200),retryable:false},
+        commandExecuted:false,shell:shellUsed,platform:process.platform,
+        recovery:{automaticRetry:false,suggestion:'Check shell, PATH and command permissions; correct the failure before retrying.'}},
     };
   }
 
@@ -203,7 +224,7 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
   return {
     content: [{
       type: "text",
-      text: `Process started with PID ${result.pid} (shell: ${shellUsed})\nInitial output:\n${result.output}${statusMessage}${timingMessage}`
+      text: `Process started with PID ${result.pid} (shell: ${shellUsed})\n${shellChoice.reason?'Shell selection: '+shellChoice.reason+'\n':''}Initial output:\n${result.output}${statusMessage}${timingMessage}`
     }],
   };
 }
