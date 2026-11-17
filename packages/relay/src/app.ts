@@ -375,7 +375,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const devices = store.listDevices(userId).map((d) => ({ ...d, online: online.has(d.device_id) }));
     const names = new Map(devices.map((d) => [d.device_id, d.name]));
     const audit = store.recentAudit(userId, 100).map((a) => ({ ts: a.ts, device: names.get(a.device_id ?? '') ?? (a.device_id ?? '?').slice(0, 8), client: a.client, tool: a.tool, ok: a.ok, ms: a.ms, error: a.error }));
-    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, store.auditStats(userId), pluginUi.adminSections(req, userId), pluginUi.flash(req), usageSection(store, userId) + (skillsOn ? '<div class="row"><a href="/admin/skills"><button class="secondary">Skill library</button></a></div>' : '')));
+    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, store.auditStats(userId), pluginUi.adminSections(req, userId), pluginUi.flash(req), usageSection(store, userId)));
   });
   app.post('/admin/device', requireLogin, requireCsrf, (req, res) => {
     const userId = currentUser(req)!;
