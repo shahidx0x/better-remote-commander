@@ -11,11 +11,12 @@ import { invokeTool, listUserDevices, type InvokeContext } from './invoke.js';
 import { PLUGIN_RELAY_TOOLS, handlePluginRelayTool, type PluginToolDeps } from './plugin-tools.js';
 import { SKILL_RELAY_TOOLS, SKILL_TOOL_NAMES, SKILL_READ_ONLY_TOOLS, handleSkillRelayTool } from './skill-tools.js';
 import type { McpTrafficEstimator } from '../features/mcp-estimates.js';
+import { SEARCH_SKILLS_CATALOG_TOOL, handleCatalogSearch, type SkillsCatalog } from '../features/skills-catalog.js';
 import { profileAdvertises, type ToolProfile } from './tool-profiles.js';
 
 export type McpContext = InvokeContext;
 /** Opt-in extras; both default off. */
-export interface McpFeatures { skills?: boolean; estimator?: McpTrafficEstimator; modelHint?: string; toolProfile?: ToolProfile }
+export interface McpFeatures { skills?: boolean; estimator?: McpTrafficEstimator; modelHint?: string; catalog?: SkillsCatalog; toolProfile?: ToolProfile }
 
 export const DEVICE_ID_PROP = {
   deviceId: { type: 'string', description: 'Target device id (from list_devices). Required when more than one device is online; may be omitted when only one device is connected.' },
@@ -65,13 +66,15 @@ export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
 export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string, plugins?: Omit<PluginToolDeps, 'hub' | 'store'>, access: 'read' | 'full' = 'full', features: McpFeatures = {}): Server {
   const skills = !!features.skills;
   const profile: ToolProfile = features.toolProfile ?? 'full'; // advertising only; call handling below ignores it
+  // skills.sh search exists only when skills are on AND a catalog token is configured; never on read-only links.
+  const catalogTools = skills && features.catalog?.configured ? [SEARCH_SKILLS_CATALOG_TOOL] : [];
   const allowedReadOnly = (n: string) => readOnlyToolAllowed(n) || (skills && SKILL_READ_ONLY_TOOLS.has(n));
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { online, tools } = liveTools(hub, store, ctx.userId);
-    const relayTools = [...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : [])].filter((t) => (access !== 'read' || allowedReadOnly(t.name)) && profileAdvertises(profile, t.name));
-    const reserved = new Set([...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : [])].map((t) => t.name));
+    const relayTools = [...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : []), ...catalogTools].filter((t) => (access !== 'read' || allowedReadOnly(t.name)) && profileAdvertises(profile, t.name));
+    const reserved = new Set([...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : []), SEARCH_SKILLS_CATALOG_TOOL].map((t) => t.name));
     const visible = tools.filter((t) => !reserved.has(t.name) && (access !== 'read' || readOnlyToolAllowed(t.name)) && profileAdvertises(profile, t.name))
       .map((t) => (access === 'read' ? { ...t, annotations: { ...t.annotations, readOnlyHint: true, destructiveHint: false } } : t));
     const note = access === 'read' ? ' THIS CONNECTION IS READ-ONLY: only the advertised read tools may be used.' : '';
@@ -87,6 +90,7 @@ export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpCont
     if (name === 'list_devices') {
       return { content: [{ type: 'text', text: JSON.stringify({ devices: listUserDevices(hub, store, ctx.userId) }, null, 2) }] };
     }
+    if (name === SEARCH_SKILLS_CATALOG_TOOL.name && catalogTools.length) return handleCatalogSearch(features.catalog!, args as Record<string, unknown> | undefined);
     if (skills && SKILL_TOOL_NAMES.has(name)) {
       const handled = handleSkillRelayTool(store, ctx, name, args as Record<string, unknown> | undefined);
       if (handled) return handled;

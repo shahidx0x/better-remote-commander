@@ -31,6 +31,7 @@ import { RegistryClient } from './plugins/registry.js';
 import { registerPluginRoutes } from './plugins/admin-routes.js';
 import { registerSkillsRoutes } from './features/skills-routes.js';
 import { registerUsageRoutes, usageSection } from './features/usage-routes.js';
+import { SkillsCatalog } from './features/skills-catalog.js';
 import { resolveToolProfile, profileAdvertises } from './mcp/tool-profiles.js';
 import { McpTrafficEstimator, mcpEstimatesEnabled } from './features/mcp-estimates.js';
 
@@ -78,6 +79,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   // Opt-in features, all OFF unless their env var is set to 1.
   const skillsOn = process.env.BRC_SKILLS === '1';
   const toolProfile = resolveToolProfile();
+  const skillsCatalog = new SkillsCatalog(); // inert without BRC_SKILLS_API_TOKEN
   const estimator = new McpTrafficEstimator(store, log, mcpEstimatesEnabled());
 
   const app = express();
@@ -326,7 +328,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
   const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
-    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log }, access, { skills: skillsOn, estimator, toolProfile, modelHint: typeof req.headers['x-brc-model'] === 'string' ? req.headers['x-brc-model'] : undefined });
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log }, access, { skills: skillsOn, estimator, toolProfile, catalog: skillsCatalog, modelHint: typeof req.headers['x-brc-model'] === 'string' ? req.headers['x-brc-model'] : undefined });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {

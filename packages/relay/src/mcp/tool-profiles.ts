@@ -22,7 +22,7 @@ export const CORE_TOOLS: readonly string[] = [
   'project_context', 'code_outline', 'read_symbol', 'find_symbols',
   'discover_checks', 'run_project_checks',
   // relay-side skill tools (only exist when skills are enabled)
-  'list_skills', 'read_skill', 'request_skill_install',
+  'list_skills', 'read_skill', 'request_skill_install', 'search_skills_catalog',
 ];
 
 /** Focused = core + plugins, workers, parallel/sandbox runs, process admin and the rest of code navigation. */
