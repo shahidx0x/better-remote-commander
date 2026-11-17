@@ -24,6 +24,19 @@ export function withDeviceId(schema: unknown): Record<string, unknown> {
   return s;
 }
 
+/** Tools a read-only private link may use: inspect files/git/search only. Nothing that writes, runs commands, kills processes or reaches plugins. */
+const READ_ONLY_TOOLS = new Set([
+  'read_file', 'read_multiple_files', 'list_directory', 'get_file_info',
+  'git_status', 'git_diff', 'git_log',
+  'start_search', 'get_more_search_results', 'stop_search', 'list_searches',
+  'ast_search',
+]);
+/** Relay-level tools a read-only link may call. */
+const READ_ONLY_RELAY_TOOLS = new Set(['list_devices', 'search_mcp_registry']);
+export function readOnlyToolAllowed(name: string): boolean {
+  return READ_ONLY_TOOLS.has(name) || READ_ONLY_RELAY_TOOLS.has(name);
+}
+
 export const LIST_DEVICES_TOOL = {
   name: 'list_devices',
   description: 'List devices paired to this relay, with online state and ids. Call this first when more than one device may be connected.',
@@ -40,18 +53,25 @@ export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
 }
 
 /** `plugins` enables the marketplace tools (search_mcp_registry, request_plugin_install). */
-export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string, plugins?: Omit<PluginToolDeps, 'hub' | 'store'>): Server {
+export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string, plugins?: Omit<PluginToolDeps, 'hub' | 'store'>, access: 'read' | 'full' = 'full'): Server {
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { online, tools } = liveTools(hub, store, ctx.userId);
-    const relayTools = plugins ? PLUGIN_RELAY_TOOLS : [];
-    const reserved = new Set(relayTools.map((t) => t.name));
-    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.` }, ...relayTools, ...tools.filter((t) => !reserved.has(t.name))] };
+    const relayTools = (plugins ? PLUGIN_RELAY_TOOLS : []).filter((t) => access !== 'read' || readOnlyToolAllowed(t.name));
+    const reserved = new Set((plugins ? PLUGIN_RELAY_TOOLS : []).map((t) => t.name));
+    const visible = tools.filter((t) => !reserved.has(t.name) && (access !== 'read' || readOnlyToolAllowed(t.name)))
+      .map((t) => (access === 'read' ? { ...t, annotations: { ...t.annotations, readOnlyHint: true, destructiveHint: false } } : t));
+    const note = access === 'read' ? ' THIS CONNECTION IS READ-ONLY: only the advertised read tools may be used.' : '';
+    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.${note}` }, ...relayTools, ...visible] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
+    // Enforced at call time, not just hidden in tools/list: a read-only link must never reach a write tool by name.
+    if (access === 'read' && (!readOnlyToolAllowed(name) || (args as { isUrl?: unknown } | undefined)?.isUrl)) {
+      return { content: [{ type: 'text', text: `READ_ONLY_CONNECTION: ${name} is not available on a read-only connection (writes, commands, plugins and URL fetches are blocked).` }], isError: true };
+    }
     if (name === 'list_devices') {
       return { content: [{ type: 'text', text: JSON.stringify({ devices: listUserDevices(hub, store, ctx.userId) }, null, 2) }] };
     }
