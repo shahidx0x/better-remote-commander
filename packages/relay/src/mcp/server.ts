@@ -50,7 +50,7 @@ export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpCont
     return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.` }, ...relayTools, ...tools.filter((t) => !reserved.has(t.name))] };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
     if (name === 'list_devices') {
       return { content: [{ type: 'text', text: JSON.stringify({ devices: listUserDevices(hub, store, ctx.userId) }, null, 2) }] };
@@ -59,9 +59,12 @@ export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpCont
       const handled = await handlePluginRelayTool({ ...plugins, hub, store }, ctx, name, args as Record<string, unknown> | undefined);
       if (handled) return handled;
     }
-    const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined);
+    const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined, { signal: extra.signal });
     if (!out.ok) return { content: [{ type: 'text', text: out.message }], isError: true };
-    return { content: out.result.content, isError: out.result.isError ?? false, _meta: { deviceId: out.deviceId, deviceName: out.deviceName } } as never;
+    // structuredContent carries machine-readable error codes / continuation hints from the agent.
+    return { content: out.result.content, isError: out.result.isError ?? false,
+      ...(out.result.structuredContent ? { structuredContent: out.result.structuredContent } : {}),
+      _meta: { ...out.result._meta, deviceId: out.deviceId, deviceName: out.deviceName } } as never;
   });
 
   return server;

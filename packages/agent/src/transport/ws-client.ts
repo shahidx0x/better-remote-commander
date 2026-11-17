@@ -36,6 +36,8 @@ export class WsClient {
   private pongTimer: NodeJS.Timeout | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private welcomed = false;
+  /** Abort controllers of calls in flight, so a relay 'cancel' can stop work that has not started or can honour the signal. */
+  private readonly inflight = new Map<string, AbortController>();
   private settingsPaused = false;
   private callsInFlight = 0;
   private lastUnauthorized = false;
@@ -157,6 +159,9 @@ export class WsClient {
         this.armPongTimer();
         this.send({ type: 'pong', ts: msg.ts });
         return;
+      case 'cancel':
+        if (typeof msg.id === 'string') this.inflight.get(msg.id)?.abort(new AgentError('CANCELLED', 'Cancelled by the relay.'));
+        return;
       case 'call':
         return this.handleCall(msg);
       case 'plugin_admin':
@@ -175,12 +180,14 @@ export class WsClient {
       return;
     }
     this.callsInFlight++;
+    const controller = new AbortController();
+    this.inflight.set(msg.id, controller);
     try {
-      const result = await withCallContext({ id: msg.id, client: msg.client ?? null, remote: true }, () => this.opts.callTool(msg.tool, msg.args ?? {}));
+      const result = await withCallContext({ id: msg.id, client: msg.client ?? null, remote: true, signal: controller.signal }, () => this.opts.callTool(msg.tool, msg.args ?? {}));
       this.send({ type: 'result', id: msg.id, result: result as never });
     } catch (err) {
       this.send({ type: 'result', id: msg.id, result: failure(err, msg.id) });
-    } finally { this.callsInFlight--; }
+    } finally { this.inflight.delete(msg.id); this.callsInFlight--; }
   }
 
   private send(msg: AgentMessage): void {

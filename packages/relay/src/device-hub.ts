@@ -37,12 +37,19 @@ export interface DeviceSummary {
 }
 
 interface Pending {
+  socket: WebSocket;
+  cleanup: () => void;
   resolve: (r: ToolResult) => void;
   reject: (e: Error) => void;
   timer: NodeJS.Timeout;
 }
 
+/** Largest tool-result frame the relay forwards to the MCP client. */
+const RESULT_FORWARD_LIMIT = 512 * 1024;
+
 export class DeviceHub {
+  /** Non-secret id, new on each relay start. Helps spot load-balancer misrouting. */
+  readonly instanceId = randomUUID().slice(0, 12);
   private devices = new Map<string, ConnectedDevice>();
   private pending = new Map<string, Pending>();
   private adminPending = new Map<string, { deviceId: string; resolve: (r: PluginAdminOutcome) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
@@ -65,6 +72,14 @@ export class DeviceHub {
       if (!msg) return;
 
       if (msg.type === 'hello') {
+        // Bound and validate the advertised catalog: a malformed or huge hello must not be stored or routed.
+        if (!msg.device || typeof msg.device.deviceId !== 'string' || !Array.isArray(msg.tools) || msg.tools.length > 256
+          || msg.tools.some((t) => !t || typeof t.name !== 'string' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(t.name)
+            || (t.description !== undefined && (typeof t.description !== 'string' || t.description.length > 32_000))
+            || !t.inputSchema || typeof t.inputSchema !== 'object')) {
+          this.sendTo(socket, { type: 'error', code: 'INVALID_HELLO', message: 'Invalid or oversized device tool catalog', fatal: true });
+          return socket.close(1008, 'invalid catalog');
+        }
         if (msg.protocol !== BRC_PROTOCOL_VERSION) {
           this.sendTo(socket, { type: 'error', code: 'PROTOCOL_MISMATCH', message: `relay speaks v${BRC_PROTOCOL_VERSION}`, fatal: true });
           return socket.close(1002, 'protocol mismatch');
@@ -88,15 +103,27 @@ export class DeviceHub {
 
       if (!deviceId) return; // ignore anything before hello
       const dev = this.devices.get(deviceId);
-      if (dev) dev.lastSeen = Date.now();
+      // Ignore late frames from a socket replaced by a newer connection: a stale pong/result
+      // must not keep the replacement 'alive' or complete its calls.
+      if (!dev || dev.socket !== socket) return;
+      dev.lastSeen = Date.now();
 
       if (msg.type === 'pong') return;
       if (msg.type === 'result') {
         const p = this.pending.get(msg.id);
-        if (!p) return;
+        if (!p || p.socket !== socket) return;
         this.pending.delete(msg.id);
         clearTimeout(p.timer);
+        p.cleanup();
+        const resultBytes = Buffer.isBuffer(raw) ? raw.length : Array.isArray(raw) ? raw.reduce((n, b) => n + b.length, 0) : (raw as ArrayBuffer).byteLength;
         if (msg.error) p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
+        else if (resultBytes > RESULT_FORWARD_LIMIT) {
+          // Protects the MCP stream even when the agent is old and has no result cap.
+          // The operation may already have completed, so never invite a blind retry.
+          const message = 'Tool response exceeded the relay 512 KiB forwarding budget. For reads request fewer lines/pages/images. For mutations inspect the current file or job state BEFORE retrying.';
+          p.resolve({ isError: true, content: [{ type: 'text', text: 'RESULT_TOO_LARGE: ' + message }],
+            structuredContent: { error: { code: 'RESULT_TOO_LARGE', message, retryable: false }, recovery: { automaticRetry: false }, truncated: true } });
+        }
         else p.resolve(msg.result ?? { content: [] });
         return;
       }
@@ -118,6 +145,12 @@ export class DeviceHub {
     });
 
     socket.on('close', () => {
+      // Calls in flight on this socket can never be answered: fail them now instead of waiting for the timeout.
+      for (const [id, p] of this.pending) {
+        if (p.socket !== socket) continue;
+        clearTimeout(p.timer); p.cleanup(); this.pending.delete(id);
+        p.reject(new Error('DEVICE_DISCONNECTED: operation outcome may be unknown; do not blindly retry mutations'));
+      }
       if (deviceId && this.devices.get(deviceId)?.socket === socket) {
         this.devices.delete(deviceId);
         this.log('info', `device offline: ${deviceId}`);
@@ -132,18 +165,37 @@ export class DeviceHub {
   }
 
   /** Route a tool call to a device. Throws if offline or timed out. */
-  call(deviceId: string, tool: string, args: Record<string, unknown>, opts: { client?: { name?: string; version?: string }; timeoutMs?: number } = {}): Promise<ToolResult> {
+  call(deviceId: string, tool: string, args: Record<string, unknown>, opts: { client?: { name?: string; version?: string }; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ToolResult> {
     const dev = this.devices.get(deviceId);
     if (!dev) return Promise.reject(new Error(`DEVICE_OFFLINE: ${deviceId}`));
     if (!dev.tools.some((t) => t.name === tool)) return Promise.reject(new Error(`UNKNOWN_TOOL: ${tool}`));
+    if (opts.signal?.aborted) return Promise.reject(new Error('CALL_CANCELLED'));
+    // Bounded admission: global, per-device and outbound-buffer limits keep one client from exhausting the relay.
+    if (this.pending.size >= 512) return Promise.reject(new Error('RELAY_BUSY'));
+    let onDevice = 0;
+    for (const p of this.pending.values()) if (p.socket === dev.socket) onDevice++;
+    if (onDevice >= 64) return Promise.reject(new Error('DEVICE_BUSY: too many outstanding calls for this device'));
+    if (dev.socket.readyState !== dev.socket.OPEN) return Promise.reject(new Error(`DEVICE_OFFLINE: ${deviceId}`));
+    if (dev.socket.bufferedAmount > 8 * 1024 * 1024) return Promise.reject(new Error('RELAY_BACKPRESSURE: outbound device buffer is full; request was not dispatched'));
+    if (Buffer.byteLength(JSON.stringify(args)) > 16 * 1024 * 1024) return Promise.reject(new Error('CALL_TOO_LARGE: split the operation into smaller bounded requests'));
     const id = randomUUID();
     const timeoutMs = opts.timeoutMs ?? DEFAULTS.callTimeoutMs;
     return new Promise<ToolResult>((resolve, reject) => {
+      const abort = () => {
+        const p = this.pending.get(id); if (!p) return;
+        this.pending.delete(id); clearTimeout(p.timer); p.cleanup();
+        this.sendTo(dev.socket, { type: 'cancel', id, reason: 'client cancelled' });
+        reject(new Error('CALL_CANCELLED'));
+      };
+      const cleanup = () => opts.signal?.removeEventListener('abort', abort);
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        cleanup();
+        this.sendTo(dev.socket, { type: 'cancel', id, reason: 'relay deadline' });
         reject(new Error(`CALL_TIMEOUT: ${tool} after ${timeoutMs} ms`));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, socket: dev.socket, cleanup });
+      opts.signal?.addEventListener('abort', abort, { once: true });
       this.sendTo(dev.socket, { type: 'call', id, tool, args, client: opts.client, timeoutMs });
     });
   }
@@ -203,13 +255,15 @@ export class DeviceHub {
   }
 
   private sendTo(socket: WebSocket, msg: RelayMessage): void {
-    if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(msg));
+    if (socket.readyState !== socket.OPEN) return;
+    try { socket.send(JSON.stringify(msg)); } catch { socket.terminate(); }
   }
 
   close(): void {
     clearInterval(this.heartbeat);
     for (const d of this.devices.values()) d.socket.close(1001, 'relay shutdown');
-    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('RELAY_SHUTDOWN')); }
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.cleanup(); p.reject(new Error('RELAY_SHUTDOWN')); }
+    this.pending.clear();
     for (const p of this.adminPending.values()) { clearTimeout(p.timer); p.reject(new Error('RELAY_SHUTDOWN')); }
   }
 }
