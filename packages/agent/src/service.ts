@@ -16,40 +16,41 @@ const cliPath = () => fileURLToPath(new URL('./cli.js', import.meta.url));
 const home = () => process.env.BRC_HOME ?? path.join(os.homedir(), '.brc');
 const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'pipe' }).toString();
 
-export function installService(extraArgs: string[]): string {
+/** keepLog: opt-in (--service-log). By default service output is discarded, matching the live-only diagnostics policy. */
+export function installService(extraArgs: string[], keepLog = false): string {
   mkdirSync(home(), { recursive: true });
   const node = process.execPath;
-  const args = [cliPath(), '--no-browser', ...extraArgs];
+  const args = [cliPath(), '--no-browser', '--non-interactive', ...extraArgs];
   const logFile = path.join(home(), 'agent.log');
 
   if (process.platform === 'win32') {
     // .cmd holds the real command line (no nested quoting issues); wscript runs it with a hidden window.
     const cmdFile = path.join(home(), 'start-agent.cmd');
     const vbs = path.join(home(), 'start-agent.vbs');
-    writeFileSync(cmdFile, `@echo off\r\ncd /d "${home()}"\r\n"${node}" ${args.map((a) => `"${a}"`).join(' ')} >> "${logFile}" 2>&1\r\n`);
-    writeFileSync(vbs, `Set sh = CreateObject("WScript.Shell")\r\nsh.Run "cmd /c ""${cmdFile}""", 0, False\r\n`);
+    writeFileSync(cmdFile, `@echo off\r\ncd /d "${home()}"\r\n"${node}" ${args.map((a) => `"${a}"`).join(' ')} ${keepLog ? `>> "${logFile}" 2>&1` : '>nul 2>&1'}\r\n`);
+    writeFileSync(vbs, `Set sh = CreateObject("WScript.Shell")\r\nsh.Run "cmd /c ""${cmdFile}""", 0, True\r\n`);
     run('schtasks', ['/Create', '/F', '/TN', NAME, '/SC', 'ONLOGON', '/RL', 'LIMITED', '/TR', `wscript.exe "${vbs}"`]);
     run('schtasks', ['/Run', '/TN', NAME]);
-    return `Installed Task Scheduler task "${NAME}" (runs at logon, hidden). Log: ${logFile}\nManage: schtasks /Query /TN ${NAME} | schtasks /End /TN ${NAME}`;
+    return `Installed Task Scheduler task "${NAME}" (runs at logon, hidden). ${keepLog ? `Log: ${logFile}` : 'Output is discarded (use --service-log to keep agent.log).'}\nManage: schtasks /Query /TN ${NAME} | schtasks /End /TN ${NAME}`;
   }
   if (process.platform === 'linux') {
     const dir = path.join(os.homedir(), '.config', 'systemd', 'user');
     mkdirSync(dir, { recursive: true });
     const unit = path.join(dir, `${NAME}.service`);
-    writeFileSync(unit, `[Unit]\nDescription=Better Remote Commander (BRC) device agent\nAfter=network-online.target\n\n[Service]\nExecStart=${node} ${args.join(' ')}\nRestart=always\nRestartSec=5\nEnvironment=BRC_HOME=${home()}\n\n[Install]\nWantedBy=default.target\n`);
+    writeFileSync(unit, `[Unit]\nDescription=Better Remote Commander (BRC) device agent\nAfter=network-online.target\n\n[Service]\nExecStart=${node} ${args.join(' ')}\n${keepLog ? '' : 'StandardOutput=null\nStandardError=null\n'}Restart=always\nRestartSec=5\nEnvironment=BRC_HOME=${home()}\n\n[Install]\nWantedBy=default.target\n`);
     run('systemctl', ['--user', 'daemon-reload']);
     run('systemctl', ['--user', 'enable', '--now', `${NAME}.service`]);
-    return `Installed systemd user unit ${unit}.\nTo keep it running when logged out: sudo loginctl enable-linger ${os.userInfo().username}\nLogs: journalctl --user -u ${NAME} -f`;
+    return `Installed systemd user unit ${unit}.\nTo keep it running when logged out: sudo loginctl enable-linger ${os.userInfo().username}\n${keepLog ? `Logs: journalctl --user -u ${NAME} -f` : 'Output is discarded (use --service-log for journalctl logs).'}`;
   }
   if (process.platform === 'darwin') {
     const dir = path.join(os.homedir(), 'Library', 'LaunchAgents');
     mkdirSync(dir, { recursive: true });
     const plist = path.join(dir, `dev.brc.${NAME}.plist`);
     const xmlArgs = [node, ...args].map((a) => `    <string>${a}</string>`).join('\n');
-    writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n  <key>Label</key><string>dev.brc.${NAME}</string>\n  <key>ProgramArguments</key><array>\n${xmlArgs}\n  </array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>StandardOutPath</key><string>${logFile}</string>\n  <key>StandardErrorPath</key><string>${logFile}</string>\n  <key>EnvironmentVariables</key><dict><key>BRC_HOME</key><string>${home()}</string></dict>\n</dict></plist>\n`);
+    writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n  <key>Label</key><string>dev.brc.${NAME}</string>\n  <key>ProgramArguments</key><array>\n${xmlArgs}\n  </array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>StandardOutPath</key><string>${keepLog ? logFile : '/dev/null'}</string>\n  <key>StandardErrorPath</key><string>${keepLog ? logFile : '/dev/null'}</string>\n  <key>EnvironmentVariables</key><dict><key>BRC_HOME</key><string>${home()}</string></dict>\n</dict></plist>\n`);
     try { run('launchctl', ['unload', plist]); } catch { /* not loaded */ }
     run('launchctl', ['load', '-w', plist]);
-    return `Installed LaunchAgent ${plist}. Log: ${logFile}`;
+    return `Installed LaunchAgent ${plist}. ${keepLog ? `Log: ${logFile}` : 'Output is discarded (use --service-log to keep a log).'}`;
   }
   throw new Error(`unsupported platform ${process.platform}`);
 }
