@@ -8,7 +8,8 @@ import {
   DEFAULTS, BRC_PROTOCOL_VERSION, parseMessage,
   type AgentMessage, type RelayMessage, type CallMessage, type DeviceInfo, type ToolDefinition,
 } from 'brc-shared';
-import { setCurrentRemoteClient, setCurrentCallIsRemote } from '../context.js';
+import { withCallContext } from '../context.js';
+import { failure } from '../runtime/errors.js';
 import { PluginAdmin } from './plugin-admin.js';
 import { boundedAgentFrame } from './result-budget.js';
 
@@ -154,14 +155,11 @@ export class WsClient {
 
   private async handleCall(msg: CallMessage): Promise<void> {
     this.log('debug', `call ${msg.id} ${msg.tool}`);
-    setCurrentCallIsRemote(true);
-    setCurrentRemoteClient(msg.client ?? null);
     try {
-      const result = await this.opts.callTool(msg.tool, msg.args ?? {});
+      const result = await withCallContext({ id: msg.id, client: msg.client ?? null, remote: true }, () => this.opts.callTool(msg.tool, msg.args ?? {}));
       this.send({ type: 'result', id: msg.id, result: result as never });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.send({ type: 'result', id: msg.id, error: { code: 'AGENT_ERROR', message } });
+      this.send({ type: 'result', id: msg.id, result: failure(err, msg.id) });
     }
   }
 
