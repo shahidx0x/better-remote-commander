@@ -8,6 +8,7 @@ import { rootPath, projectPath, textFile } from '../runtime/workspace.js';
 import { readBounded, decodeCode, sha256, atomicWrite, withFileLocks, lockKey } from '../runtime/file-safety.js';
 import { AgentError, result, failure } from '../runtime/errors.js';
 import { checkCancelled, getCallContext } from '../context.js';
+import { runProjectChecks } from '../runtime/harness.js';
 const Hash = z.string().regex(/^[a-fA-F0-9]{64}$/);
 export const WorkspaceChangeSchema = z.object({
     path: z.string().min(1), expected_sha256: Hash.nullable(),
@@ -19,9 +20,10 @@ export const WorkspaceBatchSchema = z.object({
     path: z.string().min(1),
     changes: z.array(WorkspaceChangeSchema).max(64).default([]),
     reads: z.array(z.object({ path: z.string().min(1), offset: z.number().int().min(0).default(0), length: z.number().int().min(1).max(2000).default(120), known_sha256: Hash.optional() })).max(64).default([]),
+    checks: z.array(z.string().regex(/^[A-Za-z0-9_.:-]+$/)).max(5).default([]),
     writeConcurrency: z.number().int().min(1).max(4).default(1),
     dryRun: z.boolean().default(true), maxChars: z.number().int().min(2000).max(256000).default(96000),
-}).refine(a => a.changes.length + a.reads.length > 0, { message: 'Provide changes or reads.' });
+}).refine(a => a.changes.length + a.reads.length + a.checks.length > 0, { message: 'Provide changes, reads or checks.' });
 async function createExclusive(file: string, bytes: Buffer) {
     const temp = path.join(path.dirname(file), `.brc-create-${randomUUID()}.tmp`);
     try {
@@ -52,6 +54,8 @@ export async function workspaceBatch(raw: unknown): Promise<ToolResult> {
     const a = WorkspaceBatchSchema.parse(raw), root = await rootPath(a.path), started = performance.now();
     if (Buffer.byteLength(JSON.stringify(a.changes)) > 8 * 1024 * 1024)
         throw new AgentError('BATCH_TOO_LARGE', 'Combined change arguments exceed 8 MiB.');
+    if (a.checks.length)
+        await runProjectChecks(root, a.checks, false); // Validate check IDs before any writes.
     const paths = await Promise.all(a.changes.map(c => projectPath(root, c.path)));
     const keys = await Promise.all(paths.map(lockKey));
     if (new Set(keys).size !== keys.length)
@@ -164,9 +168,11 @@ export async function workspaceBatch(raw: unknown): Promise<ToolResult> {
             reads.push({ ...r, text, truncated: text.length < r.text.length });
         }
     }
+    const checks = a.checks.length && !a.dryRun ? await runProjectChecks(root, a.checks, true) : null;
+    const checksFailed = !!checks && 'passed' in checks && !checks.passed;
     return result({ root, dryRun: a.dryRun, changes: prepared.map(p => ({ path: p.path, beforeSha256: p.beforeHash, afterSha256: p.afterHash, created: p.before === null, changed: p.beforeHash !== p.afterHash })),
-        reads, readsSkipped: a.reads.length - reads.length,
-        writeConcurrency: a.writeConcurrency, durationMs: Math.round(performance.now() - started), note: 'Validate all changes, commit, then read back. dryRun (default true) validates without writing; set dryRun:false to commit. New parent directories must already exist. Per-file atomic publication; multi-file rollback is best-effort, not crash-atomic. Run tests/linters separately (run_command).' }, readErrors);
+        reads, readsSkipped: a.reads.length - reads.length, checks, checksSkipped: a.dryRun ? a.checks.length : 0,
+        writeConcurrency: a.writeConcurrency, durationMs: Math.round(performance.now() - started), note: 'Validate all changes, commit, read back, then run explicitly selected checks (discover_checks names; only when dryRun:false). A failing check does not undo code. dryRun (default true) validates without writing; set dryRun:false to commit. New parent directories must already exist. Per-file atomic publication; multi-file rollback is best-effort, not crash-atomic. ' }, readErrors || checksFailed);
 }
 
 import { zodToJsonSchema } from 'zod-to-json-schema';
@@ -186,6 +192,7 @@ export function buildWorkspaceToolDefinitions(): ToolDefinition[] {
       'All changes are validated first; if any hash, edit count or path is wrong NOTHING is written. Committing is per-file atomic with best-effort rollback of already-written files.',
       'dryRun defaults to true (validate only); pass dryRun:false to write. Paths must stay inside the project root; symlinks are refused; new parent directories must already exist.',
       'Use edit_block for one small edit, write_file for new content without hashes. reads[] return the final file text and sha256 so you can chain the next edit without another read.',
+      'Optional checks[] (up to 5 names from discover_checks) run after a non-dry-run commit and report real exit codes; unknown names are rejected before any write.',
     ].join('\n'),
     inputSchema: zodToJsonSchema(WorkspaceBatchSchema) as ToolDefinition['inputSchema'],
     annotations: { title: 'Workspace Batch', readOnlyHint: false, destructiveHint: true, openWorldHint: false },
