@@ -20,6 +20,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { DeviceHub } from './device-hub.js';
 import { SqliteStore, verifyPassword, type ConnectionLinkRow } from './store/sqlite.js';
+import { parseAuthorizeRequest, approveCallback } from './auth/client-recovery.js';
 import { RelayOAuthProvider, SCOPES } from './auth/provider.js';
 import { Sessions } from './auth/sessions.js';
 import { createMcpServer } from './mcp/server.js';
@@ -119,6 +120,23 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata));
   app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata));
   app.get('/.well-known/oauth-protected-resource/mcp', (_req, res) => res.json(protectedResourceMetadata));
+
+  // An unknown client_id or unapproved callback gets a recovery screen instead of a bare JSON error.
+  // Nothing is registered here: only a signed-in admin can approve it (see /auth/clients/import).
+  // A valid registered client/callback falls through to the SDK's standard exact-match checks.
+  app.get('/authorize', (req, res, next) => {
+    let requested;
+    try { requested = parseAuthorizeRequest(cfg.publicUrl + req.originalUrl, cfg.publicUrl); } catch { return next(); }
+    const saved = store.getClient(requested.clientId);
+    let allowed = false;
+    if (saved) {
+      try { const m = JSON.parse(saved.metadata) as { redirect_uris?: string[] }; allowed = Array.isArray(m.redirect_uris) && m.redirect_uris.includes(requested.redirectUri); } catch { /* invalid metadata authorizes nothing */ }
+    }
+    if (allowed) return next();
+    const review = new URL('/auth/clients', cfg.publicUrl);
+    review.searchParams.set('authorize', requested.authorizeUrl!);
+    return res.status(400).type('html').send(pages.oauthClientRecoveryPage(requested.clientId, requested.redirectUri, review.pathname + review.search, !saved));
+  });
 
   app.use(mcpAuthRouter({
     provider,
@@ -260,7 +278,36 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const m = JSON.parse(c.metadata) as { client_name?: string; redirect_uris?: string[] };
     return { client_id: c.client_id, name: m.client_name ?? c.client_id, redirect_uris: m.redirect_uris ?? [], hasSecret: !!c.client_secret, created_at: c.created_at };
   });
-  app.get('/auth/clients', requireLogin, (_req, res) => res.type('html').send(pages.clientsPage(clientRows())));
+  app.get('/auth/clients', requireLogin, (req, res) => {
+    const pasted = typeof req.query.authorize === 'string' ? req.query.authorize : '';
+    let recovery; let feedback;
+    if (pasted) {
+      try { const d = parseAuthorizeRequest(pasted, cfg.publicUrl); recovery = { authorizeUrl: d.authorizeUrl!, clientId: d.clientId, redirectUri: d.redirectUri }; }
+      catch (error) { feedback = { ok: false, message: error instanceof Error ? error.message : 'Invalid authorization request' }; }
+    }
+    res.type('html').send(pages.clientsPage(clientRows(), recovery, feedback));
+  });
+  // Approving a callback lets a site receive authorization codes: require CSRF, an explicit trust tick AND the admin password again.
+  const approveLimiter = new LoginLimiter(5, 5 * 60_000);
+  app.post('/auth/clients/import', requireLogin, requireCsrf, (req, res) => {
+    const userId = currentUser(req)!;
+    const key = `approve:${userId}`;
+    const fail = (status: number, message: string) => res.status(status).type('html').send(pages.clientsPage(clientRows(), undefined, { ok: false, message }));
+    if (approveLimiter.locked(key)) return fail(429, 'Too many attempts. Try again later.');
+    if (req.body?.trust !== 'yes') return fail(400, 'You must explicitly approve the callback destination.');
+    const user = store.getUser(userId);
+    if (!user || !verifyPassword(String(req.body?.password ?? ''), user.password_hash)) { approveLimiter.fail(key); return fail(403, 'Password confirmation failed.'); }
+    approveLimiter.ok(key);
+    try {
+      const input = parseAuthorizeRequest(String(req.body?.authorization_url ?? '').trim(), cfg.publicUrl);
+      const outcome = approveCallback(store, input, String(req.body?.client_name ?? ''));
+      log('info', `oauth callback approved by admin (${outcome}): ${new URL(input.redirectUri).host}`);
+      // Only ever redirect back to the validated same-issuer /authorize URL; the SDK still checks PKCE and the exact callback.
+      return res.redirect(303, input.authorizeUrl!);
+    } catch (error) {
+      return fail(400, error instanceof Error ? error.message : 'Could not approve callback');
+    }
+  });
   app.post('/auth/clients/delete', requireLogin, requireCsrf, (req, res) => {
     store.deleteClient(String(req.body.client_id ?? ''));
     res.redirect('/auth/clients');

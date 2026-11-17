@@ -219,6 +219,9 @@ export class SqliteStore {
   listClients(): ClientRow[] {
     return this.db.prepare('SELECT * FROM oauth_clients ORDER BY created_at DESC').all() as unknown as ClientRow[];
   }
+  updateClientMetadata(clientId: string, metadata: string): void {
+    this.db.prepare('UPDATE oauth_clients SET metadata = ? WHERE client_id = ?').run(metadata, clientId);
+  }
   deleteClient(clientId: string): void {
     this.db.prepare('UPDATE tokens SET revoked = 1 WHERE client_id = ?').run(clientId);
     this.db.prepare('DELETE FROM oauth_clients WHERE client_id = ?').run(clientId);

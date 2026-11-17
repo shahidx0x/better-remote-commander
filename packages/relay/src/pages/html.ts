@@ -60,12 +60,34 @@ ${loggedIn ? `<p>Devices:</p>${list}<div class="row"><a href="/admin"><button cl
   : `<div class="row"><a href="/auth/login?returnTo=/"><button class="primary">Sign in</button></a></div>`}`);
 }
 
-export function clientsPage(clients: { client_id: string; name: string; redirect_uris: string[]; hasSecret: boolean; created_at: number }[]): string {
+/** Shown to an unauthenticated visitor whose OAuth client or callback is not registered. Nothing is registered here. */
+export function oauthClientRecoveryPage(clientId: string, redirectUri: string, recoveryPath: string, missing: boolean): string {
+  let host = redirectUri;
+  try { host = new URL(redirectUri).host; } catch { /* shown raw */ }
+  return layout('Approve OAuth callback', `<h1>${missing ? 'Unregistered OAuth client' : 'Callback not approved'}</h1>
+<p>An application asked to connect to your relay, but this client or callback address is not registered. Nothing has been approved.</p>
+<p>Callback host: <strong>${esc(host)}</strong></p><p>Client ID: <code>${esc(clientId)}</code><br>Full callback: <code>${esc(redirectUri)}</code></p>
+<p class="err">Only approve a website you trust to receive authorization codes for your devices.</p>
+<div class="row"><a href="${esc(recoveryPath)}"><button class="primary">Review request as admin</button></a></div>`);
+}
+
+export function clientsPage(clients: { client_id: string; name: string; redirect_uris: string[]; hasSecret: boolean; created_at: number }[], recovery?: { authorizeUrl: string; clientId: string; redirectUri: string }, feedback?: { ok: boolean; message: string }): string {
+  let recoveryHost = '';
+  if (recovery) { try { recoveryHost = new URL(recovery.redirectUri).host; } catch { recoveryHost = recovery.redirectUri; } }
+  const review = recovery ? `<div class="panel" role="status"><h2>Approve this callback?</h2>
+<p>Callback host: <strong>${esc(recoveryHost)}</strong></p><p>Client ID: <code>${esc(recovery.clientId)}</code><br>Full callback: <code>${esc(recovery.redirectUri)}</code></p>
+<p class="err">Only approve if you trust this address to receive authorization codes. Consent is still required afterwards.</p>
+<form method="post" action="/auth/clients/import"><input type="hidden" name="authorization_url" value="${esc(recovery.authorizeUrl)}">
+<label for="rc-name">Display name (optional)</label><input id="rc-name" name="client_name" maxlength="80" placeholder="ChatGPT">
+<label for="rc-pw">Confirm your admin password</label><input id="rc-pw" name="password" type="password" autocomplete="current-password" required>
+<label><input type="checkbox" name="trust" value="yes" required> I recognize and trust <strong>${esc(recoveryHost)}</strong></label>
+<div class="row"><button class="primary" type="submit">Approve callback</button></div></form></div>` : '';
+  const note = feedback ? `<p class="${feedback.ok ? 'ok' : 'err'}" role="status">${esc(feedback.message)}</p>` : '';
   const rows = clients.length
     ? `<ul>${clients.map((c) => `<li><strong>${esc(c.name)}</strong><br><code>${esc(c.client_id)}</code>${c.hasSecret ? ' · confidential' : ' · public (PKCE)'}<br><small>${c.redirect_uris.map(esc).join('<br>')}</small>
 <form method="post" action="/auth/clients/delete" style="display:inline"><input type="hidden" name="client_id" value="${esc(c.client_id)}"><button class="secondary danger" style="padding:4px 10px;margin-top:6px" onclick="return confirm('Delete client and revoke its tokens?')">Delete</button></form></li>`).join('')}</ul>`
     : '<p>No OAuth clients yet. ChatGPT and Claude register automatically when you connect the MCP endpoint.</p>';
   return layout('OAuth clients', `<h1>OAuth clients</h1>
 <p>These clients are created automatically through OAuth Dynamic Client Registration. No custom callback URL is required here.</p>
-${rows}<p><a href="/admin">Back</a></p>`);
+${note}${review}${rows}<p><a href="/admin">Back</a></p>`);
 }
