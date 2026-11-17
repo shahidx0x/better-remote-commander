@@ -6,6 +6,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
+import type { UsageRecord, UsageDay, McpEstimateDelta } from '../features/usage.js';
+import type { SkillRow, SkillRequest } from '../features/skills.js';
 
 /** Allowed lifetimes (days) of a private connection link. Capped at 90: a URL is a bearer credential. */
 export const CONNECTION_LINK_DAYS = [1, 7, 30, 90];
@@ -335,6 +337,83 @@ export class SqliteStore {
     const row = this.db.prepare('SELECT plugins, updated_at FROM device_plugins WHERE device_id = ?').get(deviceId) as { plugins: string; updated_at: number } | undefined;
     if (!row) return undefined;
     try { return { plugins: JSON.parse(row.plugins) as unknown[], updated_at: row.updated_at }; } catch { return undefined; }
+  }
+
+  /* ---------- opt-in skills library (owner-approved SKILL.md text) and usage aggregates ---------- */
+  private extrasReady = false;
+  private ensureExtras(): void {
+    if (this.extrasReady) return;
+    this.db.exec(`CREATE TABLE IF NOT EXISTS skills (user_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL, source TEXT NOT NULL, files_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, id));
+CREATE TABLE IF NOT EXISTS skill_requests (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, skill_id TEXT NOT NULL, client TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS skill_requests_user ON skill_requests(user_id, created_at);
+CREATE TABLE IF NOT EXISTS model_usage (id TEXT NOT NULL, user_id TEXT NOT NULL, day TEXT NOT NULL, ts INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, PRIMARY KEY (user_id, id));
+CREATE INDEX IF NOT EXISTS model_usage_user_day ON model_usage(user_id, day);
+CREATE TABLE IF NOT EXISTS mcp_estimate_daily (user_id TEXT NOT NULL, day TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, partial_calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, day));`);
+    this.extrasReady = true;
+  }
+  saveSkill(r: SkillRow): void {
+    this.ensureExtras();
+    this.db.prepare('INSERT INTO skills (user_id,id,name,description,source,files_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id,id) DO UPDATE SET name=excluded.name,description=excluded.description,source=excluded.source,files_json=excluded.files_json,updated_at=excluded.updated_at')
+      .run(r.user_id, r.id, r.name, r.description, r.source, r.files_json, r.created_at, r.updated_at);
+    this.db.prepare('DELETE FROM skill_requests WHERE user_id = ? AND skill_id = ?').run(r.user_id, r.id);
+  }
+  listSkills(userId: string): SkillRow[] {
+    this.ensureExtras();
+    return this.db.prepare('SELECT * FROM skills WHERE user_id = ? ORDER BY name COLLATE NOCASE').all(userId) as unknown as SkillRow[];
+  }
+  getSkill(userId: string, id: string): SkillRow | undefined {
+    this.ensureExtras();
+    return this.db.prepare('SELECT * FROM skills WHERE user_id = ? AND id = ?').get(userId, id) as SkillRow | undefined;
+  }
+  deleteSkill(userId: string, id: string): boolean {
+    this.ensureExtras();
+    return Number(this.db.prepare('DELETE FROM skills WHERE user_id = ? AND id = ?').run(userId, id).changes) > 0;
+  }
+  createSkillRequest(userId: string, skillId: string, client: string, reason: string): SkillRequest {
+    this.ensureExtras();
+    const prior = this.db.prepare('SELECT * FROM skill_requests WHERE user_id = ? AND skill_id = ?').get(userId, skillId) as SkillRequest | undefined;
+    if (prior) return prior;
+    const n = (this.db.prepare('SELECT COUNT(*) AS n FROM skill_requests WHERE user_id = ?').get(userId) as { n: number }).n;
+    if (n >= 20) throw new Error('Maximum 20 pending skill requests; ask the owner to review /admin/skills');
+    const r: SkillRequest = { id: 'sr_' + randomToken(9), user_id: userId, skill_id: skillId, client: client.slice(0, 120), reason: reason.slice(0, 500), created_at: Date.now() };
+    this.db.prepare('INSERT INTO skill_requests (id,user_id,skill_id,client,reason,created_at) VALUES (?,?,?,?,?,?)').run(r.id, r.user_id, r.skill_id, r.client, r.reason, r.created_at);
+    return r;
+  }
+  listSkillRequests(userId: string): SkillRequest[] {
+    this.ensureExtras();
+    return this.db.prepare('SELECT * FROM skill_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 50').all(userId) as unknown as SkillRequest[];
+  }
+  deleteSkillRequest(userId: string, id: string): boolean {
+    this.ensureExtras();
+    return Number(this.db.prepare('DELETE FROM skill_requests WHERE user_id = ? AND id = ?').run(userId, id).changes) > 0;
+  }
+  /** Idempotent on (user, event id): returns false for a duplicate report. */
+  recordTokenUsage(r: UsageRecord): boolean {
+    this.ensureExtras();
+    return Number(this.db.prepare('INSERT OR IGNORE INTO model_usage (id,user_id,day,ts,provider,model,input_tokens,output_tokens) VALUES (?,?,?,?,?,?,?,?)')
+      .run(r.id, r.user_id, r.day, r.ts, r.provider, r.model, r.input_tokens, r.output_tokens).changes) > 0;
+  }
+  usageDays(userId: string, sinceDay: string): UsageDay[] {
+    this.ensureExtras();
+    return this.db.prepare('SELECT day, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, COUNT(*) AS reports FROM model_usage WHERE user_id = ? AND day >= ? GROUP BY day ORDER BY day').all(userId, sinceDay) as unknown as UsageDay[];
+  }
+  recordMcpEstimates(rows: McpEstimateDelta[]): void {
+    this.ensureExtras();
+    const st = this.db.prepare('INSERT INTO mcp_estimate_daily (user_id,day,input_tokens,output_tokens,calls,partial_calls) VALUES (?,?,?,?,?,?) ON CONFLICT(user_id,day) DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens, output_tokens=output_tokens+excluded.output_tokens, calls=calls+excluded.calls, partial_calls=partial_calls+excluded.partial_calls');
+    this.db.exec('BEGIN');
+    try { for (const r of rows) st.run(r.user_id, r.day, r.input_tokens, r.output_tokens, r.calls, r.partial_calls); this.db.exec('COMMIT'); }
+    catch (e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  mcpEstimateDays(userId: string, sinceDay: string): (UsageDay & { partial_calls: number })[] {
+    this.ensureExtras();
+    return this.db.prepare('SELECT day, input_tokens, output_tokens, calls AS reports, partial_calls FROM mcp_estimate_daily WHERE user_id = ? AND day >= ? ORDER BY day').all(userId, sinceDay) as unknown as (UsageDay & { partial_calls: number })[];
+  }
+  /** Retention: drop usage aggregates older than 400 days. */
+  pruneUsage(now = Date.now()): void {
+    this.ensureExtras();
+    const cutoff = new Date(now - 400 * 86_400_000).toISOString().slice(0, 10);
+    this.db.prepare('DELETE FROM model_usage WHERE day < ?').run(cutoff);
+    this.db.prepare('DELETE FROM mcp_estimate_daily WHERE day < ?').run(cutoff);
   }
 
   close(): void { this.db.close(); }
