@@ -10,6 +10,7 @@ import {
 } from 'brc-shared';
 import { setCurrentRemoteClient, setCurrentCallIsRemote } from '../context.js';
 import { PluginAdmin } from './plugin-admin.js';
+import { boundedAgentFrame } from './result-budget.js';
 
 export interface WsClientOptions {
   relayUrl: string;          // https://host or wss://host
@@ -32,6 +33,7 @@ export class WsClient {
   private stopped = false;
   private backoff: number = DEFAULTS.reconnectMinMs;
   private pongTimer: NodeJS.Timeout | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private lastUnauthorized = false;
   private unauthorizedCount = 0;
   private readonly log: NonNullable<WsClientOptions['log']>;
@@ -58,8 +60,11 @@ export class WsClient {
     this.stopped = true;
     this.plugins.stop();
     this.clearPongTimer();
-    this.ws?.close(1000, 'agent stopped');
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const ws = this.ws;
     this.ws = null;
+    ws?.close(1000, 'agent stopped');
   }
 
   private connect(): void {
@@ -89,6 +94,7 @@ export class WsClient {
     });
 
     ws.on('close', (code, reason) => {
+      if (this.ws !== ws) return; // stale socket (replaced or stopped)
       this.clearPongTimer();
       this.ws = null;
       if (this.stopped) return;
@@ -98,7 +104,7 @@ export class WsClient {
         return;
       }
       this.log('warn', `Disconnected (${code} ${reason?.toString() || ''}); retry in ${this.backoff} ms`);
-      setTimeout(() => this.connect(), this.backoff);
+      this.scheduleConnect(this.backoff);
       this.backoff = Math.min(this.backoff * 2, DEFAULTS.reconnectMaxMs);
     });
 
@@ -115,7 +121,12 @@ export class WsClient {
     }
     const wait = Math.min(DEFAULTS.reconnectMaxMs, 10_000 * this.unauthorizedCount);
     this.log('error', `Unauthorized (code ${code}); retry in ${wait} ms`);
-    setTimeout(() => this.connect(), wait);
+    this.scheduleConnect(wait);
+  }
+
+  private scheduleConnect(delay: number): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; this.connect(); }, delay);
   }
 
   private async onMessage(raw: Buffer): Promise<void> {
@@ -155,7 +166,15 @@ export class WsClient {
   }
 
   private send(msg: AgentMessage): void {
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+    const ws = this.ws;
+    if (ws?.readyState !== WebSocket.OPEN) return;
+    try {
+      const frame = boundedAgentFrame(msg);
+      if (frame.replaced) this.log('warn', 'Oversized/unencodable result replaced with a bounded error');
+      ws.send(frame.encoded);
+    } catch (e) {
+      this.log('warn', `Could not send frame: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   private deviceInfo(): DeviceInfo {

@@ -35,6 +35,7 @@ export interface ContentBlock {
 export interface ToolResult {
   content: ContentBlock[];
   isError?: boolean;
+  structuredContent?: Record<string, unknown>;
 }
 
 /* ---------- agent -> relay ---------- */

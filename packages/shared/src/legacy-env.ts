@@ -17,6 +17,8 @@ export function applyLegacyEnv(): void {
   if (!process.env.BRC_HOME) {
     const legacy = path.join(os.homedir(), '.ses-rdp');
     const current = path.join(os.homedir(), '.brc');
-    if (!existsSync(path.join(current, 'device.json')) && existsSync(path.join(legacy, 'device.json'))) process.env.BRC_HOME = legacy;
+    // If .brc exists at all, it is the current state directory. An intentional
+    // forget deletes device.json; do not then revive a stale legacy pairing.
+    if (!existsSync(current) && existsSync(path.join(legacy, 'device.json'))) process.env.BRC_HOME = legacy;
   }
 }
