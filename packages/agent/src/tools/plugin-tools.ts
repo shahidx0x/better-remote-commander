@@ -8,7 +8,8 @@
  */
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import { callPluginTool, getPluginTools } from '../plugins/host.js';
+import { callPluginTool, getPluginTools, runningPluginIds } from '../plugins/host.js';
+import { BROWSER_WORKFLOW_TEXT, classifyBrowserError, recoveryHint, playwrightAdvisor } from '../runtime/browser-workflow.js';
 import { listPlugins } from '../plugins/manager.js';
 import { getPlugin } from '../plugins/store.js';
 import type { ServerResult } from '../core/types.js';
@@ -26,6 +27,11 @@ export const CallPluginToolArgsSchema = z.object({
   tool: z.string().min(1).describe('Tool name inside that plugin.'),
   args: z.record(z.unknown()).optional().default({}).describe('Arguments, following the tool\'s input schema from list_plugin_tools.'),
 });
+
+function isPlaywright(id: string): boolean {
+  const rec = getPlugin(id);
+  return id.toLowerCase() === 'playwright' || (rec?.source.type === 'npm' && rec.source.package === '@playwright/mcp');
+}
 
 function oneLine(s: string | undefined, max = 160): string {
   const t = (s ?? '').replace(/\s+/g, ' ').trim();
@@ -62,7 +68,7 @@ export async function handleListPluginTools(args: unknown): Promise<ServerResult
   try {
     const tools = await getPluginTools(plugin, refresh);
     const body = tools.map((t) => `### ${t.name}\n${t.description ?? ''}\ninput schema: ${JSON.stringify(t.inputSchema ?? {})}`).join('\n\n');
-    return text(`Plugin "${plugin}" (${rec.name}) has ${tools.length} tools. Call them with call_plugin_tool {"plugin":"${plugin}","tool":"<name>","args":{...}}.\n\n${body}`);
+    return text(`Plugin "${plugin}" (${rec.name}) has ${tools.length} tools. Call them with call_plugin_tool {"plugin":"${plugin}","tool":"<name>","args":{...}}.\n\n${isPlaywright(plugin) ? `BRC PLAYWRIGHT GUIDANCE (advisory): ${BROWSER_WORKFLOW_TEXT}\n\n` : ''}${body}`);
   } catch (e) {
     return text(`Plugin "${plugin}" is not available: ${e instanceof Error ? e.message : String(e)}`, true);
   }
@@ -72,11 +78,32 @@ export async function handleCallPluginTool(args: unknown): Promise<ServerResult>
   const parsed = CallPluginToolArgsSchema.safeParse(args);
   if (!parsed.success) return text(`Invalid arguments for call_plugin_tool: ${parsed.error.message}`, true);
   const { plugin, tool, args: toolArgs } = parsed.data;
+  const browser = isPlaywright(plugin);
+  // A stopped plugin process cannot retain live element references.
+  if (browser && !runningPluginIds().includes(plugin)) playwrightAdvisor.reset();
   try {
     const res = await callPluginTool(plugin, tool, toolArgs as Record<string, unknown>);
-    return { content: res.content as unknown as ServerResult['content'], ...(res.isError ? { isError: true } : {}) };
+    const content = res.content as unknown as ServerResult['content'];
+    if (!browser) return { content, ...(res.isError ? { isError: true } : {}) };
+    const stale = playwrightAdvisor.after(tool, toolArgs as Record<string, unknown>, !res.isError);
+    if (res.isError) {
+      const details = res.content.filter((c) => c.type === 'text').map((c) => String((c as { text?: string }).text ?? '')).join(' ').slice(0, 1800);
+      const kind = classifyBrowserError(details, false), suggestion = recoveryHint(kind);
+      return { isError: true, content: [...content, { type: 'text', text: `BRC PLAYWRIGHT RECOVERY (${kind}): ${suggestion}` }],
+        structuredContent: { error: { code: kind, message: details.slice(0, 900), retryable: false }, recovery: { automaticRetry: false, suggestion } } };
+    }
+    if (!stale) return { content };
+    return { content: [...content, { type: 'text', text: 'BRC PLAYWRIGHT NOTE: page state may have changed; take browser_snapshot before using element references again.' }],
+      structuredContent: { browserWorkflow: { ...playwrightAdvisor.status(), nextTool: 'browser_snapshot' } } };
   } catch (e) {
-    return text(`call_plugin_tool ${plugin}.${tool} failed: ${e instanceof Error ? e.message : String(e)}`, true);
+    const message = e instanceof Error ? e.message : String(e);
+    if (browser) {
+      playwrightAdvisor.after(tool, toolArgs as Record<string, unknown>, false);
+      const kind = classifyBrowserError(message), suggestion = recoveryHint(kind);
+      return { isError: true, content: [{ type: 'text', text: `${kind}: call_plugin_tool ${plugin}.${tool} failed: ${message.slice(0, 900)}\nNEXT ACTION: ${suggestion}` }],
+        structuredContent: { error: { code: kind, message: message.slice(0, 900), retryable: false }, recovery: { automaticRetry: false, suggestion } } };
+    }
+    return text(`call_plugin_tool ${plugin}.${tool} failed: ${message}`, true);
   }
 }
 
@@ -100,7 +127,7 @@ export function buildPluginToolDefinitions(): ToolDefinition[] {
     },
     {
       name: 'call_plugin_tool',
-      description: 'Call a tool of a plugin on this device: {"plugin":"<id>","tool":"<name>","args":{...}}. Get ids, tool names and input schemas from list_plugin_tools first. The plugin starts on first use (can take a few seconds).',
+      description: 'Call a tool of a plugin on this device: {"plugin":"<id>","tool":"<name>","args":{...}}. Get ids, tool names and input schemas from list_plugin_tools first. The plugin starts on first use (can take a few seconds). For Playwright, BRC adds advisory recovery hints (fresh browser_snapshot after page changes; stale element refs are not a reason to restart the browser) and never blocks or auto-retries a call.',
       inputSchema: zodToJsonSchema(CallPluginToolArgsSchema),
       annotations: { title: 'Call plugin tool', readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
