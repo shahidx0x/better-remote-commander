@@ -277,6 +277,7 @@ function shutdown(reason: string): void {
   runningAbort.abort();
   livePrompts?.close();
   client?.stop();
+  import('./runtime/worker-coordination.js').then(({ workerCoordinator }) => workerCoordinator.clear()).catch(() => {});
   // Persist debounced background config writes (usage stats) and stop plugin processes, bounded wait.
   const exit = () => process.exit(0);
   const timer = setTimeout(exit, 2500);
