@@ -18,6 +18,8 @@ import { SANDBOX_TOOL_HANDLERS, buildSandboxToolDefinitions } from './tools/sand
 import { CHECK_TOOL_HANDLERS, buildCheckToolDefinitions } from './tools/check-tools.js';
 import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions } from './tools/coding-tools.js';
 import { invalidateNavCaches } from './runtime/nav-cache.js';
+import { WORKER_TOOL_HANDLERS, buildWorkerToolDefinitions } from './tools/worker-tools.js';
+import { workerCoordinator } from './runtime/worker-coordination.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
 import { randomUUID } from 'node:crypto';
@@ -76,6 +78,8 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(CHECK_TOOL_HANDLERS),
   // Read-only code navigation (outline/symbols/graph)
   ...Object.entries(CODING_TOOL_HANDLERS),
+  // Optional host-native worker coordination (RAM-only)
+  ...Object.entries(WORKER_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
@@ -87,6 +91,7 @@ export function listTools(): ToolDefinition[] {
       ...buildWorkspaceToolDefinitions(),
       ...buildImageToolDefinitions(),
       ...buildSandboxToolDefinitions(),
+      ...buildWorkerToolDefinitions(),
       ...buildCodingToolDefinitions(),
       ...buildCheckToolDefinitions(),
     ]
@@ -117,6 +122,7 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     if (isTermuxRuntime() && !availableOnTermux(name))
       throw new AgentError('UNSUPPORTED_ON_TERMUX', `${name} is not supported on Android/Termux (needs desktop-native binaries or Docker).`);
     args = args ?? {};
+    await workerCoordinator.guardFileMutation(name, args);
     const perform = async (): Promise<ToolResult> => {
       checkCancelled();
       // Optional optimistic concurrency: refuse to write if the file changed since the caller read it.
