@@ -1,6 +1,6 @@
 {
     "name":  "brc-agent",
-    "version":  "2.0.11",
+    "version":  "2.0.12",
     "description":  "Better Remote Commander (BRC) device agent - runs on the machine to be controlled, connects outbound to an BRC relay",
     "license":  "MIT",
     "type":  "module",
