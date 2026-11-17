@@ -38,13 +38,33 @@ const READ_ONLY_TOOLS = new Set([
   'read_code_file', 'code_outline', 'find_symbols', 'read_symbol', 'find_references', 'related_files',
   'project_context', 'project_map', 'context_pack', 'code_graph', 'language_capabilities',
   'discover_checks', // lists runnable checks; never runs them
+  'batch_tools', // listed for read-only links, but every nested call is validated at call time (readOnlyToolAllowed)
 ]);
 /** Relay-level tools a read-only link may call. */
 const READ_ONLY_RELAY_TOOLS = new Set(['list_devices', 'search_mcp_registry']);
-export function readOnlyToolAllowed(name: string): boolean {
+/** Visible to read-only links (tools/list). Not sufficient to call: use readOnlyToolAllowed(name, args). */
+export function readOnlyToolListed(name: string): boolean {
   return READ_ONLY_TOOLS.has(name) || READ_ONLY_RELAY_TOOLS.has(name);
 }
-
+const MAX_BATCH_CALLS = 64;
+/**
+ * Call-time gate for read-only links. batch_tools is a tunnel for other tools, so it is allowed only when EVERY
+ * nested call names a plain read-only tool (never batch_tools itself, never a relay tool) and carries no URL-fetch flag.
+ * Fails closed on any malformed shape.
+ */
+export function readOnlyToolAllowed(name: string, args?: unknown): boolean {
+  if (name !== 'batch_tools') return readOnlyToolListed(name) && !(args as { isUrl?: unknown } | undefined)?.isUrl;
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
+  const calls = (args as { calls?: unknown }).calls;
+  if (!Array.isArray(calls) || calls.length < 1 || calls.length > MAX_BATCH_CALLS) return false;
+  return calls.every((call: unknown) => {
+    if (!call || typeof call !== 'object' || Array.isArray(call)) return false;
+    const { tool, arguments: childArgs } = call as { tool?: unknown; arguments?: unknown };
+    if (typeof tool !== 'string' || tool === 'batch_tools' || !READ_ONLY_TOOLS.has(tool)) return false;
+    if (childArgs === undefined) return true;
+    return !!childArgs && typeof childArgs === 'object' && !Array.isArray(childArgs) && !(childArgs as { isUrl?: unknown }).isUrl;
+  });
+}
 export const LIST_DEVICES_TOOL = {
   name: 'list_devices',
   description: 'List devices paired to this relay, with online state and ids. Call this first when more than one device may be connected.',
@@ -63,15 +83,16 @@ export function liveTools(hub: DeviceHub, store: SqliteStore, userId: string) {
 /** `plugins` enables the marketplace tools (search_mcp_registry, request_plugin_install). */
 export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpContext, relayVersion: string, plugins?: Omit<PluginToolDeps, 'hub' | 'store'>, access: 'read' | 'full' = 'full', features: McpFeatures = {}): Server {
   const skills = !!features.skills;
-  const allowedReadOnly = (n: string) => readOnlyToolAllowed(n) || (skills && SKILL_READ_ONLY_TOOLS.has(n));
+  const allowedReadOnly = (n: string, a?: unknown) => !(a as { isUrl?: unknown } | undefined)?.isUrl && (readOnlyToolAllowed(n, a) || (skills && SKILL_READ_ONLY_TOOLS.has(n)));
+  const listedReadOnly = (n: string) => readOnlyToolListed(n) || (skills && SKILL_READ_ONLY_TOOLS.has(n));
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { online, tools } = liveTools(hub, store, ctx.userId);
-    const relayTools = [...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : [])].filter((t) => access !== 'read' || allowedReadOnly(t.name));
+    const relayTools = [...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : [])].filter((t) => access !== 'read' || listedReadOnly(t.name));
     const reserved = new Set([...(plugins ? PLUGIN_RELAY_TOOLS : []), ...(skills ? SKILL_RELAY_TOOLS : [])].map((t) => t.name));
-    const visible = tools.filter((t) => !reserved.has(t.name) && (access !== 'read' || readOnlyToolAllowed(t.name)))
-      .map((t) => (access === 'read' ? { ...t, annotations: { ...t.annotations, readOnlyHint: true, destructiveHint: false } } : t));
+    const visible = tools.filter((t) => !reserved.has(t.name) && (access !== 'read' || readOnlyToolListed(t.name)))
+      .map((t) => (access === 'read' ? { ...t, ...(t.name === 'batch_tools' ? { description: 'READ-ONLY CONNECTION: every nested tool must be a permitted read tool. ' + t.description } : {}), annotations: { ...t.annotations, readOnlyHint: true, destructiveHint: false } } : t));
     const note = access === 'read' ? ' THIS CONNECTION IS READ-ONLY: only the advertised read tools may be used.' : '';
     return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.${note}` }, ...relayTools, ...visible] };
   });
@@ -79,7 +100,7 @@ export function createMcpServer(hub: DeviceHub, store: SqliteStore, ctx: McpCont
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
     // Enforced at call time, not just hidden in tools/list: a read-only link must never reach a write tool by name.
-    if (access === 'read' && (!allowedReadOnly(name) || (args as { isUrl?: unknown } | undefined)?.isUrl)) {
+    if (access === 'read' && !allowedReadOnly(name, args)) {
       return { content: [{ type: 'text', text: `READ_ONLY_CONNECTION: ${name} is not available on a read-only connection (writes, commands, plugins and URL fetches are blocked).` }], isError: true };
     }
     if (name === 'list_devices') {

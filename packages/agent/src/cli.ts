@@ -176,6 +176,9 @@ const startPluginSetup = () => {
 };
 if (!pluginsOff) setTimeout(startPluginSetup, 10_000).unref();
 
+// Bounded, unref'd cache maintenance (RAM caches + owned scratch); stopped on shutdown.
+void import('./runtime/resource-limits.js').then(({ startResourceMaintenance }) => startResourceMaintenance()).catch(() => {});
+
 const runningAbort = new AbortController();
 const foregroundControls = !connection.nonInteractive && (connection.interactive || !!connection.autoConnect);
 const settingsHint = controlHint(!!process.stdin.isTTY);
@@ -277,6 +280,7 @@ function shutdown(reason: string): void {
   runningAbort.abort();
   livePrompts?.close();
   client?.stop();
+  import('./runtime/resource-limits.js').then(({ stopResourceMaintenance }) => stopResourceMaintenance()).catch(() => {});
   import('./runtime/worker-coordination.js').then(({ workerCoordinator }) => workerCoordinator.clear()).catch(() => {});
   // Persist debounced background config writes (usage stats) and stop plugin processes, bounded wait.
   const exit = () => process.exit(0);
