@@ -185,11 +185,11 @@ export const EditBlockEditSchema = z.object({
 
 export const EditBlockArgsSchema = z.object({
   expected_sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
-  file_path: z.string(),
+  file_path: z.string().min(1),
   // Text file string replacement
   old_string: z.string().optional(),
   new_string: z.string().optional(),
-  expected_replacements: z.number().optional().default(1),
+  expected_replacements: z.number().int().min(1).max(10000).optional().default(1),
   // Multiple replacements in one call (applied sequentially, atomically for text files)
   edits: z.array(EditBlockEditSchema).optional(),
   // Structured file range rewrite (Excel, etc.)

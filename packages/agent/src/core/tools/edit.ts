@@ -20,7 +20,7 @@ import fs from 'fs/promises';
 import { ServerResult } from '../types.js';
 import { runFuzzySearchInWorker, getSimilarityRatio } from './fuzzySearch.js';
 import { capture } from '../utils/capture.js';
-import { createErrorResponse } from '../error-handlers.js';
+// Edit failures use structured error codes instead of unclassified text.
 import { EditBlockArgsSchema } from "./schemas.js";
 import { atomicWrite, readBounded, sha256 } from "../../runtime/file-safety.js";
 import path from 'path';
@@ -34,6 +34,32 @@ interface SearchReplace {
     search: string;
     replace: string;
 }
+
+/** Fail closed: an edit that did not apply is always an MCP error with
+ * a precise, model-facing recovery plan. Never auto-apply fuzzy matches.
+ */
+function editBlockFailure(
+    code: string, message: string, suggestion: string,
+    details: Record<string, unknown> = {},
+): ServerResult {
+    const body = message.slice(0, 3500);
+    return {
+        isError: true,
+        content: [{type:'text',text:code+': '+body+'\nNEXT ACTION: '+suggestion}],
+        structuredContent: {
+            error:{code,message:body,retryable:false},
+            recovery:{automaticRetry:false,suggestion},
+            changed:false,
+            ...details,
+        },
+    };
+}
+const MISSING_EDIT_GUIDANCE =
+    'Provide file_path and either old_string plus new_string, edits:[{old_string,new_string}], or range plus content for supported spreadsheet files. Read the current file first; do not retry unchanged.';
+const NO_MATCH_GUIDANCE =
+    'No text was changed. Re-read the latest file with read_file, copy an exact and unique old_string including indentation/whitespace, then retry. Fuzzy matches are hints only.';
+const COUNT_GUIDANCE =
+    'No text was changed. Add surrounding lines to make old_string unique, or set expected_replacements to the actual count ONLY if all occurrences should change. Read and verify the current file first.';
 
 interface FuzzyMatch {
     start: number;
@@ -132,12 +158,8 @@ export async function performSearchReplace(filePath: string, block: SearchReplac
     
         // Capture file extension in telemetry without capturing the file path
         capture('server_edit_block_empty_search', {fileExtension: fileExtension, expectedReplacements});
-        return {
-            content: [{ 
-                type: "text", 
-                text: "Empty search strings are not allowed. Please provide a non-empty string to search for."
-            }],
-        };
+        return editBlockFailure('INVALID_ARGUMENT',
+            'old_string must be non-empty. No changes were written.', MISSING_EDIT_GUIDANCE);
     }
     
 
@@ -163,14 +185,7 @@ export async function performSearchReplace(filePath: string, block: SearchReplac
     const normalizedSearch = normalizeLineEndings(block.search, fileLineEnding);
     
     // First try exact match
-    let tempContent = content;
-    let count = 0;
-    let pos = tempContent.indexOf(normalizedSearch);
-    
-    while (pos !== -1) {
-        count++;
-        pos = tempContent.indexOf(normalizedSearch, pos + 1);
-    }
+    const count = countNonOverlapping(content, normalizedSearch);
     
     // If exact match found and count matches expected replacements, proceed with exact replacement
     if (count > 0 && count === expectedReplacements) {
@@ -243,15 +258,9 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
     // If exact match found but count doesn't match expected, inform the user
     if (count > 0 && count !== expectedReplacements) {
         capture('server_edit_block_unexpected_count', {fileExtension: fileExtension, expectedReplacements, expectedReplacementsCount: count});
-        return {
-            content: [{ 
-                type: "text", 
-                text: `Expected ${expectedReplacements} occurrences but found ${count} in ${filePath}. ` + 
-            `Double check and make sure you understand all occurencies and if you want to replace all ${count} occurrences, set expected_replacements to ${count}. ` +
-            `If there are many occurrancies and you want to change some of them and keep the rest. Do it one by one, by adding more lines around each occurrence.` +
-`If you want to replace a specific occurrence, make your search string more unique by adding more lines around search string.`
-            }],
-        };
+        return editBlockFailure('EDIT_COUNT_MISMATCH',
+            `Expected ${expectedReplacements} occurrences but found ${count} in ${filePath}. No changes were written.`,
+            COUNT_GUIDANCE,{expectedReplacements,actualReplacements:count});
     }
     
     // If exact match not found, try fuzzy search
@@ -328,16 +337,9 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
             
             // If we allow fuzzy matches, we would make the replacement here
             // For now, we'll return a detailed message about the fuzzy match
-            return {
-                content: [{ 
-                    type: "text", 
-                    text: `Exact match not found, but found a similar text with ${Math.round(similarity * 100)}% similarity (found in ${executionTime.toFixed(2)}ms):\n\n` +
-                          `Differences:\n${diff}\n\n` +
-                          `To replace this text, use the exact text found in the file.\n\n` +
-                          `Log entry saved for analysis. Use the following command to check the log:\n` +
-                          `Check log: ${await fuzzySearchLogger.getLogPath()}`
-                }],// TODO
-            };
+            return editBlockFailure('EDIT_TEXT_NOT_FOUND',
+                `Exact match not found, but found a similar text with ${Math.round(similarity*100)}% similarity (found in ${executionTime.toFixed(2)}ms):\n\nDifferences:\n${diff.slice(0,1600)}\n\nNo changes were written.`,
+                NO_MATCH_GUIDANCE,{actualReplacements:0,closestSimilarity:Math.round(similarity*100)});
         } else {
             // If the fuzzy match isn't close enough
             // Still capture the fuzzy search event with all data
@@ -346,16 +348,11 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
                 below_threshold: true
             });
             
-            return {
-                content: [{ 
-                    type: "text", 
-                    text: `Search content not found in ${filePath}. The closest match was "${fuzzyResult.value}" ` +
-                          `with only ${Math.round(similarity * 100)}% similarity, which is below the ${Math.round(FUZZY_THRESHOLD * 100)}% threshold. ` +
-                          `(Fuzzy search completed in ${executionTime.toFixed(2)}ms)\n\n` +
-                          `Log entry saved for analysis. Use the following command to check the log:\n` +
-                          `Check log: ${await fuzzySearchLogger.getLogPath()}`
-                }],
-            };
+            return editBlockFailure('EDIT_TEXT_NOT_FOUND',
+                `Search content not found in ${filePath}. The closest match was "${fuzzyResult.value.slice(0,1500)}" `+
+                `with only ${Math.round(similarity*100)}% similarity, below the ${Math.round(FUZZY_THRESHOLD*100)}% threshold. `+
+                `(Fuzzy search completed in ${executionTime.toFixed(2)}ms). No changes were written.`,
+                NO_MATCH_GUIDANCE,{actualReplacements:0,closestSimilarity:Math.round(similarity*100)});
         }
     }
     
@@ -386,7 +383,9 @@ export async function performMultiEdit(
     const originalHash = sha256(await readBounded(validPath, 32 * 1024 * 1024));
     const content = await readFileInternal(validPath, 0, Number.MAX_SAFE_INTEGER);
     if (typeof content !== 'string') {
-        return createErrorResponse('Wrong content for file ' + displayPath);
+        return editBlockFailure('EDIT_STRUCTURED_FAILED',
+            'The target is not plain UTF-8 text: '+displayPath+'. No changes were written.',
+            'Use the correct file-specific range/content schema, or read the file first to choose a supported editing method.');
     }
     const lineEnding = detectLineEnding(content);
     let next = content;
@@ -396,7 +395,9 @@ export async function performMultiEdit(
         const expected = e.expected_replacements ?? 1;
         const label = `Edit #${i + 1} of ${edits.length}`;
         if (!e.old_string) {
-            return createErrorResponse(`${label}: old_string must be non-empty. No changes were written.`);
+            return editBlockFailure('INVALID_ARGUMENT',
+                `${label}: old_string must be non-empty. No changes were written.`,MISSING_EDIT_GUIDANCE,
+                {editIndex:i+1,editsApplied:0});
         }
         const search = normalizeLineEndings(e.old_string, lineEnding);
         const replace = normalizeLineEndings(e.new_string, lineEnding);
@@ -415,11 +416,12 @@ export async function performMultiEdit(
             } else {
                 hint = ` Set expected_replacements to ${count} to replace all, or add surrounding context to make old_string unique.`;
             }
-            return createErrorResponse(
-                `${label} failed: expected ${expected} occurrence(s) of old_string but found ${count}` +
-                (i > 0 ? ' (after applying the previous edits)' : '') +
-                `. No changes were written.${hint}`
-            );
+            return editBlockFailure(count===0?'EDIT_TEXT_NOT_FOUND':'EDIT_COUNT_MISMATCH',
+                `${label} failed: expected ${expected} occurrence(s) of old_string but found ${count}`+
+                (i>0?' (after evaluating previous edits in memory)':'')+
+                `. No changes were written.${hint.slice(0,1200)}`,
+                count===0?NO_MATCH_GUIDANCE:COUNT_GUIDANCE,
+                {editIndex:i+1,expectedReplacements:expected,actualReplacements:count,editsApplied:0});
         }
 
         if (expected === 1) {
@@ -497,7 +499,14 @@ function highlightDifferences(expected: string, actual: string): string {
 
  */
 export async function handleEditBlock(args: unknown): Promise<ServerResult> {
-    const parsed = EditBlockArgsSchema.parse(args);
+    const checked=EditBlockArgsSchema.safeParse(args);
+    if(!checked.success){
+        const missing=checked.error.issues.map(i=>i.path.join('.')||'arguments').slice(0,6).join(', ');
+        return editBlockFailure('INVALID_ARGUMENT',
+            'Invalid edit_block arguments ('+missing+'): '+checked.error.issues.map(i=>i.message).slice(0,4).join('; '),
+            MISSING_EDIT_GUIDANCE);
+    }
+    const parsed=checked.data;
 
     // Note: Check for truthy range to handle empty strings from AI clients that send all optional params
     const hasRange = parsed.range !== undefined && parsed.range !== '';
@@ -512,7 +521,9 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
         handler = await getFileHandler(validatedPath);
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        return createErrorResponse(errorMessage);
+        return editBlockFailure('EDIT_PATH_INVALID',
+            'Unable to open edit target: '+errorMessage,
+            'Verify file_path is an existing file inside an allowed directory; use read_file or get_file_info to confirm it. No changes were written.');
     }
 
     const hasEditRange = 'editRange' in handler && typeof handler.editRange === 'function';
@@ -550,11 +561,16 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
                 };
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                return createErrorResponse(errorMessage);
+                return editBlockFailure('EDIT_STRUCTURED_FAILED',
+                    'Range edit failed: '+errorMessage,
+                    'Inspect the current spreadsheet/file and supported range format before retrying. Some writes may have occurred.',
+                    {changed:'unknown'});
             }
         }
 
-        return createErrorResponse(`Range-based editing not supported for ${parsed.file_path}. For text files, use old_string and new_string parameters instead. If your client requires range/content parameters, set them to empty strings ("").`);
+        return editBlockFailure('EDIT_UNSUPPORTED_RANGE',
+            `Range-based editing not supported for ${parsed.file_path}. No changes were written.`,
+            'For plain text use old_string plus new_string, or edits:[{old_string,new_string}]. For spreadsheets use a supported range and 2D content.');
     }
 
     // Path 1b (BRC): multi-edit — edits[] applied in order
@@ -572,12 +588,20 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
                     });
                     if (!result.success) {
                         const errorMsg = result.errors?.map(er => er.error).join('; ') || 'Unknown error';
-                        return createErrorResponse(`Edit #${i + 1} of ${parsed.edits.length} failed: ${errorMsg}. ${applied} earlier edit(s) were already applied.`);
+                        return editBlockFailure('EDIT_STRUCTURED_FAILED',
+                            `Edit #${i+1} of ${parsed.edits.length} failed: ${errorMsg}. ${applied} earlier edit(s) were already applied.`,
+                            'Inspect the current structured document before retrying; some earlier edits may have completed.',
+                            {changed:applied>0,editsApplied:applied,partialApplied:applied>0});
+
                     }
                     applied++;
                 } catch (error) {
                     const errorMessage = error instanceof Error ? error.message : String(error);
-                    return createErrorResponse(`Edit #${i + 1} of ${parsed.edits.length} failed: ${errorMessage}. ${applied} earlier edit(s) were already applied.`);
+                    return editBlockFailure('EDIT_STRUCTURED_FAILED',
+                        `Edit #${i+1} of ${parsed.edits.length} failed: ${errorMessage}. ${applied} earlier edit(s) were already applied.`,
+                        'Inspect the current structured document before retrying; the failing edit may also have partially changed the file.',
+                        {changed:'unknown',editsApplied:applied,partialApplied:applied>0});
+
                 }
             }
             return { content: [{ type: "text", text: `Successfully applied ${applied} edit(s) to ${parsed.file_path}` }] };
@@ -587,7 +611,9 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
 
     // Path 2: Text replacement — old_string + new_string
     if (parsed.old_string === undefined || parsed.new_string === undefined) {
-        return createErrorResponse(`Text replacement requires both old_string and new_string parameters`);
+        return editBlockFailure('INVALID_ARGUMENT',
+            'Text replacement requires both old_string and new_string parameters. No changes were written.',
+            MISSING_EDIT_GUIDANCE);
     }
 
     // If the handler implements editRange it owns text-replacement for its file type
@@ -620,10 +646,16 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
             }
 
             const errorMsg = result.errors?.map(e => e.error).join('; ') || 'Unknown error';
-            return createErrorResponse(errorMsg);
+            return editBlockFailure('EDIT_STRUCTURED_FAILED',
+                'Structured text replacement failed: '+errorMsg,
+                'Read the latest document representation and verify the exact XML/text before retrying.',
+                {changed:'unknown'});
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            return createErrorResponse(errorMessage);
+            return editBlockFailure('EDIT_STRUCTURED_FAILED',
+                'Structured replacement threw an error: '+errorMessage,
+                'Inspect the current file before retrying; the handler may have partially changed the document.',
+                {changed:'unknown'});
         }
     }
 
