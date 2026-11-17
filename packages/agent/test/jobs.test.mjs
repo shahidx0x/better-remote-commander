@@ -83,3 +83,32 @@ test('job tools cannot be nested', async () => {
   const p = await callTool('run_parallel', { calls: [{ tool: 'spawn_job', args: {} }] });
   assert.equal(p.isError, true);
 });
+
+const bigCmd = (n, tag) => `node -e "console.log('${tag}'.repeat(${n}))"`;
+test('get_job pages through many large steps and never exceeds the MCP reply cap', async () => {
+  const steps = Array.from({ length: 12 }, (_, i) => ({ command: bigCmd(20_000, String.fromCharCode(65 + i)) }));
+  const r = await callTool('spawn_job', { label: 'big', steps });
+  const id = out(r).match(/job (j\w+)/)[1];
+  await callTool('wait_jobs', { ids: [id], timeout_ms: 30_000 });
+  const g = await callTool('get_job', { id, step_limit: 20, output_chars: 32_000 });
+  const first = out(g);
+  assert.ok(first.length <= 128_000, `reply ${first.length} chars`);
+  const more = first.match(/step_offset:(\d+)/);
+  assert.ok(more, 'expected a continuation hint');
+  const second = out(await callTool('get_job', { id, step_offset: Number(more[1]), step_limit: 20, output_chars: 32_000 }));
+  assert.ok(second.length <= 128_000);
+  assert.match(second, /(?:9|10|11|12)\. OK/, 'later steps are reachable');
+});
+
+test('run_parallel caps its combined reply and points to follow-up tools', async () => {
+  const calls = Array.from({ length: 12 }, (_, i) => ({ command: bigCmd(30_000, String.fromCharCode(97 + i)), label: 'c' + i }));
+  const r = await callTool('run_parallel', { calls, max_concurrency: 8, output_chars: 16_000, timeout_ms: 60_000 });
+  const text = out(r);
+  assert.ok(text.length <= 128_000, `reply ${text.length} chars`);
+  assert.match(text, /MORE PARALLEL RESULTS|12\/12 done/);
+});
+
+test('BRC_MAX_JOBS cannot be raised past the hard cap', async () => {
+  const src = await import('node:fs/promises').then((f) => f.readFile(path.join(repo, 'packages/agent/src/tools/jobs.ts'), 'utf8'));
+  assert.match(src, /Math\.min\(8,configuredJobs\)/);
+});
