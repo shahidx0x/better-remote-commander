@@ -17,6 +17,7 @@ import { availableOnTermux, isTermuxRuntime } from './runtime/platform-capabilit
 import { SANDBOX_TOOL_HANDLERS, buildSandboxToolDefinitions } from './tools/sandbox-tools.js';
 import { CHECK_TOOL_HANDLERS, buildCheckToolDefinitions } from './tools/check-tools.js';
 import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions } from './tools/coding-tools.js';
+import { EDIT_TOOL_HANDLERS, buildEditToolDefinitions } from './tools/edit-tools.js';
 import { invalidateNavCaches } from './runtime/nav-cache.js';
 import { WORKER_TOOL_HANDLERS, buildWorkerToolDefinitions } from './tools/worker-tools.js';
 import { workerCoordinator } from './runtime/worker-coordination.js';
@@ -78,6 +79,8 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(CHECK_TOOL_HANDLERS),
   // Read-only code navigation (outline/symbols/graph)
   ...Object.entries(CODING_TOOL_HANDLERS),
+  // Hash-checked range reading / editing
+  ...Object.entries(EDIT_TOOL_HANDLERS),
   // Optional host-native worker coordination (RAM-only)
   ...Object.entries(WORKER_TOOL_HANDLERS),
 ]);
@@ -93,6 +96,7 @@ export function listTools(): ToolDefinition[] {
       ...buildSandboxToolDefinitions(),
       ...buildWorkerToolDefinitions(),
       ...buildCodingToolDefinitions(),
+      ...buildEditToolDefinitions(),
       ...buildCheckToolDefinitions(),
     ]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && (!isTermuxRuntime() || availableOnTermux(t.name)));
