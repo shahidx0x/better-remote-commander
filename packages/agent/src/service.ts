@@ -10,14 +10,21 @@ import { mkdirSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { isTermuxRuntime } from './runtime/platform-capabilities.js';
 
 const NAME = 'brc-agent';
 const cliPath = () => fileURLToPath(new URL('./cli.js', import.meta.url));
 const home = () => process.env.BRC_HOME ?? path.join(os.homedir(), '.brc');
+/** Android/Termux has no systemd/launchd/Task Scheduler; do not write desktop service files there. */
+function refuseOnTermux(): void {
+  if (isTermuxRuntime())
+    throw new Error('Service registration is not supported on Android/Termux. Run the agent in a Termux session (consider termux-wake-lock, or Termux:Boot to start it at boot).');
+}
 const run = (cmd: string, args: string[]) => execFileSync(cmd, args, { stdio: 'pipe' }).toString();
 
 /** keepLog: opt-in (--service-log). By default service output is discarded, matching the live-only diagnostics policy. */
 export function installService(extraArgs: string[], keepLog = false): string {
+  refuseOnTermux();
   mkdirSync(home(), { recursive: true });
   const node = process.execPath;
   const args = [cliPath(), '--no-browser', '--non-interactive', ...extraArgs];
@@ -56,6 +63,7 @@ export function installService(extraArgs: string[], keepLog = false): string {
 }
 
 export function uninstallService(): string {
+  refuseOnTermux();
   if (process.platform === 'win32') {
     try { run('schtasks', ['/End', '/TN', NAME]); } catch { /* not running */ }
     run('schtasks', ['/Delete', '/F', '/TN', NAME]);
