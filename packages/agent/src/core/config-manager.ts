@@ -282,6 +282,14 @@ class ConfigManager {
     await this.writeChain;
   }
 
+  /** Release filesystem watching and persist queued state on orderly shutdown. */
+  async close(): Promise<void> {
+    this.watcher?.close();
+    this.watcher = null;
+    if (this.reloadTimer) { clearTimeout(this.reloadTimer); this.reloadTimer = null; }
+    await this.flush();
+  }
+
   /** Non-blocking, coalesced persistence for high-frequency state updates. */
   scheduleSave(): void {
     if (this.saveScheduled) return;
@@ -311,11 +319,23 @@ class ConfigManager {
       const dir = path.dirname(this.configPath);
       const filename = path.basename(this.configPath);
       this.watcher = watch(dir, { persistent: false }, (_event, changed) => {
+        // Win32 can repeatedly emit rename events after a watched directory is deleted,
+        // causing a busy event loop. Never keep watching a removed state dir.
+        if (!existsSync(dir)) {
+          this.watcher?.close();
+          this.watcher = null;
+          if (this.reloadTimer) { clearTimeout(this.reloadTimer); this.reloadTimer = null; }
+          return;
+        }
         if (changed && changed.toString() !== filename) return;
         if (this.reloadTimer) clearTimeout(this.reloadTimer);
         this.reloadTimer = setTimeout(() => void this.reloadConfigFromDisk(), 20);
       });
-      this.watcher.on('error', (error) => console.error('Config watcher error:', error));
+      this.watcher.on('error', (error) => {
+        this.watcher?.close();
+        this.watcher = null;
+        console.error('Config watcher error:', error);
+      });
     } catch (error) {
       console.error('Failed to watch config:', error);
     }

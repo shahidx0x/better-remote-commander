@@ -5,6 +5,7 @@ import { validatePath } from './tools/filesystem.js';
 import { capture } from './utils/capture.js';
 import { getRipgrepPath } from './utils/ripgrep-resolver.js';
 import { isExcelFile } from './utils/files/index.js';
+import { getCallContext, checkCancelled } from '../context.js';
 
 export interface SearchResult {
   file: string;
@@ -36,6 +37,8 @@ export interface SearchSession {
   options: SearchSessionOptions;
   buffer: string;  // For processing incomplete JSON lines
   totalMatches: number;
+  bytesStored: number;
+  stopReason?: 'limit' | 'output_limit' | 'timeout' | 'cancelled';
   totalContextLines: number;  // Track context lines separately
   wasIncomplete?: boolean;  // NEW: Track if search was incomplete due to permissions/access issues
 }
@@ -75,6 +78,12 @@ export interface SearchSessionOptions {
     totalResults: number;
     runtime: number;
   }> {
+    checkCancelled();
+    options = {...options, maxResults: Math.min(10000, Math.max(1, options.maxResults ?? 1000))};
+    if (this.sessions.size >= 32) {
+      for (const [id, old] of this.sessions) { if (old.isComplete) this.sessions.delete(id); if (this.sessions.size < 32) break; }
+      if (this.sessions.size >= 32) throw new Error('SEARCH_BUSY: stop an active search before starting another.');
+    }
     const sessionId = `search_${++this.sessionCounter}_${Date.now()}`;
     
     // Validate path first
@@ -110,6 +119,7 @@ export interface SearchSessionOptions {
       options,
       buffer: '',
       totalMatches: 0,
+      bytesStored: 0,
       totalContextLines: 0
     };
 
@@ -117,6 +127,12 @@ export interface SearchSessionOptions {
 
     // Set up process event handlers
     this.setupProcessHandlers(session);
+    const signal = getCallContext()?.signal;
+    const abort = () => this.stopLimited(session, 'cancelled');
+    signal?.addEventListener('abort', abort, {once:true});
+    if (signal?.aborted) abort();
+    rgProcess.once('close', () => signal?.removeEventListener('abort', abort));
+    rgProcess.once('error', () => signal?.removeEventListener('abort', abort));
 
     // Start cleanup interval now that we have a session
     startCleanupIfNeeded();
@@ -129,7 +145,7 @@ export interface SearchSessionOptions {
     if (timeoutMs) {
       killTimer = setTimeout(() => {
         if (!session.isComplete && !session.process.killed) {
-          session.process.kill('SIGTERM');
+          this.stopLimited(session, 'timeout');
         }
       }, timeoutMs);
     }
@@ -175,8 +191,7 @@ export interface SearchSessionOptions {
       ).then(excelResults => {
         // Add Excel results to session (merged after initial response)
         for (const result of excelResults) {
-          session.results.push(result);
-          session.totalMatches++;
+          if (!this.addResult(session, result)) break;
         }
       }).catch((err) => {
         // Log Excel search errors but don't fail the whole search
@@ -198,8 +213,7 @@ export interface SearchSessionOptions {
         options.literalSearch  // Respect literalSearch flag for Office files
       ).then(docxResults => {
         for (const result of docxResults) {
-          session.results.push(result);
-          session.totalMatches++;
+          if (!this.addResult(session, result)) break;
         }
       }).catch((err) => {
         capture('docx_search_error', { error: err instanceof Error ? err.message : String(err) });
@@ -270,7 +284,8 @@ export interface SearchSessionOptions {
     error?: string;
     hasMoreResults: boolean;      // New field
     runtime: number;
-    wasIncomplete?: boolean;      // NEW: Indicates if search was incomplete due to permissions
+    stopReason?: SearchSession['stopReason'];
+    wasIncomplete?: boolean;      // Includes explicit output/match/time limits
   } {
     const session = this.sessions.get(sessionId);
     
@@ -295,6 +310,7 @@ export interface SearchSessionOptions {
         error: session.error?.trim() || undefined,
         hasMoreResults: false, // Tail always returns what's available
         runtime: Date.now() - session.startTime,
+        stopReason: session.stopReason,
         wasIncomplete: session.wasIncomplete
       };
     }
@@ -315,6 +331,7 @@ export interface SearchSessionOptions {
       error: session.error?.trim() || undefined,
       hasMoreResults,
       runtime: Date.now() - session.startTime,
+      stopReason: session.stopReason,
       wasIncomplete: session.wasIncomplete
     };
   }
@@ -848,9 +865,12 @@ export interface SearchSessionOptions {
   private setupProcessHandlers(session: SearchSession): void {
     const { process } = session;
 
-    process.stdout?.on('data', (data: Buffer) => {
-      session.buffer += data.toString();
+    process.stdout?.setEncoding('utf8');
+    process.stdout?.on('data', (data: string) => {
+      if (session.stopReason) return;
+      session.buffer += data;
       this.processBufferedOutput(session);
+      if (session.buffer.length > 262144) this.stopLimited(session, 'output_limit');
     });
 
     process.stderr?.on('data', (data: Buffer) => {
@@ -858,7 +878,7 @@ export interface SearchSessionOptions {
 
       // Store error text for potential user display, but don't capture individual errors
       // We'll capture incomplete search status in the completion event instead
-      session.error = (session.error || '') + errorText;
+      session.error = ((session.error || '') + errorText).slice(0,8192);
 
       // Filter meaningful errors
       const filteredErrors = errorText
@@ -879,7 +899,7 @@ export interface SearchSessionOptions {
       if (filteredErrors.length > 0) {
         const meaningfulErrors = filteredErrors.join('\n').trim();
         if (meaningfulErrors) {
-          session.error = (session.error || '') + meaningfulErrors + '\n';
+          session.error = ((session.error || '') + meaningfulErrors + '\n').slice(0,8192);
           capture('search_session_error', {
             sessionId: session.id,
             error: meaningfulErrors.substring(0, 200)
@@ -900,6 +920,7 @@ export interface SearchSessionOptions {
       // Ripgrep exit code 2 means "some files couldn't be searched"
       if (code === 2) {
         session.wasIncomplete = true;
+        if (session.totalMatches === 0) { session.isError = true; session.error ||= 'ripgrep search failed'; }
       }
 
       // Only treat as error if:
@@ -925,6 +946,7 @@ export interface SearchSessionOptions {
         totalResults: session.totalMatches + session.totalContextLines,
         totalMatches: session.totalMatches,
         runtime: Date.now() - session.startTime,
+        stopReason: session.stopReason,
         wasIncomplete: session.wasIncomplete || false  // NEW: Track incomplete searches
       });
 
@@ -940,6 +962,26 @@ export interface SearchSessionOptions {
     });
   }
 
+
+  private stopLimited(session: SearchSession, reason: NonNullable<SearchSession['stopReason']>): void {
+    if (!session.stopReason) session.stopReason = reason;
+    session.wasIncomplete = true;
+    session.buffer = '';
+    if (!session.process.killed) session.process.kill('SIGTERM');
+  }
+  private addResult(session: SearchSession, result: SearchResult): boolean {
+    if (session.stopReason) return false;
+    const match = !(result.type === 'content' && result.isContext);
+    if (match && session.totalMatches >= (session.options.maxResults ?? 1000)) { this.stopLimited(session, 'limit'); return false; }
+    if (result.match) result.match = result.match.slice(0,2000);
+    const bytes = Buffer.byteLength(JSON.stringify(result));
+    if (session.bytesStored + bytes > 2 * 1024 * 1024 || session.results.length >= 30000) { this.stopLimited(session, 'output_limit'); return false; }
+    session.bytesStored += bytes;
+    session.results.push(result);
+    if (match) session.totalMatches++; else session.totalContextLines++;
+    if (match && session.totalMatches >= (session.options.maxResults ?? 1000)) this.stopLimited(session, 'limit');
+    return true;
+  }
   private processBufferedOutput(session: SearchSession, isFinal: boolean = false): void {
     const lines = session.buffer.split('\n');
     
@@ -951,17 +993,13 @@ export interface SearchSessionOptions {
     }
     
     for (const line of lines) {
+      if (session.stopReason) break;
+      if (line.length > 262144) { this.stopLimited(session, 'output_limit'); break; }
       if (!line.trim()) continue;
       
       const result = this.parseLine(line, session.options.searchType);
       if (result) {
-        session.results.push(result);
-        // Separate counting of matches vs context lines
-        if (result.type === 'content' && result.isContext) {
-          session.totalContextLines++;
-        } else {
-          session.totalMatches++;
-        }
+        if (!this.addResult(session, result)) break;
 
         // Early termination for exact filename matches (if enabled)
         if (session.options.earlyTermination !== false && // Default to true
@@ -1051,10 +1089,11 @@ function startCleanupIfNeeded(): void {
     cleanupInterval = setInterval(() => {
       searchManager.cleanupSessions();
     }, 5 * 60 * 1000);
+    cleanupInterval.unref();
     
     // Also check immediately after a short delay (let search process finish)
     setTimeout(() => {
       searchManager.cleanupSessions();
-    }, 1000);
+    }, 1000).unref();
   }
 }
