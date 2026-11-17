@@ -2,6 +2,7 @@
  * BRC agent transport: outbound WebSocket to the relay with auth, hello, heartbeat,
  * exponential-backoff reconnect, unauthorized handling and call dispatch.
  */
+import { reportedPlatform } from '../runtime/platform-capabilities.js';
 import WebSocket from 'ws';
 import os from 'node:os';
 import {
@@ -204,7 +205,7 @@ export class WsClient {
 
   private deviceInfo(): DeviceInfo {
     return {
-      deviceId: this.opts.deviceId, name: this.opts.name, platform: process.platform, arch: process.arch,
+      deviceId: this.opts.deviceId, name: this.opts.name, platform: reportedPlatform(), arch: process.arch,
       hostname: os.hostname(), agentVersion: this.opts.agentVersion, coreVersion: this.opts.coreVersion,
     };
   }

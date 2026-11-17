@@ -114,7 +114,7 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
             const stat=await fs.stat(await validatePath(parsed.path));
             if(stat.isFile() && stat.size>4*1024*1024)
                 return failure(new AgentError('IMAGE_TOO_LARGE',
-                    'Original image exceeds 4 MiB for a single MCP message. Use the file transfer tools for exact original bytes. No bytes were returned.'));
+                    'Original image exceeds 4 MiB for a single MCP message. Use read_images for a bounded preview or the file transfer tools for exact original bytes. No bytes were returned.'));
         }
 
         // Resolve to absolute path for local files (not URLs) so "Open in folder" works

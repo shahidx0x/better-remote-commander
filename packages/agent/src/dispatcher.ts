@@ -12,6 +12,14 @@ import { JOB_TOOL_HANDLERS, buildJobToolDefinitions, setJobToolExecutor } from '
 import { PLUGIN_TOOL_HANDLERS, buildPluginToolDefinitions } from './tools/plugin-tools.js';
 import { AST_GREP_TOOL_HANDLERS, buildAstGrepToolDefinitions } from './tools/ast-grep.js';
 import { WORKSPACE_TOOL_HANDLERS, buildWorkspaceToolDefinitions } from './tools/workspace-batch.js';
+import { IMAGE_TOOL_HANDLERS, buildImageToolDefinitions } from './tools/image-tools.js';
+import { availableOnTermux, isTermuxRuntime } from './runtime/platform-capabilities.js';
+import { SANDBOX_TOOL_HANDLERS, buildSandboxToolDefinitions } from './tools/sandbox-tools.js';
+import { CHECK_TOOL_HANDLERS, buildCheckToolDefinitions } from './tools/check-tools.js';
+import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions } from './tools/coding-tools.js';
+import { invalidateNavCaches } from './runtime/nav-cache.js';
+import { WORKER_TOOL_HANDLERS, buildWorkerToolDefinitions } from './tools/worker-tools.js';
+import { workerCoordinator } from './runtime/worker-coordination.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
 import { randomUUID } from 'node:crypto';
@@ -62,20 +70,38 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(AST_GREP_TOOL_HANDLERS),
   // Hash-checked multi-file edit/read batch
   ...Object.entries(WORKSPACE_TOOL_HANDLERS),
+  // Bounded image previews / contact sheets (sharp)
+  ...Object.entries(IMAGE_TOOL_HANDLERS),
+  // Optional restricted Docker sandbox (preview by default)
+  ...Object.entries(SANDBOX_TOOL_HANDLERS),
+  // Discovered project checks
+  ...Object.entries(CHECK_TOOL_HANDLERS),
+  // Read-only code navigation (outline/symbols/graph)
+  ...Object.entries(CODING_TOOL_HANDLERS),
+  // Optional host-native worker coordination (RAM-only)
+  ...Object.entries(WORKER_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
 
 export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildWorkspaceToolDefinitions()]
-      .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name));
+    cachedDefs = [
+      ...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(),
+      ...buildWorkspaceToolDefinitions(),
+      ...buildImageToolDefinitions(),
+      ...buildSandboxToolDefinitions(),
+      ...buildWorkerToolDefinitions(),
+      ...buildCodingToolDefinitions(),
+      ...buildCheckToolDefinitions(),
+    ]
+      .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && (!isTermuxRuntime() || availableOnTermux(t.name)));
   }
   return cachedDefs;
 }
 
 export function hasTool(name: string): boolean {
-  return TOOL_HANDLERS.has(name);
+  return TOOL_HANDLERS.has(name) && (!isTermuxRuntime() || availableOnTermux(name));
 }
 
 /** Tools that write files; they run under per-file locks so concurrent calls cannot clobber each other. */
@@ -93,7 +119,10 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     checkCancelled();
     const handler = TOOL_HANDLERS.get(name);
     if (!handler || EXCLUDED_TOOLS.has(name)) throw new AgentError('UNKNOWN_TOOL', `Unknown tool: ${name}`);
+    if (isTermuxRuntime() && !availableOnTermux(name))
+      throw new AgentError('UNSUPPORTED_ON_TERMUX', `${name} is not supported on Android/Termux (needs desktop-native binaries or Docker).`);
     args = args ?? {};
+    await workerCoordinator.guardFileMutation(name, args);
     const perform = async (): Promise<ToolResult> => {
       checkCancelled();
       // Optional optimistic concurrency: refuse to write if the file changed since the caller read it.
@@ -118,6 +147,7 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     void usageTracker.trackFailure(name);
     out = failure(err, parent.id);
   }
+  if (MUTATIONS.has(name) || name === 'workspace_batch') invalidateNavCaches(); // navigation caches are RAM-only hints
   const durationMs = Math.round(performance.now() - start);
   const code = (out.structuredContent?.error as { code?: string } | undefined)?.code;
   activity.tool(out.isError ? 'ERROR' : 'OK', name, parent.id, durationMs, code);

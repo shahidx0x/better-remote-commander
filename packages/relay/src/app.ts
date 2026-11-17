@@ -29,6 +29,9 @@ import * as adminPages from './pages/admin.js';
 import { LoginLimiter } from './auth/rate-limit.js';
 import { RegistryClient } from './plugins/registry.js';
 import { registerPluginRoutes } from './plugins/admin-routes.js';
+import { registerSkillsRoutes } from './features/skills-routes.js';
+import { registerUsageRoutes, usageSection } from './features/usage-routes.js';
+import { McpTrafficEstimator, mcpEstimatesEnabled } from './features/mcp-estimates.js';
 
 export interface RelayConfig {
   port: number;
@@ -70,6 +73,9 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const hub = new DeviceHub(cfg.relayVersion, log);
   const registry = RegistryClient.fromEnv();
   const publicUrl = new URL(cfg.publicUrl);
+  // Opt-in features, all OFF unless their env var is set to 1.
+  const skillsOn = process.env.BRC_SKILLS === '1';
+  const estimator = new McpTrafficEstimator(store, log, mcpEstimatesEnabled());
 
   const app = express();
   app.set('trust proxy', cfg.trustProxy);
@@ -317,7 +323,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
   const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
-    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log }, access);
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log }, access, { skills: skillsOn, estimator });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {
@@ -354,6 +360,8 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
 
   /* ---------- plugins: marketplace, per-device plugin admin, AI install requests ---------- */
   const pluginUi = registerPluginRoutes({ app, hub, store, sessions, registry, requireLogin, log });
+  if (skillsOn) registerSkillsRoutes(app, store, requireLogin, requireCsrf, currentUser);
+  registerUsageRoutes(app, store, log);
 
   /* ---------- admin dashboard ---------- */
   app.get('/admin', requireLogin, (req, res) => {
@@ -362,7 +370,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const devices = store.listDevices(userId).map((d) => ({ ...d, online: online.has(d.device_id) }));
     const names = new Map(devices.map((d) => [d.device_id, d.name]));
     const audit = store.recentAudit(userId, 100).map((a) => ({ ts: a.ts, device: names.get(a.device_id ?? '') ?? (a.device_id ?? '?').slice(0, 8), client: a.client, tool: a.tool, ok: a.ok, ms: a.ms, error: a.error }));
-    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, store.auditStats(userId), pluginUi.adminSections(req, userId), pluginUi.flash(req)));
+    res.type('html').send(adminPages.adminPage(cfg.publicUrl, devices, audit, store.auditStats(userId), pluginUi.adminSections(req, userId), pluginUi.flash(req), usageSection(store, userId) + (skillsOn ? '<div class="row"><a href="/admin/skills"><button class="secondary">Skill library</button></a></div>' : '')));
   });
   app.post('/admin/device', requireLogin, requireCsrf, (req, res) => {
     const userId = currentUser(req)!;
@@ -386,6 +394,9 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     const csrf = sessions.csrfToken(req);
     try {
       const publicUrl = new URL(cfg.publicUrl);
+  // Opt-in features, all OFF unless their env var is set to 1.
+  const skillsOn = process.env.BRC_SKILLS === '1';
+  const estimator = new McpTrafficEstimator(store, log, mcpEstimatesEnabled());
       if (publicUrl.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(publicUrl.hostname)) throw new Error('A public connection URL requires HTTPS.');
       const mode = req.body?.mode === 'full' ? 'full' : req.body?.mode === 'read' ? 'read' : null;
       if (!mode) throw new Error('Choose a valid access level.');
@@ -435,11 +446,13 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
 
   const housekeeping = setInterval(() => store.vacuumExpired(), 10 * 60_000);
   housekeeping.unref();
+  const usagePrune = setInterval(() => { try { store.pruneUsage(); } catch { /* best effort */ } }, 6 * 3_600_000);
+  usagePrune.unref();
 
   log('info', `admin user "${admin.username}" ready; db ${cfg.dbFile}`);
 
   return {
     http, hub, store,
-    close: async () => { clearInterval(housekeeping); hub.close(); wss.close(); await new Promise<void>((r) => http.close(() => r())); store.close(); },
+    close: async () => { clearInterval(housekeeping); clearInterval(usagePrune); await estimator.close(); hub.close(); wss.close(); await new Promise<void>((r) => http.close(() => r())); store.close(); },
   };
 }
