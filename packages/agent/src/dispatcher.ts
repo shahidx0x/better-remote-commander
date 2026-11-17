@@ -16,6 +16,8 @@ import { IMAGE_TOOL_HANDLERS, buildImageToolDefinitions } from './tools/image-to
 import { availableOnTermux, isTermuxRuntime } from './runtime/platform-capabilities.js';
 import { SANDBOX_TOOL_HANDLERS, buildSandboxToolDefinitions } from './tools/sandbox-tools.js';
 import { CHECK_TOOL_HANDLERS, buildCheckToolDefinitions } from './tools/check-tools.js';
+import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions } from './tools/coding-tools.js';
+import { invalidateNavCaches } from './runtime/nav-cache.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
 import { randomUUID } from 'node:crypto';
@@ -72,6 +74,8 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(SANDBOX_TOOL_HANDLERS),
   // Discovered project checks
   ...Object.entries(CHECK_TOOL_HANDLERS),
+  // Read-only code navigation (outline/symbols/graph)
+  ...Object.entries(CODING_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
@@ -83,6 +87,7 @@ export function listTools(): ToolDefinition[] {
       ...buildWorkspaceToolDefinitions(),
       ...buildImageToolDefinitions(),
       ...buildSandboxToolDefinitions(),
+      ...buildCodingToolDefinitions(),
       ...buildCheckToolDefinitions(),
     ]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && (!isTermuxRuntime() || availableOnTermux(t.name)));
@@ -136,6 +141,7 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     void usageTracker.trackFailure(name);
     out = failure(err, parent.id);
   }
+  if (MUTATIONS.has(name) || name === 'workspace_batch') invalidateNavCaches(); // navigation caches are RAM-only hints
   const durationMs = Math.round(performance.now() - start);
   const code = (out.structuredContent?.error as { code?: string } | undefined)?.code;
   activity.tool(out.isError ? 'ERROR' : 'OK', name, parent.id, durationMs, code);
