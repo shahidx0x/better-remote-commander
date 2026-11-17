@@ -176,7 +176,11 @@ export async function runCommandCore(
   const cfg = fast
     ? { executable: fast.executable, args: fast.args, windowsVerbatim: fast.windowsVerbatim }
     : getShellSpawnArgs(shellPath, wrapped);
-  const spawnEnv = fast?.env ?? env;
+  // The cached Unix login environment is captured from the agent's own process, so it can re-introduce the
+  // test-runner variables removed above. They would make a nested `node --test` think it is a child of the runner.
+  const spawnEnv: NodeJS.ProcessEnv = { ...(fast?.env ?? env) };
+  delete spawnEnv.NODE_TEST_CONTEXT;
+  delete spawnEnv.NODE_TEST_REPORTER;
 
   type SpawnCfg = { executable: string; args: string[]; useShellOption?: string | boolean; windowsVerbatim?: boolean };
   type Outcome = {

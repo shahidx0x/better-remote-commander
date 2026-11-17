@@ -1,13 +1,14 @@
 import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {mkdtempSync} from 'node:fs';
+import {mkdtempSync,realpathSync} from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {selectRunCommandShell,nativeChainParts,cmdCompatibleNativeChain} from '../dist/tools/command-shell.js';
 
-const scratch=mkdtempSync(path.join(os.tmpdir(),'brc-shell-recovery-'));
+// realpath: on Windows CI the temp dir is an 8.3 short path (RUNNER~1) which the allowed-directory check would not match.
+const scratch=realpathSync.native(mkdtempSync(path.join(os.tmpdir(),'brc-shell-recovery-')));
 process.env.BRC_HOME=path.join(scratch,'home');
 const project=path.join(scratch,'project');
 await fs.mkdir(project,{recursive:true});
@@ -132,4 +133,11 @@ test('nonzero exit and timeout preserve the real failure reason and next steps',
   const relative=await callTool('run_command',{cwd:'src',command:'node -v'});
   assert.equal(relative.isError,true);
   assert.equal(relative.structuredContent.error.code,'INVALID_CWD');
+});
+
+test('test-runner env vars never leak into a user command',async()=>{
+  process.env.NODE_TEST_CONTEXT='child-v8';process.env.NODE_TEST_REPORTER='spec';
+  const r=await callTool('run_command',{cwd:project,command:"node -e \"console.log('ctx='+(process.env.NODE_TEST_CONTEXT||'none'))\"",raw:true,timeout_ms:10000});
+  delete process.env.NODE_TEST_CONTEXT;delete process.env.NODE_TEST_REPORTER;
+  assert.match(r.content.map(c=>c.text??'').join(''),/ctx=none/);
 });
