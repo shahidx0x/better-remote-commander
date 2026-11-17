@@ -117,7 +117,9 @@ export interface PluginAdminMessage {
   unsetEnv?: string[];
 }
 
-export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage | PluginAdminMessage;
+/** relay -> agent: stop work for call `id` (client cancelled or relay deadline). Older agents ignore it. */
+export interface CancelMessage { type: 'cancel'; id: string; reason?: string }
+export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage | CancelMessage | PluginAdminMessage;
 
 export const DEFAULTS = {
   pingIntervalMs: 20_000,
