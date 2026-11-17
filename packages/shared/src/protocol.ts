@@ -36,6 +36,7 @@ export interface ToolResult {
   content: ContentBlock[];
   isError?: boolean;
   structuredContent?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
 }
 
 /* ---------- agent -> relay ---------- */

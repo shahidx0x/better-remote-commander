@@ -13,6 +13,12 @@ import { PLUGIN_TOOL_HANDLERS, buildPluginToolDefinitions } from './tools/plugin
 import { AST_GREP_TOOL_HANDLERS, buildAstGrepToolDefinitions } from './tools/ast-grep.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
+import { randomUUID } from 'node:crypto';
+import { activity } from './runtime/activity.js';
+import { AgentError, failure } from './runtime/errors.js';
+import { assertHash, withFileLocks } from './runtime/file-safety.js';
+import { validatePath } from './core/tools/filesystem.js';
+import { getCallContext, withCallContext, checkCancelled } from './context.js';
 
 type Args = Record<string, unknown>;
 type Handler = (args: Args) => Promise<unknown>;
@@ -69,22 +75,50 @@ export function hasTool(name: string): boolean {
   return TOOL_HANDLERS.has(name);
 }
 
+/** Tools that write files; they run under per-file locks so concurrent calls cannot clobber each other. */
+const MUTATIONS = new Set(['write_file', 'edit_block', 'move_file', 'create_directory', 'write_pdf']);
+const HASH_CHECKED = new Set(['write_file', 'edit_block']);
+
 export async function callTool(name: string, args: Args): Promise<ToolResult> {
-  const handler = TOOL_HANDLERS.get(name);
-  if (!handler) {
-    return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
-  }
+  const parent = getCallContext();
+  // Local/nested callers get their own context so every call has an id and can be cancelled/traced.
+  if (!parent) return withCallContext({ id: randomUUID(), client: null, remote: false }, () => callTool(name, args));
+  const start = performance.now();
+  activity.tool('START', name, parent.id);
+  let out: ToolResult;
   try {
-    const result = (await handler(args ?? {})) as ToolResult;
-    if (!result.isError) void usageTracker.trackSuccess(name);
+    checkCancelled();
+    const handler = TOOL_HANDLERS.get(name);
+    if (!handler || EXCLUDED_TOOLS.has(name)) throw new AgentError('UNKNOWN_TOOL', `Unknown tool: ${name}`);
+    args = args ?? {};
+    const perform = async (): Promise<ToolResult> => {
+      checkCancelled();
+      // Optional optimistic concurrency: refuse to write if the file changed since the caller read it.
+      if (HASH_CHECKED.has(name) && args.expected_sha256 !== undefined) {
+        if (typeof args.expected_sha256 !== 'string' || !/^[a-fA-F0-9]{64}$/.test(args.expected_sha256))
+          throw new AgentError('INVALID_ARGUMENT', 'expected_sha256 must be 64 hex characters.');
+        const target = args.file_path ?? args.path;
+        if (typeof target !== 'string') throw new AgentError('INVALID_ARGUMENT', 'A file path is required for expected_sha256.');
+        const validated = await validatePath(target);
+        await assertHash(validated, args.expected_sha256);
+        return withCallContext({ ...parent, writePrecondition: { path: validated, sha256: args.expected_sha256 } }, () => handler(args) as Promise<ToolResult>);
+      }
+      return (await handler(args)) as ToolResult;
+    };
+    if (MUTATIONS.has(name)) {
+      const targets = [args.file_path, args.path, args.source, args.destination, args.outputPath].filter((p): p is string => typeof p === 'string' && !!p);
+      out = await withFileLocks(await Promise.all(targets.map((p) => validatePath(p))), perform);
+    } else out = await perform();
+    if (!out.isError) void usageTracker.trackSuccess(name);
     else void usageTracker.trackFailure(name);
-    return result;
   } catch (err) {
     void usageTracker.trackFailure(name);
-    const message = err instanceof Error ? err.message : String(err);
-    return { content: [{ type: 'text', text: `Error in ${name}: ${message}` }], isError: true };
+    out = failure(err, parent.id);
   }
+  const durationMs = Math.round(performance.now() - start);
+  const code = (out.structuredContent?.error as { code?: string } | undefined)?.code;
+  activity.tool(out.isError ? 'ERROR' : 'OK', name, parent.id, durationMs, code);
+  return { ...out, _meta: { ...(out as { _meta?: Record<string, unknown> })._meta, callId: parent.id, durationMs } } as ToolResult;
 }
-
 // Job steps run through the same dispatcher (validation, usage tracking, error wrapping).
 setJobToolExecutor(async (name, args) => (await callTool(name, args)) as ServerResult);

@@ -134,7 +134,9 @@ async function getAllowedDirs(): Promise<string[]> {
 
 // Normalize all paths consistently
 function normalizePath(p: string): string {
-    return path.normalize(expandHome(p)).toLowerCase();
+    const normalized = path.normalize(expandHome(p));
+    // Only Windows is case-insensitive; lowercasing elsewhere let /A and /a share allowed-directory checks.
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 function expandHome(filepath: string): string {

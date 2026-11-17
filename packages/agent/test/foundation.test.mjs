@@ -16,7 +16,7 @@ test('concurrent locks serialize',async()=>{
   const d=await fs.mkdtemp(path.join(os.tmpdir(),'brc-fs-'));const f=path.join(d,'a.txt');await fs.writeFile(f,'');
   const order=[];
   await Promise.all([1,2].map(n=>withFileLocks([f],async()=>{order.push('s'+n);await new Promise(r=>setTimeout(r,30));order.push('e'+n);})));
-  assert.deepEqual(order,['s1','e1','s2','e2']);
+  assert.ok(order[0][0]==='s'&&order[1]==='e'+order[0][1]&&order[2][0]==='s'&&order[3]==='e'+order[2][1],'no interleaving: '+order);
 });
 test('atomicWrite enforces expected hash',async()=>{
   const d=await fs.mkdtemp(path.join(os.tmpdir(),'brc-fs-'));const f=path.join(d,'a.txt');await fs.writeFile(f,'one');

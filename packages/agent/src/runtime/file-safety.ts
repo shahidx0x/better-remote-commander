@@ -56,6 +56,8 @@ export async function atomicWrite(file: string, data: string | Buffer, expectedH
   if (!allowCancelled) checkCancelled();
   const condition = getCallContext()?.writePrecondition;
   if (!expectedHash && condition && await lockKey(condition.path) === await lockKey(file)) expectedHash = condition.sha256;
+  // Follow a symlink to its real target (dotfiles are often linked) and replace that file, not the link.
+  file = await fs.realpath(file).catch(() => file);
   const stat = await fs.lstat(file).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return null; throw e; });
   if (stat && (!stat.isFile() || stat.isSymbolicLink())) throw new AgentError('UNSAFE_TARGET', 'Atomic replacement requires a regular, non-symlink file.');
   const temp = path.join(path.dirname(file), `.${path.basename(file)}.brc-${randomUUID()}.tmp`);

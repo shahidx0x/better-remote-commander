@@ -60,7 +60,7 @@ export class ActivityLog {
             return;
         // Compact mode halves successful tool chatter by displaying the
         // completion, not the START and completion. History remains complete.
-        if (this.consoleMode === 'compact' && event.phase === 'START') return;
+        if (event.phase === 'START' && (this.consoleMode === 'compact' || process.env.BRC_DEBUG !== '1')) return;
         if (this.consoleMode === 'compact' && event.level === 'info' && !event.phase
             && !/^(Connecting to |Ready: |Disconnected|Relay refused|Device authorization)/.test(event.message)) return;
         if (this.consoleQueue.length >= 200) {

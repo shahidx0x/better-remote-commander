@@ -22,6 +22,7 @@ import { runFuzzySearchInWorker, getSimilarityRatio } from './fuzzySearch.js';
 import { capture } from '../utils/capture.js';
 import { createErrorResponse } from '../error-handlers.js';
 import { EditBlockArgsSchema } from "./schemas.js";
+import { atomicWrite, readBounded, sha256 } from "../../runtime/file-safety.js";
 import path from 'path';
 import { detectLineEnding, normalizeLineEndings } from '../utils/lineEndingHandler.js';
 import { configManager } from '../config-manager.js';
@@ -142,6 +143,7 @@ export async function performSearchReplace(filePath: string, block: SearchReplac
 
     // Read file directly to preserve line endings - critical for edit operations
     const validPath = await validatePath(filePath);
+    const originalHash = sha256(await readBounded(validPath, 32 * 1024 * 1024));
     const content = await readFileInternal(validPath, 0, Number.MAX_SAFE_INTEGER);
     
     // Make sure content is a string
@@ -200,7 +202,7 @@ export async function performSearchReplace(filePath: string, block: SearchReplac
 RECOMMENDATION: For large search/replace operations, consider breaking them into smaller chunks with fewer lines.`;
         }
         
-        await writeFile(filePath, newContent);
+        await atomicWrite(validPath, newContent, originalHash);
         capture('server_edit_block_exact_success', {fileExtension: fileExtension, expectedReplacements, hasWarning: warningMessage !== ""});
         const resolvedEditPath = resolveAbsolutePath(filePath);
 
@@ -381,6 +383,7 @@ export async function performMultiEdit(
     displayPath: string,
     edits: Array<{ old_string: string; new_string: string; expected_replacements?: number }>,
 ): Promise<ServerResult> {
+    const originalHash = sha256(await readBounded(validPath, 32 * 1024 * 1024));
     const content = await readFileInternal(validPath, 0, Number.MAX_SAFE_INTEGER);
     if (typeof content !== 'string') {
         return createErrorResponse('Wrong content for file ' + displayPath);
@@ -431,7 +434,7 @@ export async function performMultiEdit(
         return { content: [{ type: "text", text: `No changes: the ${edits.length} edit(s) produced identical content in ${displayPath}.` }] };
     }
 
-    await writeFile(validPath, next);
+    await atomicWrite(validPath, next, originalHash);
     capture('server_edit_block_multi', { fileExtension: path.extname(validPath).toLowerCase(), editCount: edits.length });
     const totalLines = next.split('\n').length;
     return {
