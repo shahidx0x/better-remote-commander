@@ -14,6 +14,7 @@ import { AST_GREP_TOOL_HANDLERS, buildAstGrepToolDefinitions } from './tools/ast
 import { WORKSPACE_TOOL_HANDLERS, buildWorkspaceToolDefinitions } from './tools/workspace-batch.js';
 import { IMAGE_TOOL_HANDLERS, buildImageToolDefinitions } from './tools/image-tools.js';
 import { availableOnTermux, isTermuxRuntime } from './runtime/platform-capabilities.js';
+import { SANDBOX_TOOL_HANDLERS, buildSandboxToolDefinitions } from './tools/sandbox-tools.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
 import { randomUUID } from 'node:crypto';
@@ -66,13 +67,20 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(WORKSPACE_TOOL_HANDLERS),
   // Bounded image previews / contact sheets (sharp)
   ...Object.entries(IMAGE_TOOL_HANDLERS),
+  // Optional restricted Docker sandbox (preview by default)
+  ...Object.entries(SANDBOX_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
 
 export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildWorkspaceToolDefinitions(), ...buildImageToolDefinitions()]
+    cachedDefs = [
+      ...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(),
+      ...buildWorkspaceToolDefinitions(),
+      ...buildImageToolDefinitions(),
+      ...buildSandboxToolDefinitions(),
+    ]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && (!isTermuxRuntime() || availableOnTermux(t.name)));
   }
   return cachedDefs;
