@@ -12,6 +12,8 @@ import { JOB_TOOL_HANDLERS, buildJobToolDefinitions, setJobToolExecutor } from '
 import { PLUGIN_TOOL_HANDLERS, buildPluginToolDefinitions } from './tools/plugin-tools.js';
 import { AST_GREP_TOOL_HANDLERS, buildAstGrepToolDefinitions } from './tools/ast-grep.js';
 import { WORKSPACE_TOOL_HANDLERS, buildWorkspaceToolDefinitions } from './tools/workspace-batch.js';
+import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions } from './tools/coding-tools.js';
+import { invalidateNavCaches } from './runtime/nav-cache.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
 import { randomUUID } from 'node:crypto';
@@ -62,13 +64,15 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(AST_GREP_TOOL_HANDLERS),
   // Hash-checked multi-file edit/read batch
   ...Object.entries(WORKSPACE_TOOL_HANDLERS),
+  // Read-only code navigation (outline/symbols/graph)
+  ...Object.entries(CODING_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
 
 export function listTools(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildWorkspaceToolDefinitions()]
+    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildWorkspaceToolDefinitions(), ...buildCodingToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name));
   }
   return cachedDefs;
@@ -118,6 +122,7 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     void usageTracker.trackFailure(name);
     out = failure(err, parent.id);
   }
+  if (MUTATIONS.has(name) || name === 'workspace_batch') invalidateNavCaches(); // navigation caches are RAM-only hints
   const durationMs = Math.round(performance.now() - start);
   const code = (out.structuredContent?.error as { code?: string } | undefined)?.code;
   activity.tool(out.isError ? 'ERROR' : 'OK', name, parent.id, durationMs, code);
