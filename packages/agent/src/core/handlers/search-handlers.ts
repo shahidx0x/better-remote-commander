@@ -7,6 +7,8 @@ import {
 } from '../tools/schemas.js';
 import { ServerResult } from '../types.js';
 import { capture } from '../utils/capture.js';
+import { structuredSearchFailure, searchErrorCode } from '../../runtime/search-diagnostics.js';
+import { AgentError } from '../../runtime/errors.js';
 
 /**
  * Handle start_search command
@@ -14,10 +16,8 @@ import { capture } from '../utils/capture.js';
 export async function handleStartSearch(args: unknown): Promise<ServerResult> {
   const parsed = StartSearchArgsSchema.safeParse(args);
   if (!parsed.success) {
-    return {
-      content: [{ type: "text", text: `Invalid arguments for start_search: ${parsed.error}` }],
-      isError: true,
-    };
+    return structuredSearchFailure(new AgentError('INVALID_ARGUMENT',
+      'Invalid start_search arguments: '+parsed.error.message.slice(0,1000)),'validate') as ServerResult;
   }
 
   if (parsed.data.wait) {
@@ -39,6 +39,11 @@ export async function handleStartSearch(args: unknown): Promise<ServerResult> {
       literalSearch: parsed.data.literalSearch,
     });
 
+    if(result.isError){
+      const state=searchManager.readSearchResults(result.sessionId,0,0);
+      return structuredSearchFailure(new AgentError(
+        searchErrorCode(state.error??'SEARCH_FAILED'),state.error??'ripgrep search failed'),'start') as ServerResult;
+    }
     const searchTypeText = parsed.data.searchType === 'content' ? 'content search' : 'file search';
     
     let output = `Started ${searchTypeText} session: ${result.sessionId}\n`;
@@ -77,10 +82,7 @@ export async function handleStartSearch(args: unknown): Promise<ServerResult> {
     const errorMessage = error instanceof Error ? error.message : String(error);
     capture('search_session_start_error', { error: errorMessage });
     
-    return {
-      content: [{ type: "text", text: `Error starting search session: ${errorMessage}` }],
-      isError: true,
-    };
+    return structuredSearchFailure(error,'start') as ServerResult;
   }
 }
 
@@ -116,8 +118,7 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
     });
     sessionId = started.sessionId;
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return { content: [{ type: "text", text: `Error starting search: ${errorMessage}` }], isError: true };
+    return structuredSearchFailure(error,'start') as ServerResult;
   }
 
   const deadline = Date.now() + timeoutMs;
@@ -136,32 +137,31 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
   if (all.stopReason === 'limit') stoppedReason = 'cap';
   if (all.stopReason === 'timeout') stoppedReason = 'timeout';
   if (all.isError && all.totalResults === 0 && all.error?.trim()) {
-    return { content: [{ type: "text", text: `Search failed: ${all.error}` }], isError: true };
+    return structuredSearchFailure(new AgentError(searchErrorCode(all.error),all.error),'results') as ServerResult;
   }
 
-  // Keep results up to `cap` matches (context lines ride along with their match).
+  // A large match set must not be forwarded as one huge MCP/ChatGPT
+  // response. Retain the search session for explicit offset-based retrieval.
+  const MAX_SEARCH_RESULT_CHARS = 48_000;
   const lines: string[] = [];
   let matches = 0;
   let truncated = false;
   let lastFile = '';
+  let outputChars = 0;
+  let returnedCount = 0;
   for (const r of all.results) {
-    if (r.type === 'file') {
-      if (matches >= cap) { truncated = true; break; }
-      matches++;
-      lines.push(r.file);
-      continue;
-    }
-    if (!r.isContext) {
-      if (matches >= cap) { truncated = true; break; }
-      matches++;
-    }
-    if (r.file !== lastFile) {
-      if (lastFile) lines.push('');
-      lines.push(r.file);
-      lastFile = r.file;
-    }
-    const text = r.lineText ?? r.match ?? '';
-    lines.push(`${r.line}${r.isContext ? '-' : ':'} ${text}`);
+    const isMatch = r.type === 'file' || !r.isContext;
+    if (isMatch && matches >= cap) {truncated=true;break;}
+    const nextFile = r.type === 'content' && r.file !== lastFile;
+    const snippet = r.type === 'file' ? r.file :
+      (nextFile ? (lastFile ? '\n' : '') + r.file + '\n' : '') +
+      `${r.line}${r.isContext ? '-' : ':'} ${r.lineText ?? r.match ?? ''}`;
+    if (outputChars + snippet.length + 1 > MAX_SEARCH_RESULT_CHARS) {truncated=true;break;}
+    if (isMatch) matches++;
+    if (r.type === 'content') lastFile=r.file;
+    lines.push(snippet);
+    outputChars += snippet.length + 1;
+    returnedCount++;
   }
 
   const kind = isContent ? 'match(es)' : 'file(s)';
@@ -171,8 +171,17 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
   if (all.stopReason === 'output_limit') header += ' [output limit reached; narrow the query]';
   if (all.wasIncomplete && !all.stopReason) header += ` — some paths were inaccessible`;
 
+  const hasMoreResults=truncated || returnedCount<all.results.length;
+  if(hasMoreResults)header += '\nMORE SEARCH RESULTS: use get_more_search_results with sessionId='+sessionId+
+    ' offset='+returnedCount+' length=80; no new search is necessary.';
   const body = lines.length ? lines.join('\n') : 'No matches found.';
-  return { content: [{ type: "text", text: `${header}\n\n${body}` }] };
+  return { content: [{ type: "text", text: `${header.slice(0,2000)}\n\n${body}` }],
+    structuredContent:{sessionId,totalMatches:all.totalMatches,returnedCount,
+      isComplete:all.isComplete,hasMoreResults,outputTruncated:truncated,
+      stopReason:all.stopReason,wasIncomplete:all.wasIncomplete,
+      ...(hasMoreResults?{next:{tool:'get_more_search_results',
+        args:{sessionId,offset:returnedCount,length:80}}}:{})}
+  };
 }
 
 /**
@@ -180,30 +189,20 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
  */
 export async function handleGetMoreSearchResults(args: unknown): Promise<ServerResult> {
   const parsed = GetMoreSearchResultsArgsSchema.safeParse(args);
-  if (!parsed.success) {
-    return {
-      content: [{ type: "text", text: `Invalid arguments for get_more_search_results: ${parsed.error}` }],
-      isError: true,
-    };
-  }
+  if (!parsed.success) return structuredSearchFailure(new AgentError('INVALID_ARGUMENT',
+    'Invalid get_more_search_results args: '+parsed.error.message.slice(0,1000)),'validate') as ServerResult;
 
   try {
     const results = searchManager.readSearchResults(
       parsed.data.sessionId,
-      parsed.data.offset,
-      parsed.data.length
+      parsed.data.offset<0?Math.max(-80,parsed.data.offset):parsed.data.offset,
+      Math.max(1,Math.min(80,parsed.data.length))
     );
     
     // Only return error if we have no results AND there's an actual error
     // Permission errors should not block returning found results
     if (results.isError && results.totalResults === 0 && results.error?.trim()) {
-      return {
-        content: [{
-          type: "text",
-          text: `Search session ${parsed.data.sessionId} encountered an error: ${results.error}`
-        }],
-        isError: true,
-      };
+      return structuredSearchFailure(new AgentError(searchErrorCode(results.error),results.error),'results') as ServerResult;
     }
 
     // Format results for display
@@ -212,7 +211,7 @@ export async function handleGetMoreSearchResults(args: unknown): Promise<ServerR
     output += `Runtime: ${Math.round(results.runtime / 1000)}s\n`;
     output += `Total results found: ${results.totalResults} (${results.totalMatches} matches)\n`;
     
-    const offset = parsed.data.offset;
+    const offset = parsed.data.offset<0?Math.max(-80,parsed.data.offset):parsed.data.offset;
     
     if (offset < 0) {
       // Negative offset - tail behavior
@@ -260,14 +259,14 @@ export async function handleGetMoreSearchResults(args: unknown): Promise<ServerR
 
     return {
       content: [{ type: "text", text: output }],
+      structuredContent:{sessionId:parsed.data.sessionId,returnedCount:results.returnedCount,
+        totalMatches:results.totalMatches,isComplete:results.isComplete,
+        hasMoreResults:results.hasMoreResults,
+        ...(offset>=0&&results.hasMoreResults?{next:{tool:'get_more_search_results',
+          args:{sessionId:parsed.data.sessionId,offset:offset+results.returnedCount,length:80}}}:{})}
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    
-    return {
-      content: [{ type: "text", text: `Error reading search results: ${errorMessage}` }],
-      isError: true,
-    };
+    return structuredSearchFailure(error,'results') as ServerResult;
   }
 }
 

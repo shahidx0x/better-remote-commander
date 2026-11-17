@@ -29,7 +29,7 @@ export function failure(err: unknown, callId?: string): ToolResult {
     WORKER_CAPACITY:'All worker slots are busy. Submit, release or renew a claim; do not create a competing plan.',
     WORKER_PLAN_BUSY:'An integration is already running. Check worker_tasks status before retrying.',
     CLAIM_EXPIRED:'Reclaim the task with worker_tasks, re-read current hashes and submit under the new claim. Old keys cannot be reused.',
-    FILE_CONFLICT:'Re-read current file and hash before proposing a fresh edit; do not force overwrite.',
+    FILE_CONFLICT:'The expected_sha256 is stale, or the file changed before commit. No blind retry. Call read_code_file for the current SHA-256 and exact text, then submit a corrected edit after confirming the latest content.',
     RESULT_TOO_LARGE:'Tool result exceeded the WebSocket budget. Request narrower ranges or fewer files. Mutations may already have completed: inspect results before any retry.',
     VERIFICATION_CHANGED:'Source changed during checks; stop parallel mutations and re-run validation when the tree is stable.',
     PARSER_BUSY:'Reduce parser concurrency or the batch size and retry after in-flight parses finish.',

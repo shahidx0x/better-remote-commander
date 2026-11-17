@@ -20,6 +20,7 @@ import { DEVELOPER_TOOL_HANDLERS, buildDeveloperToolDefinitions } from './tools/
 import { reclaimCaches } from './runtime/resource-limits.js';
 import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions, runBatch } from './tools/coding-tools.js';
 import { activity } from './runtime/activity.js';
+import { recordToolFailure, failureReason } from './runtime/failure-log.js';
 import { POLYGLOT_TOOL_HANDLERS, buildPolyglotToolDefinitions } from './tools/polyglot-tools.js';
 import { codeGraph } from './runtime/code-graph.js';
 import { EXPERT_TOOL_HANDLERS, buildExpertToolDefinitions } from './tools/expert-tools.js';
@@ -133,6 +134,12 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   const durationMs=Math.round(performance.now()-start);
   const error=out.structuredContent?.error as {code?:string}|undefined;
   activity.tool(out.isError?'ERROR':'OK',name,parent.id,durationMs,error?.code);
+  if(out.isError){
+    const code=error?.code??'TOOL_FAILED';
+    const reason=failureReason(name,code);
+    activity.log('error','FAILURE CAUSE '+name+' '+code+': '+reason);
+    recordToolFailure({tool:name,code,durationMs,callId:parent.id});
+  }
   return {...out,_meta:{...out._meta,callId:parent.id,durationMs}};
 }
 

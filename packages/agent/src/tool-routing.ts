@@ -100,7 +100,7 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   edit_block: {
     use: 'Make a small exact find-and-replace or supported structural edit in ONE file.',
     instead: 'For hash-checked coordinated edits across several files use edit_files / workspace_batch.',
-    caveat: 'Use expected_sha256 and expected match counts when available; verify the final diff.',
+    caveat: 'For one file, use exact old_string/new_string; include whitespace and unique context. expected_replacements defaults to 1 and must equal the actual count. An unmatched edit returns EDIT_TEXT_NOT_FOUND; mismatched counts return EDIT_COUNT_MISMATCH; stale expected_sha256 returns FILE_CONFLICT. On any failure re-read the file and do not replay the unchanged edit. Check changed/partialApplied before retrying a DOCX or spreadsheet edit.',
   },
   start_process: {
     use: 'Start a long-running or interactive shell command that may need more input or output retrieval.',

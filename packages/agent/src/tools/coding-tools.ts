@@ -3,6 +3,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { DEFAULT_WORKFLOW, playwrightPolicy } from '../runtime/browser-workflow.js';
+import { failureReason, failureLogPath } from '../runtime/failure-log.js';
 import type { ToolResult } from 'brc-shared';
 import type { ToolDefinition } from '../core/tool-definitions.js';
 import { validatePath } from '../core/tools/filesystem.js';
@@ -160,7 +161,13 @@ async function verifyProject(raw:unknown):Promise<ToolResult>{
 export const CODING_TOOL_HANDLERS:Record<string,(args:Record<string,unknown>)=>Promise<ToolResult>>={
   read_code_file:readCodeFile,read_code_context:readCodeContext,edit_files:editFiles,verify_project:verifyProject,
   project_index:async raw=>{const a=IndexSchema.parse(raw);return result(await projectIndex.manage(a.path,a.action,a.query,a.watch,a.limit));},
-  agent_status:async()=>result({operations:operationStatus(),latency:activity.metrics(),resources:cacheStatus(),indexedProjects:projectIndex.status(),codeGraphs:codeGraph.status(),parserCache:codeCacheStatus(),logging:{mode:"live-only",persistent:false},platform:platformCapabilities(),diagnostics:{dropped:activity.dropped,ioErrors:activity.ioErrors},memoryBytes:process.memoryUsage().rss,
+  agent_status:async()=>result({operations:operationStatus(),latency:activity.metrics(),resources:cacheStatus(),indexedProjects:projectIndex.status(),codeGraphs:codeGraph.status(),parserCache:codeCacheStatus(),logging:{mode:"live-plus-optional-last-100-failure-metadata",
+      persistent:process.env.BRC_ERROR_LOG==='1',
+      failedToolLog:{enabled:process.env.BRC_ERROR_LOG==='1',path:failureLogPath(),maxEntries:100,rotation:false,
+        contents:'Last 100 failures total only. No backup, paths, arguments, file content or credentials.'}},
+    recentFailures:activity.recent().filter(e=>e.phase==='ERROR').slice(-12).map(e=>({
+      timestamp:e.timestamp,tool:e.tool,code:e.code,durationMs:e.ms,reason:failureReason(e.tool??'',e.code??'TOOL_FAILED')})),
+    platform:platformCapabilities(),diagnostics:{dropped:activity.dropped,ioErrors:activity.ioErrors},memoryBytes:process.memoryUsage().rss,
     agentWorkflow:DEFAULT_WORKFLOW,playwrightSession:playwrightPolicy.status()}),
   cancel_operation:async raw=>{const a=CancelSchema.parse(raw);if(a.callId===getCallContext()?.id)throw new AgentError('INVALID_ARGUMENT','A cancellation call cannot cancel itself.');return result({callId:a.callId,cancelRequested:cancelOperation(a.callId),note:'Cancellation is cooperative. Commands/searches are stopped; completed edits are not undone. Interactive start_process sessions require force_terminate.'});},
 };
