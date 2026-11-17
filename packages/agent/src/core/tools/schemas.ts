@@ -56,8 +56,8 @@ export const KillProcessArgsSchema = z.object({
 export const ReadFileArgsSchema = z.object({
   path: z.string(),
   isUrl: z.boolean().optional().default(false),
-  offset: z.number().optional().default(0),
-  length: z.number().optional().default(1000),
+  offset: z.number().int().optional().default(0),
+  length: z.number().int().min(1).max(2000).optional(),
   sheet: z.string().optional(),  // String only for MCP client compatibility (Cursor doesn't support union types in JSON Schema)
   range: z.string().optional(),
   options: z.record(z.any()).optional(),
@@ -70,19 +70,20 @@ export const ReadFileArgsSchema = z.object({
 // BRC: `files` adds per-file line ranges (offset/length, same semantics as read_file).
 export const ReadMultipleFilesEntrySchema = z.object({
   path: z.string(),
-  offset: z.number().optional(),
-  length: z.number().optional(),
+  offset: z.number().int().optional(),
+  length: z.number().int().min(1).max(2000).optional(),
 });
 
 export const ReadMultipleFilesArgsSchema = z.object({
-  paths: z.array(z.string()).optional().default([]),
-  files: z.array(ReadMultipleFilesEntrySchema).optional().default([]),
+  paths: z.array(z.string().min(1)).max(64).optional().default([]),
+  files: z.array(ReadMultipleFilesEntrySchema).max(64).optional().default([]),
 }).refine(
-  data => data.paths.length + data.files.length > 0,
-  { message: "Provide at least one entry in paths or files" }
+  data => data.paths.length + data.files.length > 0 && data.paths.length + data.files.length <= 64,
+  { message: "Provide 1–64 total entries across paths and files" }
 );
 
 export const WriteFileArgsSchema = z.object({
+  expected_sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   path: z.string(),
   content: z.string(),
   mode: z.enum(['rewrite', 'append']).default('rewrite'),
@@ -183,6 +184,7 @@ export const EditBlockEditSchema = z.object({
 });
 
 export const EditBlockArgsSchema = z.object({
+  expected_sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   file_path: z.string(),
   // Text file string replacement
   old_string: z.string().optional(),

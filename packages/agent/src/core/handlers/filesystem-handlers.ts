@@ -1,6 +1,7 @@
 import {
     readFile,
     readMultipleFiles,
+    validatePath,
     writeFile,
     createDirectory,
     listDirectory,
@@ -17,6 +18,7 @@ import { ServerResult } from '../types.js';
 import { withTimeout } from '../utils/withTimeout.js';
 import { createErrorResponse } from '../error-handlers.js';
 import { configManager } from '../config-manager.js';
+import { AgentError, failure } from '../../runtime/errors.js';
 
 import {
     ReadFileArgsSchema,
@@ -29,6 +31,7 @@ import {
     WritePdfArgsSchema
 } from '../tools/schemas.js';
 import path from 'path';
+import fs from 'node:fs/promises';
 import os from 'os';
 import { resolvePreviewFileType } from '../ui/file-preview/shared/preview-file-types.js';
 
@@ -90,7 +93,7 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
             return createErrorResponse('Configuration not available');
         }
 
-        const defaultLimit = config.fileReadLineLimit ?? 1000;
+        const defaultLimit = Math.min(2000, Math.max(1, Math.trunc(config.fileReadLineLimit ?? 1000)));
 
         // Convert sheet parameter: numeric strings become numbers for Excel index access
         let sheetParam: string | number | undefined = parsed.sheet;
@@ -98,13 +101,21 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
             sheetParam = parseInt(parsed.sheet, 10);
         }
 
+        const pdfRequested=!parsed.isUrl && /\.pdf$/i.test(parsed.path);
         const options: ReadOptions = {
             isUrl: parsed.isUrl,
             offset: parsed.offset ?? 0,
-            length: parsed.length ?? defaultLimit,
-            sheet: sheetParam,
-            range: parsed.range
+            // PDF offsets/lengths count PAGES, not text lines. Never default to
+            // 300-page extraction in one MCP call.
+            length: pdfRequested?Math.min(parsed.length??3,5):(parsed.length??defaultLimit),
+            sheet: sheetParam,range:parsed.range
         };
+        if(!parsed.isUrl && /\.(?:png|jpe?g|webp|gif|avif|tiff?)$/i.test(parsed.path)) {
+            const stat=await fs.stat(await validatePath(parsed.path));
+            if(stat.isFile() && stat.size>4*1024*1024)
+                return failure(new AgentError('IMAGE_TOO_LARGE',
+                    'Original image exceeds 4 MiB for a single MCP message. Use the file transfer tools for exact original bytes. No bytes were returned.'));
+        }
 
         // Resolve to absolute path for local files (not URLs) so "Open in folder" works
         const resolvedFilePath = parsed.isUrl
@@ -113,23 +124,38 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
 
         const fileResult = await readFile(parsed.path, options);
 
+        if (fileResult.metadata?.error)
+            return failure(new AgentError('FILE_READ_FAILED',
+                String(fileResult.metadata.errorMessage??'Document extraction failed').slice(0,1200)));
         // Handle PDF files
         if (fileResult.metadata?.isPdf) {
             const meta = fileResult.metadata;
             const author = meta?.author ? `, Author: ${meta?.author}` : "";
             const title = meta?.title ? `, Title: ${meta?.title}` : "";
 
-            const pdfContent = fileResult.metadata?.pages?.flatMap((p: any) => [
-                ...(p.images?.map((image: any) => ({
-                    type: "image",
-                    data: image.data,
-                    mimeType: image.mimeType
-                })) ?? []),
-                {
-                    type: "text",
-                    text: `<!-- Page: ${p.pageNumber} -->\n${p.text}`,
-                },
-            ]) ?? [];
+            const pdfContent: Array<{type:string;text?:string;data?:string;mimeType?:string}>=[];
+            let textBudget=120_000, encodedImageBudget=3*1024*1024, omittedImages=0, textTruncated=false;
+            const pages=(meta.pages??[]).slice(0,5);
+            for(const page of pages) {
+                const body=String(page.text??''),take=Math.min(body.length,textBudget);
+                pdfContent.push({type:'text',text:'<!-- Page: '+page.pageNumber+' -->\n'+body.slice(0,take)+
+                    (take<body.length?'\n[PAGE TEXT TRUNCATED: request narrower pages]':'')});
+                textBudget-=take;
+                if(take<body.length)textTruncated=true;
+                for(const img of page.images??[]) {
+                    const encoded=String(img.data??'');
+                    if(encoded.length>encodedImageBudget) {omittedImages++;continue;}
+                    encodedImageBudget-=encoded.length;
+                    pdfContent.push({type:'image',data:encoded,mimeType:img.mimeType});
+                }
+            }
+            if(omittedImages)pdfContent.push({type:'text',text:
+                '[PDF IMAGES OMITTED: 3 MiB encoded image budget reached. Request fewer pages or use a dedicated image tool.]'});
+            const pagesReturned=pages.length;
+            const nextPage=(parsed.offset??0)+pagesReturned;
+            const hasMorePages=nextPage<(meta.totalPages??nextPage);
+            if(hasMorePages)pdfContent.push({type:'text',text:
+                '[MORE PDF PAGES: call read_file with offset='+nextPage+', length='+options.length+' to continue.]'});
 
             return {
                 content: [
@@ -139,14 +165,15 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
                     },
                     ...pdfContent
                 ],
-                ...(parsed.origin === 'ui' ? {
-                    structuredContent: {
-                        fileName: path.basename(resolvedFilePath),
-                        filePath: resolvedFilePath,
-                        fileType: 'unsupported' as const,
-                        ...await getDefaultEditorMetadata(resolvedFilePath),
-                    },
-                } : {}),
+                structuredContent: parsed.origin === 'ui' ? {
+                    fileName: path.basename(resolvedFilePath),
+                    filePath: resolvedFilePath,
+                    fileType: 'unsupported' as const,
+                    ...await getDefaultEditorMetadata(resolvedFilePath),
+                } : {read:{kind:'pdf',path:parsed.path,totalPages:meta.totalPages,
+                    pagesReturned,hasMorePages,textTruncated,omittedImages,
+                    truncated:hasMorePages||textTruncated||omittedImages>0,
+                    next:hasMorePages?{tool:'read_file',args:{path:parsed.path,offset:nextPage,length:options.length}}:null}},
             };
         }
 
@@ -208,16 +235,32 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
             if (parsed.origin === 'ui' && fileType === 'directory') {
                 textContent = textContent.replace(/^This is a directory, not a file\.[^\n]*\n+/, '');
             }
+            // A single enormous line can bypass a line-count limit and exhaust
+            // a remote AI host's message stream. Bound the returned text too.
+            const maxChars = parsed.origin === 'ui' ? 256_000 : 128_000;
+            const status = /^\[Reading (\d+) lines from[^\n]*\(total: (\d+) lines, (\d+) remaining\)\]/.exec(textContent);
+            const characterTruncated = textContent.length > maxChars;
+            if (characterTruncated)
+                textContent = textContent.slice(0, maxChars) +
+                    '\n\n[OUTPUT TRUNCATED: response exceeded ' + maxChars +
+                    ' characters. The file has very long lines; read it in smaller pieces (for example with a shell command) instead. Do not treat this as the complete file.]';
+            const hasMoreLines = !!status && Number(status[3]) > 0;
+            const returnedLines = status ? Number(status[1]) : 0;
+            const next = characterTruncated
+                ? {note:'The text budget cut a line. Read the file in smaller pieces (for example with a shell command); do not skip to the next line.'}
+                : hasMoreLines && (parsed.offset??0)>=0
+                ? {tool:'read_file',args:{path:parsed.path,offset:(parsed.offset??0)+returnedLines,length:options.length},
+                   note:'More lines exist. Request next offset to continue, or stop if the requested context is sufficient.'}
+                : null;
             return {
                 content: [{ type: "text", text: textContent }],
-                ...(parsed.origin === 'ui' ? {
-                    structuredContent: {
-                        fileName: path.basename(resolvedFilePath),
-                        filePath: resolvedFilePath,
-                        fileType,
-                        ...await getDefaultEditorMetadata(resolvedFilePath),
-                    },
-                } : {}),
+                structuredContent: parsed.origin === 'ui' ? {
+                    fileName: path.basename(resolvedFilePath), filePath: resolvedFilePath,
+                    fileType, ...await getDefaultEditorMetadata(resolvedFilePath),
+                } : {
+                    read: {path:parsed.path,returnedLines,hasMoreLines,characterTruncated,
+                      truncated:characterTruncated||hasMoreLines,next,complete:!characterTruncated && !hasMoreLines && !!status},
+                },
             };
         }
     };
@@ -241,62 +284,116 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
  */
 export async function handleReadMultipleFiles(args: unknown): Promise<ServerResult> {
     const parsed = ReadMultipleFilesArgsSchema.parse(args);
-    const fileResults = await readMultipleFiles([...parsed.paths, ...parsed.files]);
-
-    // Create a text summary of all files
-    const textSummary = fileResults.map(result => {
-        if (result.error) {
-            return `${result.path}: Error - ${result.error}`;
-        } else if (result.isPdf) {
-            return `${result.path}: PDF file with ${result.payload?.pages?.length} pages`;
-        } else if (result.mimeType) {
-            return `${result.path}: ${result.mimeType} ${result.isImage ? '(image)' : '(text)'}`;
-        } else {
-            return `${result.path}: Unknown type`;
-        }
-    }).join("\n");
-
-    // Create content items for each file
-    const contentItems: Array<{ type: string, text?: string, data?: string, mimeType?: string }> = [];
-
-    // Add the text summary
-    contentItems.push({ type: "text", text: textSummary });
-
-    // Add each file content
-    for (const result of fileResults) {
-        if (!result.error && result.content !== undefined) {
-            if (result.isPdf) {
-                result.payload?.pages.forEach((page, i) => {
-                    page.images.forEach((image, i) => {
-                        contentItems.push({
-                            type: "image",
-                            data: image.data,
-                            mimeType: image.mimeType
-                        });
-                    });
-                    contentItems.push({
-                        type: "text",
-                        text: page.text,
-                    });
-                });
-            } else if (result.isImage && result.mimeType) {
-                // For image files, add an image content item
-                contentItems.push({
-                    type: "image",
-                    data: result.content,
-                    mimeType: result.mimeType
-                });
-            } else {
-                // For text files, add a text summary
-                contentItems.push({
-                    type: "text",
-                    text: `\n--- ${result.path} contents: ---\n${result.content}`
-                });
+    const config = await configManager.getConfig();
+    // 200-line default in a batch prevents 64 medium files from becoming one
+    // huge MCP response. Callers may request up to 2000 lines per file.
+    const defaultLines = Math.min(200, Math.max(1, Math.trunc(config.fileReadLineLimit ?? 1000)));
+    const requested = [
+        ...parsed.paths.map(p => ({ path:p, offset:0, length:defaultLines })),
+        ...parsed.files.map(f => ({ ...f, offset:f.offset??0, length:f.length ?? defaultLines })),
+    ].map(f => ({...f,length:/\.pdf$/i.test(f.path)?Math.min(f.length,2):f.length}));
+    // Reserve media bytes BEFORE reading/decoding. Otherwise 64 simultaneous
+    // images/PDFs can inflate into hundreds of MB even if reply truncates them.
+    let mediaReserved=0;
+    const omissions=new Map<number,string>();
+    for(let i=0;i<requested.length;i++) {
+        const f=requested[i];
+        if(!/\.(?:pdf|png|jpe?g|gif|webp|avif|tiff?)$/i.test(f.path))continue;
+        try {
+            const stat=await fs.stat(await validatePath(f.path));
+            if(stat.isFile()) {
+                if(stat.size>2*1024*1024 || mediaReserved+stat.size>2*1024*1024) {
+                    omissions.set(i,'Media omitted before decoding: 2 MiB total batch input budget. Use a smaller batch, read the image alone, or use file transfer.');
+                } else mediaReserved+=stat.size;
+            }
+        }catch{ /* Existing file handler returns the real access/not-found error. */ }
+    }
+    const selected=requested.filter((_,i)=>!omissions.has(i));
+    const results=await readMultipleFiles(selected);
+    let position=0;
+    const fileResults: MultiFileResult[]=requested.map((f,i)=>
+        omissions.has(i)?{path:f.path,error:omissions.get(i)!}:results[position++]);
+    const summary = fileResults.map(r => r.error ? r.path + ': Error - ' + r.error :
+        r.path + ': ' + (r.mimeType ?? 'unknown') +
+        (r.isPdf ? ' (PDF)' : r.isImage ? ' (image)' : ' (text)')).join('\n');
+    // A bounded response is critical for large generated source (and image/PDF)
+    // results. Never silently return incomplete content as a complete file.
+    let charsRemaining = 160_000, mediaBytesRemaining = 2 * 1024 * 1024;
+    let truncated = omissions.size>0;
+    const continuations: {path:string;next:unknown;reason:string}[] = [];
+    const items: Array<{type:string;text?:string;data?:string;mimeType?:string}> = [];
+    const addText = (s:string) => {
+        if (charsRemaining <= 0) {truncated=true;return;}
+        const cap = Math.min(48_000,charsRemaining);
+        const cropped = s.length > cap;
+        if(cropped)truncated=true;
+        const text = cropped ? s.slice(0,cap) +
+            '\n[TRUNCATED: shared/per-file output budget reached; use read_file with offset/length. Do not treat as complete content.]' : s;
+        items.push({type:'text',text});
+        charsRemaining -= Math.min(cap,s.length);
+    };
+    addText(summary.slice(0,12000));
+    for (let i=0;i<fileResults.length;i++) {
+        const r=fileResults[i],entry=requested[i];
+        if (r.error || r.content === undefined) continue;
+        if(!r.isPdf&&!r.isImage) {
+            const info=/^\[Reading (\d+) lines from[^\n]*\(total: (\d+) lines, (\d+) remaining\)\]/.exec(r.content);
+            if(info&&Number(info[3])>0&&entry.offset>=0) {
+                truncated=true;
+                continuations.push({path:r.path,reason:'Additional lines exist',
+                    next:{tool:'read_file',args:{path:r.path,offset:entry.offset+Number(info[1]),length:entry.length}}});
+            }
+            if(r.content.length>48_000) {
+                truncated=true;
+                continuations.push({path:r.path,reason:'Character budget reached: a long line may have been cut',
+                    next:{note:'Read this file in smaller pieces (for example with a shell command).'}});
             }
         }
+        if (r.isPdf) {
+            // In a batch, PDF extraction is limited to two pages per file.
+            const returned=r.payload?.pages.length??0,total=r.payload?.metadata.totalPages??returned;
+            const nextOffset=entry.offset+returned;
+            if(nextOffset<total) {
+                truncated=true;
+                continuations.push({path:r.path,reason:'Additional PDF pages exist',
+                    next:{tool:'read_file',args:{path:r.path,offset:nextOffset,length:2}}});
+            }
+            // For large PDF image sets use the dedicated PDF/image tools.
+            for (const page of r.payload?.pages ?? []) {
+                addText('PDF ' + r.path + ', page ' + page.pageNumber + ':\n' + page.text);
+                for (const img of page.images ?? []) {
+                    const bytes = Math.floor(img.data.length * 3 / 4);
+                    if (bytes > mediaBytesRemaining) {
+                        truncated=true;
+                        addText('[PDF image omitted: media budget exhausted. Use read_file with an explicit page range.]');
+                        continue;
+                    }
+                    mediaBytesRemaining -= bytes;
+                    items.push({type:'image',data:img.data,mimeType:img.mimeType});
+                }
+            }
+        } else if (r.isImage && r.mimeType) {
+            const bytes = Math.floor(r.content.length * 3 / 4);
+            if (bytes > mediaBytesRemaining) {
+                truncated=true;
+                addText('[Image omitted due to the 2 MiB batch media budget: ' + r.path +
+                    '. Use read_file for the image alone.]');
+                continue;
+            }
+            mediaBytesRemaining -= bytes;
+            items.push({type:'image',data:r.content,mimeType:r.mimeType});
+        } else {
+            addText('\n--- ' + r.path + ' contents: ---\n' + r.content);
+        }
     }
-
-    return { content: contentItems };
+    if (charsRemaining <= 0) {
+        items.push({type:'text',text:'[BATCH OUTPUT LIMIT REACHED: some files/pages were omitted. Read remaining files in a smaller batch or narrow line ranges.]'});
+    }
+    return { content: items, structuredContent:{
+        batch:{truncated,more:continuations.length>0,continuations,
+            omitted: [...omissions.entries()].map(([i,reason])=>({path:requested[i].path,reason})),
+            next:truncated?'Read each returned continuation or retry with narrower files/ranges; do not treat cut content as complete.':null}
+    } };
 }
 
 /**
@@ -306,62 +403,44 @@ export async function handleWriteFile(args: unknown): Promise<ServerResult> {
     try {
         const modeProvided = !!(args && typeof args === 'object' && 'mode' in args);
         const parsed = WriteFileArgsSchema.parse(args);
-
-        // An omitted `mode` falls back to 'rewrite', which silently destroys
-        // the target's existing content. The common failure is an LLM caller
-        // intending to append but dropping the optional param (issue #541), so
-        // require explicit intent when the target already has content;
-        // new/empty files keep the zero-friction default.
-        if (!modeProvided) {
-            let existing: Record<string, any> | null = null;
-            try {
-                existing = await getFileInfo(parsed.path);
-            } catch {
-                // Missing file or invalid path — nothing to protect; the write
-                // itself will surface any real path error.
-            }
-            if (existing?.isFile && existing.size > 0) {
-                return createErrorResponse(
-                    `Write rejected to prevent accidental data loss: ${parsed.path} already exists ` +
-                    `with content (${existing.size} bytes), and no 'mode' was specified — the default ` +
-                    `mode 'rewrite' would REPLACE the entire file. Retry with an explicit mode: ` +
-                    `'append' to add your content to the end of the existing file, or 'rewrite' ` +
-                    `to replace all existing content.`
-                );
-            }
-        }
-
-        // Get the line limit from configuration
         const config = await configManager.getConfig();
-        const MAX_LINES = config.fileWriteLineLimit ?? 50; // Default to 50 if not set
-
-        // Strictly enforce line count limit
-        const lines = parsed.content.split('\n');
-        const lineCount = lines.length;
-        let errorMessage = "";
-        if (lineCount > MAX_LINES) {
-            errorMessage = `✅ File written successfully! (${lineCount} lines)
-            
-💡 Performance tip: For optimal speed, consider chunking files into ≤30 line pieces in future operations.`;
+        const maxBytes = 1024 * 1024;
+        const bytes = Buffer.byteLength(parsed.content, 'utf8');
+        if (bytes > maxBytes)
+            throw new AgentError('WRITE_SIZE_LIMIT',
+                'No file changed: ' + bytes + ' bytes exceeds the 1 MiB write_file limit. ' +
+                'Split new files into mode=rewrite then mode=append chunks, or use edit_block for precise edits.');
+        // A trailing newline is not another line. fileWriteLineLimit stays a soft, advisory limit as before.
+        const lineCount = parsed.content === '' ? 0 :
+            parsed.content.split(/\r\n|\r|\n/).length - (/[\r\n]$/.test(parsed.content) ? 1 : 0);
+        const MAX_LINES = config.fileWriteLineLimit ?? 50;
+        const tip = lineCount > MAX_LINES
+            ? '\n\nPerformance tip: for optimal speed, consider chunking files into smaller pieces (' + MAX_LINES + ' lines or fewer) in future operations.'
+            : '';
+        // Prevent silent accidental overwrites. A caller intending to append
+        // must not destroy a nonempty file by forgetting the mode parameter.
+        if (!modeProvided) {
+            const existing = await getFileInfo(parsed.path).catch(() => null);
+            if (existing?.isFile && existing.size > 0)
+                throw new AgentError('WRITE_MODE_REQUIRED',
+                    'No file changed: existing file has ' + existing.size +
+                    ' bytes. Explicitly set mode=append or mode=rewrite. For precise edits, use edit_block.');
         }
 
-        // Pass the mode parameter to writeFile
         await writeFile(parsed.path, parsed.content, parsed.mode);
-
-        // Provide more informative message based on mode
         const modeMessage = parsed.mode === 'append' ? 'appended to' : 'wrote to';
-
-        // No structuredContent: nothing in the UI calls write_file (the widget
-        // previews the write via its own read_file pull at tool-result time).
-        return {
-            content: [{
-                type: "text",
-                text: `Successfully ${modeMessage} ${parsed.path} (${lineCount} lines) ${errorMessage}`
-            }],
+        // No duplicated file-content preview. The UI retrieves it separately.
+        return { content: [{type:'text',
+            text:'Successfully ' + modeMessage + ' ' + parsed.path + ' (' +
+                lineCount + ' lines, ' + bytes + ' bytes).' + tip}],
+            structuredContent:{write:{
+                path:parsed.path,mode:parsed.mode,linesWritten:lineCount,bytesWritten:bytes,
+                thisChunkComplete:true,moreChunksUnknown:true,
+                continueOnlyIfNeeded:'If more intended content remains, use mode=append with ONLY the next chunk. Do not replay this successful chunk. For existing code, verify hash/readback and use hash-checked changes. The caller decides when the complete file is finished.'
+            }}
         };
     } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        return createErrorResponse(errorMessage);
+        return failure(error);
     }
 }
 
