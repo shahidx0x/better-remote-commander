@@ -25,7 +25,7 @@ import { POLYGLOT_TOOL_HANDLERS, buildPolyglotToolDefinitions } from './tools/po
 import { codeGraph } from './runtime/code-graph.js';
 import { EXPERT_TOOL_HANDLERS, buildExpertToolDefinitions } from './tools/expert-tools.js';
 import { AgentError, failure } from './runtime/errors.js';
-import { assertHash, withFileLocks } from './runtime/file-safety.js';
+import { assertHash, withFileLocks, readBounded, sha256, decodeCode } from './runtime/file-safety.js';
 import { validatePath } from './core/tools/filesystem.js';
 import { projectIndex } from './runtime/project-index.js';
 import { getCallContext, withCallContext, checkCancelled } from './context.js';
@@ -93,6 +93,47 @@ export function hasTool(name: string): boolean {
 }
 
 
+/**
+ * A stale hash can be safely refreshed only for explicit text substitutions
+ * whose exact anchors still match once each in the current source. This never
+ * applies to whole-file writes or structured edits. atomicWrite still enforces
+ * the refreshed full-file hash before committing.
+ */
+async function rebaseUnambiguousEditBlock(file:string,args:Args):Promise<string|null>{
+  if((args.range!==undefined && args.range!=='') ||
+     (args.content!==undefined && args.content!==''))return null;
+  const steps=Array.isArray(args.edits)?args.edits:
+    (typeof args.old_string==='string'?[args]:[]);
+  if(steps.length<1||steps.length>20)return null;
+  let bytes:Buffer, source:string;
+  try{
+    bytes=await readBounded(file,32*1024*1024);
+    source=decodeCode(bytes);
+  }catch{return null;}
+  const newline=source.includes('\r\n')?'\r\n':'\n';
+  const normalize=(s:string)=>s.replace(/\r?\n/g,newline);
+  for(const step of steps){
+    if(!step||typeof step!=='object')return null;
+    const edit=step as {old_string?:unknown;new_string?:unknown;expected_replacements?:unknown};
+    if(typeof edit.old_string!=='string'||typeof edit.new_string!=='string'||
+      edit.old_string.length<12 || (edit.expected_replacements??1)!==1)return null;
+    const needle=normalize(edit.old_string),replacement=normalize(edit.new_string);
+    const at=source.indexOf(needle);
+    if(at===-1 || source.indexOf(needle,at+needle.length)!==-1)return null;
+    source=source.slice(0,at)+replacement+source.slice(at+needle.length);
+  }
+  return sha256(bytes);
+}
+
+function safeCommandDiagnostic(cause:unknown):string{
+  if(typeof cause!=='string')return 'NONZERO_EXIT';
+  if(cause==='Git was executed outside a repository.')return 'GIT_NOT_REPOSITORY';
+  if(cause==='Project dependencies or runtime module resolution failed.')return 'MODULE_RESOLUTION';
+  if(cause==='An executable or shell command could not be found.')return 'EXECUTABLE_NOT_FOUND';
+  if(cause==='Windows PowerShell 5.1 rejected && / || command chaining.')return 'SHELL_CHAIN_SYNTAX';
+  return 'NONZERO_EXIT';
+}
+
 const MUTATIONS = new Set(['write_file','edit_block','delete_file','move_file','create_directory','write_pdf']);
 export async function callTool(name: string, args: Args): Promise<ToolResult> {
   const parent=getCallContext();
@@ -116,8 +157,25 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
         const target=args.file_path??args.path;
         if(typeof target!=='string')throw new AgentError('INVALID_ARGUMENT','A file path is required for expected_sha256.');
         const validated = await validatePath(target);
-        await assertHash(validated,args.expected_sha256);
-        return withCallContext({...parent,writePrecondition:{path:validated,sha256:args.expected_sha256}},()=>handler(args) as Promise<ToolResult>);
+        let checkedHash=args.expected_sha256;
+        let rebased=false;
+        try {
+          await assertHash(validated,checkedHash);
+        } catch (err) {
+          if(name!=='edit_block' || !(err instanceof AgentError) || err.code!=='FILE_CONFLICT')throw err;
+          const latestHash=await rebaseUnambiguousEditBlock(validated,args);
+          if(!latestHash)throw err;
+          checkedHash=latestHash;
+          rebased=true;
+        }
+        // Keep the validated hash authoritative for the whole mutation.
+        return withCallContext({...parent,writePrecondition:{path:validated,sha256:checkedHash}},async()=>{
+          const response=await handler(args) as ToolResult;
+          if(!rebased||response.isError)return response;
+          return {...response,
+            content:[...response.content,{type:'text' as const,text:'[BRC] Stale hash safely refreshed: all exact text anchors were unique; unrelated changes were preserved.'}],
+            structuredContent:{...response.structuredContent,autoRebasedFromStaleHash:true}};
+        });
       }
       return await handler(args) as ToolResult;
     };
@@ -138,7 +196,12 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     const code=error?.code??'TOOL_FAILED';
     const reason=failureReason(name,code);
     activity.log('error','FAILURE CAUSE '+name+' '+code+': '+reason);
-    recordToolFailure({tool:name,code,durationMs,callId:parent.id});
+    const meta=out.structuredContent as Record<string,unknown>|undefined;
+    const cause=(meta?.recovery as Record<string,unknown>|undefined)?.cause;
+    const exitCode=name==='run_command'&&code==='COMMAND_FAILED'&&typeof meta?.exitCode==='number'
+      ?meta.exitCode:undefined;
+    recordToolFailure({tool:name,code,durationMs,callId:parent.id,
+      ...(exitCode!==undefined?{exitCode,diagnostic:safeCommandDiagnostic(cause)}:{})});
   }
   return {...out,_meta:{...out._meta,callId:parent.id,durationMs}};
 }

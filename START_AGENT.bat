@@ -57,6 +57,8 @@ if errorlevel 1 (
   exit /b 2
 )
 title Better Remote Commander - Local Agent
+rem Keep a local, bounded failure-only log unless the owner explicitly opts out.
+if not defined BRC_ERROR_LOG set "BRC_ERROR_LOG=1"
 pushd "%BRC_ROOT%" >nul 2>&1
 if errorlevel 1 (
   echo [BRC] Could not enter the registered project directory.

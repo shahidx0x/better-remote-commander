@@ -49,13 +49,24 @@ export function failureReason(tool:string,code:string):string {
 export function failureLogPath(home=process.env.BRC_HOME??path.join(os.homedir(),'.brc')):string {
   return path.join(home,'logs','agent-failures.jsonl');
 }
-type Failure={tool:string;code:string;durationMs:number;callId:string};
-type SafeEntry={timestamp:string;tool:string;code:string;durationMs:number;callId:string;reason:string};
+type Failure={tool:string;code:string;durationMs:number;callId:string;exitCode?:number|null;diagnostic?:string};
+type SafeEntry={timestamp:string;tool:string;code:string;durationMs:number;callId:string;reason:string;exitCode?:number;diagnostic?:string};
 function clean(v:string,limit=80):string {return v.replace(/[^\w.-]/g,'_').slice(0,limit);}
+// Never write command lines, stderr or arbitrary model/tool-supplied diagnostics.
+const SAFE_DIAGNOSTICS=new Set(['GIT_NOT_REPOSITORY','MODULE_RESOLUTION','EXECUTABLE_NOT_FOUND','SHELL_CHAIN_SYNTAX','NONZERO_EXIT']);
+function safeDiagnostic(value:unknown):string|undefined {
+  return typeof value==='string'&&SAFE_DIAGNOSTICS.has(value)?value:undefined;
+}
+function safeExitCode(value:unknown):number|undefined {
+  return typeof value==='number'&&Number.isSafeInteger(value)&&Math.abs(value)<=2147483647?value:undefined;
+}
 function newEntry(event:Failure):SafeEntry {
+  const exitCode=safeExitCode(event.exitCode);
+  const diagnostic=safeDiagnostic(event.diagnostic);
   return {timestamp:new Date().toISOString(),tool:clean(event.tool),
     code:clean(event.code),durationMs:Math.max(0,Math.round(event.durationMs)),
-    callId:clean(event.callId,16),reason:failureReason(event.tool,event.code)};
+    callId:clean(event.callId,16),reason:failureReason(event.tool,event.code),
+    ...(exitCode!==undefined?{exitCode}:{}),...(diagnostic?{diagnostic}:{})};
 }
 function parseEntry(line:string):SafeEntry|null {
   try{
@@ -66,7 +77,9 @@ function parseEntry(line:string):SafeEntry|null {
       tool:clean(v.tool),code:clean(v.code),
       durationMs:Number.isFinite(v.durationMs)?Math.max(0,Math.round(v.durationMs!)):0,
       callId:clean(typeof v.callId==='string'?v.callId:'',16),
-      reason:failureReason(v.tool,v.code)};
+      reason:failureReason(v.tool,v.code),
+      ...(safeExitCode(v.exitCode)!==undefined?{exitCode:safeExitCode(v.exitCode)}:{}),
+      ...(safeDiagnostic(v.diagnostic)?{diagnostic:safeDiagnostic(v.diagnostic)}:{})};
   }catch{return null;}
 }
 async function persistBatch(batch:Failure[]):Promise<void>{

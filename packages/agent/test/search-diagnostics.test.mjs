@@ -83,6 +83,22 @@ test('large searches have a 48K budget, session ID and correct continuation',asy
  assert.equal(further.structuredContent.sessionId,next.args.sessionId);
 });
 
+test('failed run_command records safe diagnosis and exit code, never the shell command',async()=>{
+ const command='node -e "process.exit(7)"';
+ const r=await callTool('run_command',{cwd:root,command,raw:true,timeout_ms:10000});
+ assert.equal(r.isError,true,txt(r));
+ assert.equal(r.structuredContent?.error?.code,'COMMAND_FAILED',txt(r));
+ assert.equal(r.structuredContent?.exitCode,7,txt(r));
+ await flushToolFailureLogs();
+ const lines=(await fs.readFile(failureLogPath(),'utf8')).trim().split('\n').map(s=>JSON.parse(s));
+ const last=lines.at(-1);
+ assert.equal(last.tool,'run_command');
+ assert.equal(last.code,'COMMAND_FAILED');
+ assert.equal(last.exitCode,7);
+ assert.equal(last.diagnostic,'NONZERO_EXIT');
+ assert.ok(!(await fs.readFile(failureLogPath(),'utf8')).includes(command));
+});
+
 test('failure logger retains metadata only, is bounded, and can be disabled',async()=>{
  const {recordToolFailure,flushToolFailureLogs}=await import('../dist/runtime/failure-log.js');
  const enabled=process.env.BRC_ERROR_LOG;

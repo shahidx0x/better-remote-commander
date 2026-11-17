@@ -50,7 +50,13 @@ export async function assertHash(file: string, expected: string): Promise<void> 
 export async function atomicWrite(file: string, data: string | Buffer, expectedHash?: string, allowCancelled = false): Promise<void> {
   if (!allowCancelled) checkCancelled();
   const condition = getCallContext()?.writePrecondition;
-  if (!expectedHash && condition && await lockKey(condition.path) === await lockKey(file)) expectedHash = condition.sha256;
+  if (condition && await lockKey(condition.path) === await lockKey(file)) {
+    // Never let an intervening external write silently reset an earlier
+    // caller-supplied precondition, even when the handler re-reads the file.
+    if (expectedHash && expectedHash.toLowerCase() !== condition.sha256.toLowerCase())
+      throw new AgentError('FILE_CONFLICT', 'File changed after precondition validation. No replacement was made.');
+    expectedHash = condition.sha256;
+  }
   const stat = await fs.lstat(file).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return null; throw e; });
   if (stat && (!stat.isFile() || stat.isSymbolicLink())) throw new AgentError('UNSAFE_TARGET', 'Atomic replacement requires a regular, non-symlink file.');
   const temp = path.join(path.dirname(file), `.${path.basename(file)}.brc-${randomUUID()}.tmp`);

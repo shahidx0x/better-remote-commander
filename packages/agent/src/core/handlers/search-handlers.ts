@@ -117,6 +117,13 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
       skipInitialWait: true,
     });
     sessionId = started.sessionId;
+    // An immediate ripgrep failure must not be reported as a successful empty search.
+    if (started.isError) {
+      const state = searchManager.readSearchResults(sessionId, 0, 0);
+      return structuredSearchFailure(new AgentError(
+        searchErrorCode(state.error ?? 'SEARCH_FAILED'),
+        state.error ?? 'ripgrep search failed during startup'), 'start') as ServerResult;
+    }
   } catch (error) {
     return structuredSearchFailure(error,'start') as ServerResult;
   }

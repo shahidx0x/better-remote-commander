@@ -75,6 +75,50 @@ test('replacement counts use actual non-overlapping matches',async()=>{
  assert.equal(await fs.readFile(p,'utf8'),'bb');
 });
 
+test('stale hash rebases only when an exact, unique, sufficiently specific anchor remains',async()=>{
+ const p=file('safe-rebase.ts');
+ const original='export const importantLabel = "before";\nexport const unrelated = 1;\n';
+ const revised='export const importantLabel = "before";\nexport const unrelated = 2;\n';
+ await fs.writeFile(p,original);
+ const previousHash=sha256(original);
+ await fs.writeFile(p,revised);
+ const r=await callTool('edit_block',{file_path:p,
+   old_string:'export const importantLabel = "before";',
+   new_string:'export const importantLabel = "after";',
+   expected_sha256:previousHash});
+ assert.notEqual(r.isError,true,text(r));
+ assert.equal(r.structuredContent?.autoRebasedFromStaleHash,true);
+ assert.equal(await fs.readFile(p,'utf8'),
+   'export const importantLabel = "after";\nexport const unrelated = 2;\n');
+});
+
+test('ambiguous stale anchors keep FILE_CONFLICT and leave new content unchanged',async()=>{
+ const p=file('unsafe-rebase.ts');
+ const original='export const repeatedValue = 1;\n';
+ const revised=original+original+'// independently modified\n';
+ await fs.writeFile(p,revised);
+ const r=assertFailed(await callTool('edit_block',{file_path:p,
+   old_string:'export const repeatedValue = 1;',
+   new_string:'export const repeatedValue = 2;',
+   expected_sha256:sha256(original)}),'FILE_CONFLICT');
+ assert.equal(await fs.readFile(p,'utf8'),revised);
+});
+
+test('final atomic write refuses an external change after a validated hash',async()=>{
+ const p=file('precondition.ts');
+ const original='export const setting = 1;\n';
+ const externallyChanged='export const setting = 2;\n';
+ await fs.writeFile(p,externallyChanged);
+ const {atomicWrite}=await import('../dist/runtime/file-safety.js');
+ const {withCallContext}=await import('../dist/context.js');
+ await assert.rejects(
+   ()=>withCallContext({id:'test-condition',client:null,remote:false,
+     writePrecondition:{path:p,sha256:sha256(original)}},
+     ()=>atomicWrite(p,'export const setting = 3;\n',sha256(externallyChanged))),
+   (e)=>e?.code==='FILE_CONFLICT');
+ assert.equal(await fs.readFile(p,'utf8'),externallyChanged);
+});
+
 test('stale expected_sha256 is FILE_CONFLICT with actionable instructions',async()=>{
  const p=file('hash.ts');
  const before='export const enabled=true;\n';
