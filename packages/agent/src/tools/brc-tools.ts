@@ -8,6 +8,7 @@
  * all commands through commandManager.validateCommand() (blockedCommands).
  */
 import { spawn, execFile } from 'node:child_process';
+import { getCallContext, checkCancelled } from '../context.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,6 +18,8 @@ import { validatePath } from '../core/tools/filesystem.js';
 import { commandManager } from '../core/command-manager.js';
 import { configManager } from '../core/config-manager.js';
 import { getShellSpawnArgs, getRepairedPathExt } from '../core/terminal-manager.js';
+import { selectRunCommandShell } from './command-shell.js';
+import { AgentError, failure } from '../runtime/errors.js';
 import { planFastExec } from './fast-exec.js';
 import { planRtkCommand, resolveRtk, rtkEnv, annotateRtkOutput, isRtkUsageError } from './rtk.js';
 import type { ServerResult } from '../core/types.js';
@@ -50,6 +53,7 @@ export class CappedOutput {
       this.tail = this.tail.slice(excess);
     }
   }
+  get truncated():boolean { return this.dropped>0; }
   toString(): string {
     if (!this.dropped) return this.head + this.tail;
     return `${this.head}\n\n[... ${this.dropped} characters truncated ...]\n\n${this.tail}`;
@@ -103,27 +107,58 @@ export async function runCommandCore(
   opts: { maxTimeoutMs: number; signal?: AbortSignal; failOnNonZero?: boolean },
 ): Promise<ServerResult> {
   const parsed = RunCommandArgsSchema.safeParse(args);
-  if (!parsed.success) return text(`Invalid arguments for run_command: ${parsed.error.message}`, true);
-  const { command, shell, maxOutputChars } = parsed.data;
-  const timeoutMs = Math.min(parsed.data.timeout_ms, opts.maxTimeoutMs);
-  if (opts.signal?.aborted) return text(`Cancelled before start: ${command}`, true);
+  if (!parsed.success) return failure(new AgentError('INVALID_ARGUMENT',
+    'Invalid run_command arguments: '+parsed.error.message.slice(0,900)));
+  const { command, shell } = parsed.data;
+  // Prevent a single command result from exceeding the agent's 512 KiB frame budget.
+  const maxOutputChars = Math.min(parsed.data.maxOutputChars,160_000);
+  if (!opts.signal) checkCancelled();
+  if (opts.signal?.aborted) return failure(new AgentError('CANCELLED','Cancelled before command execution. No command was started.'));
+  const abortSignal = opts.signal ? undefined : getCallContext()?.signal;
+  const remaining = opts.signal ? opts.maxTimeoutMs : Math.max(1, (getCallContext()?.deadline ?? (Date.now() + opts.maxTimeoutMs)) - Date.now());
+  const timeoutMs = Math.max(1, Math.min(parsed.data.timeout_ms, opts.maxTimeoutMs, remaining));
 
   if (!(await commandManager.validateCommand(command))) {
-    return text(`Error: Command not allowed: ${command}`, true);
+    return failure(new AgentError('COMMAND_BLOCKED',
+      'This command is blocked by the local agent policy. No command executed.'));
   }
 
   let cwd: string | undefined;
   if (parsed.data.cwd) {
+    if (!path.isAbsolute(parsed.data.cwd))
+      return failure(new AgentError('INVALID_CWD',
+        'cwd must be an absolute directory path on this device, for example D:\\project\\app. No command executed.'));
     try {
       cwd = await validatePath(parsed.data.cwd);
       const st = await fs.stat(cwd);
-      if (!st.isDirectory()) return text(`cwd is not a directory: ${parsed.data.cwd}`, true);
+      if (!st.isDirectory()) return failure(new AgentError('INVALID_CWD',
+        'cwd is not a directory: '+parsed.data.cwd+'. No command executed.'));
     } catch (e) {
-      return text(`Invalid cwd: ${e instanceof Error ? e.message : String(e)}`, true);
+      return failure(new AgentError('INVALID_CWD',
+        'Cannot access cwd '+parsed.data.cwd+': '+(e instanceof Error ? e.message : String(e))+'. No command executed.'));
     }
   }
 
-  const shellPath = await resolveShell(shell);
+  const configuredShell = await resolveShell(shell);
+  const shellDecision = selectRunCommandShell(command, configuredShell, shell !== undefined);
+  if(shellDecision.error) {
+    const nextArgs=shellDecision.suggestedShell
+      ? {command,...(cwd?{cwd}:{}),shell:shellDecision.suggestedShell,raw:true,timeout_ms:timeoutMs}
+      : null;
+    const message=shellDecision.error;
+    return {
+      isError:true,
+      content:[{type:'text',text:'SHELL_SYNTAX: '+message+
+        (nextArgs?'\nSUGGESTED CORRECTED CALL (not automatically executed): run_command('+JSON.stringify(nextArgs)+')':'')}],
+      structuredContent:{
+        error:{code:'SHELL_SYNTAX',message,retryable:false},
+        commandExecuted:false,platform:process.platform,shell:configuredShell,cwd:cwd??null,
+        recovery:{cause:'PowerShell 5.1 syntax mismatch',automaticRetry:false,
+          suggestion:message,...(nextArgs?{next:{tool:'run_command',args:nextArgs}}:{})},
+      },
+    };
+  }
+  const shellPath = shellDecision.shell;
   // PowerShell's -Command does not propagate a native program's exit code
   // (it returns 1 for any failure). Forward $LASTEXITCODE explicitly. A newline
   // separator keeps this working when the command ends with a # comment.
@@ -131,19 +166,22 @@ export async function runCommandCore(
   const wrapped = shellName === 'powershell' || shellName === 'pwsh'
     ? `$global:LASTEXITCODE = $null\n${command}\n$__brcOk = $?; if ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $__brcOk) { exit 1 } else { exit 0 }`
     : command;
-  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
-  if (isWindows) baseEnv.PATHEXT = getRepairedPathExt();
-  // Skip slow shell start-up when it cannot change the result (see fast-exec.ts).
-  const fast = await planFastExec(shellPath, command, baseEnv);
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  // A user command is independent of the agent's test-runner process.
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_REPORTER;
+  env.COREPACK_ENABLE_NETWORK = '0';
+  if (isWindows) env.PATHEXT = getRepairedPathExt();
+  const fast = await planFastExec(shellPath, command, env);
   const cfg = fast
-    ? { executable: fast.executable, args: fast.args, useShellOption: false as const, windowsVerbatim: fast.windowsVerbatim }
+    ? { executable: fast.executable, args: fast.args, windowsVerbatim: fast.windowsVerbatim }
     : getShellSpawnArgs(shellPath, wrapped);
-  const env = fast?.env ?? baseEnv;
+  const spawnEnv = fast?.env ?? env;
 
   type SpawnCfg = { executable: string; args: string[]; useShellOption?: string | boolean; windowsVerbatim?: boolean };
   type Outcome = {
     exitCode: number | null; signal: NodeJS.Signals | null; spawnError?: Error; spawnThrew?: boolean;
-    timedOut: boolean; cancelled: boolean; out: string; err: string; ms: number;
+    timedOut: boolean; cancelled: boolean; out: string; err: string; ms: number; truncated:boolean;
   };
 
   // Spawn once and collect capped output. Never rejects.
@@ -153,7 +191,8 @@ export async function runCommandCore(
     const stderr = new CappedOutput(Math.floor(maxOutputChars * 0.1), Math.ceil(maxOutputChars * 0.2));
     const done = (o: Partial<Outcome>) => resolve({
       exitCode: null, signal: null, timedOut: false, cancelled: false,
-      out: stdout.toString(), err: stderr.toString(), ms: Date.now() - started, ...o,
+      out: stdout.toString(), err: stderr.toString(), ms: Date.now() - started,
+      truncated: stdout.truncated||stderr.truncated, ...o,
     });
     let child;
     try {
@@ -173,6 +212,9 @@ export async function runCommandCore(
 
     let timedOut = false;
     let cancelled = false;
+    const abort = () => { cancelled = true; killTree(child.pid); };
+    abortSignal?.addEventListener('abort', abort, {once:true});
+    if (abortSignal?.aborted) abort();
     let settled = false;
     const timer = setTimeout(() => { timedOut = true; killTree(child.pid); }, timeoutMs);
     const onAbort = () => { cancelled = true; killTree(child.pid); };
@@ -187,6 +229,7 @@ export async function runCommandCore(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      abortSignal?.removeEventListener('abort', abort);
       opts.signal?.removeEventListener('abort', onAbort);
       done({ exitCode, signal, spawnError, timedOut, cancelled });
     };
@@ -196,19 +239,70 @@ export async function runCommandCore(
   });
 
   const format = (r: Outcome, note?: string): ServerResult => {
-    const { exitCode, signal, cancelled, timedOut } = r;
-    const status = cancelled
-      ? 'CANCELLED (process killed)'
-      : timedOut
-      ? `TIMED OUT after ${timeoutMs}ms (process killed)`
-      : `exit code ${exitCode ?? 'null'}${signal ? ` (signal ${signal})` : ''}`;
-    let body = `$ ${command}\n[${status} · ${r.ms}ms${cwd ? ` · cwd ${cwd}` : ''}]\n`;
-    if (note) body += `${note}\n`;
-    body += r.out ? `\n--- stdout ---\n${r.out.replace(/\s+$/, '')}\n` : '\n(no stdout)\n';
-    if (r.err) body += `\n--- stderr ---\n${r.err.replace(/\s+$/, '')}\n`;
-    // run_command never flags a completed process as an error (historical behaviour);
-    // jobs opt in so a failing step can stop the job.
-    return text(body, !!opts.failOnNonZero && (cancelled || timedOut || exitCode !== 0));
+    const {exitCode,signal,cancelled,timedOut} = r;
+    const failed = cancelled || timedOut || exitCode !== 0;
+    const status = cancelled ? 'CANCELLED'
+      : timedOut ? 'TIMEOUT after '+timeoutMs+'ms'
+      : 'exit code '+(exitCode===null?'null':exitCode)+(signal?' (signal '+signal+')':'');
+    const actualCwd=cwd??process.cwd();
+    const details = '$ '+command+'\n['+status+' | '+r.ms+'ms | shell '+shellPath+
+      ' | cwd '+actualCwd+']\n'+
+      (shellDecision.reason?'[shell selection] '+shellDecision.reason+'\n':'')+
+      (note?'[output processing] '+note+'\n':'')+
+      (parsed.data.maxOutputChars>maxOutputChars
+        ? '[output budget] requested '+parsed.data.maxOutputChars+
+          ' chars; limited to '+maxOutputChars+' to protect the MCP response.\n':'')+
+      (r.truncated?'[OUTPUT TRUNCATED: command completed or stopped, but some logs were omitted. Request narrower diagnostic output; do not treat this as the full log.]\n':'');
+    let cause='',suggestion='';
+    if(cancelled) {
+      cause='Request was cancelled; the child process tree was signaled for termination.';
+      suggestion='Inspect filesystem/job state before replaying any mutation. If appropriate, start a fresh read-only diagnostic command.';
+    } else if(timedOut) {
+      cause='The command exceeded the '+timeoutMs+'ms execution budget.';
+      suggestion='Inspect partial stdout/stderr. For a short command, correct the cause or raise timeout_ms within the one-shot limit of '+
+        opts.maxTimeoutMs+'ms. For interactive/longer work use start_process, then read_process_output. Verify side effects before retrying.';
+    } else if(failed) {
+      const combined=r.err+'\n'+r.out;
+      if(/not a git repository/i.test(combined)) {
+        cause='Git was executed outside a repository.';
+        suggestion='Set cwd to the absolute Git repository directory, then re-run only the corrected command. Or use git_status / git_log for separate diagnostics.';
+      } else if(/Could not find the Next\.js package|Cannot find package|Cannot find module|Module not found|ERR_MODULE_NOT_FOUND/i.test(combined)) {
+        cause='Project dependencies or runtime module resolution failed.';
+        suggestion='Check the absolute cwd, package.json and actual node_modules layout; for pnpm/Next.js confirm dependencies resolve from the project root. Re-run the smallest failing build step after correction.';
+      } else if(/is not recognized as an internal or external command|The term .+ is not recognized|command not found|ENOENT/i.test(combined)) {
+        cause='An executable or shell command could not be found.';
+        suggestion='Check the selected shell and PATH (including PATHEXT on Windows). Confirm that the tool is installed and use an absolute cwd. Do not retry the unchanged command.';
+      } else if(/The token .{0,20}(?:&&|\|\|).{0,80}not a valid statement separator/i.test(combined)) {
+        cause='Windows PowerShell 5.1 rejected && / || command chaining.';
+        suggestion='Use shell:"cmd.exe" with raw:true for a native command chain, or rewrite with PowerShell-compatible conditional statements. Check which shell is selected.';
+      } else {
+        cause='The executed shell or program returned a non-zero exit code '+String(exitCode)+'.';
+        suggestion='Read the stderr and exit code, identify the failing argument, dependency, path or script, correct that issue, and rerun the smallest relevant check. Never replay an identical failing command without a correction.';
+      }
+    }
+    const body=details+
+      (r.out?'\n--- stdout ---\n'+r.out.trimEnd()+'\n':'\n(no stdout)\n')+
+      (r.err?'\n--- stderr ---\n'+r.err.trimEnd()+'\n':'')+
+      (failed?'\nDIAGNOSIS: '+cause+'\nNEXT ACTION: '+suggestion+'\n':'');
+    const code=cancelled?'CANCELLED':timedOut?'TIMEOUT':'COMMAND_FAILED';
+    return {
+      // A completed process with a non-zero exit is NOT an MCP error (historical behaviour; jobs opt in via failOnNonZero).
+      // A killed process (timeout/cancel) is incomplete work and is always an error.
+      ...text(body, cancelled || timedOut || (failed && !!opts.failOnNonZero)),
+      structuredContent:{
+        exitCode,signal,durationMs:r.ms,timedOut,cancelled,commandExecuted:true,
+        platform:process.platform,shell:shellPath,configuredShell,
+        autoSelectedShell:shellDecision.changed,shellSelectionReason:shellDecision.reason??null,
+        cwd:actualCwd,cwdProvided:!!cwd,raw:parsed.data.raw,
+        outputTruncated:r.truncated,maxOutputCharsApplied:maxOutputChars,
+        ...(failed?{
+          commandFailed:true,
+          // 'error' is only set when this call is reported as an MCP error (job steps); a plain failed command keeps the historical non-error result.
+          ...(cancelled||timedOut||opts.failOnNonZero?{error:{code,message:cause,retryable:false}}:{}),
+          recovery:{cause,suggestion,automaticRetry:false,repeatIdenticalCommand:false}
+        }:{})
+      },
+    };
   };
 
   // rtk: compress the output of supported simple commands (see rtk.ts). Falls back to the
@@ -228,9 +322,11 @@ export async function runCommandCore(
     if (opts.signal?.aborted) return format(r);
   }
 
-  const r = await execOnce(cfg, env);
-  if (r.spawnThrew) return text(`Failed to start command: ${r.spawnError?.message}`, true);
-  if (r.spawnError) return text(`Failed to start command with shell "${shellPath}": ${r.spawnError.message}`, true);
+  const r = await execOnce(cfg, spawnEnv);
+  if (r.spawnThrew) return failure(new AgentError('SHELL_START_FAILED',
+    'Unable to start command with shell '+shellPath+': '+(r.spawnError?.message??'unknown error')+'. No command executed.'));
+  if (r.spawnError) return failure(new AgentError('SHELL_START_FAILED',
+    'Shell '+shellPath+' could not start the command: '+r.spawnError.message+'. Check installed shell/PATH; no command executed.'));
   return format(r);
 }
 
@@ -437,7 +533,12 @@ export function buildBrcToolDefinitions(): ToolDefinition[] {
         'stdin is closed, so commands that prompt for input will fail fast instead of hanging.',
         `timeout_ms defaults to 60000 (max ${MAX_TIMEOUT_MS}); on timeout the whole process tree is killed.`,
         'Output is capped (maxOutputChars, default 100000) keeping the beginning and end.',
-        'Pass cwd (absolute path, must be inside allowed directories) to choose the working directory.',
+        'Pass an absolute cwd within allowed directories for project commands; omitting cwd uses the agent process directory, which may be the wrong repository.',
+        'On Windows, default shell is Windows PowerShell 5.1 (powershell.exe) unless changed in config. PowerShell 5.1 does NOT support && or ||.',
+        'For safe native CLI chains such as git status -s && git log -n 10 --oneline, run_command automatically selects cmd.exe when no shell is explicitly requested.',
+        'For deliberate CMD syntax set shell:"cmd.exe"; for PowerShell-specific statements use PowerShell 5.1 syntax without &&/||, or pwsh.exe 7+ if installed.',
+        'SHELL_SYNTAX means no command executed. COMMAND_FAILED means actual non-zero shell exit. TIMEOUT means command exceeded budget. Inspect structuredContent.error and recovery.',
+        'Use raw:true to disable rtk compression during diagnosis (still bounded output). Do not blindly retry the identical command or an uncertain mutation.',
         'Blocked commands (config blockedCommands) are rejected.',
         'Output of common dev commands (git status/log/diff, cargo/go/pytest/vitest/jest/tsc/eslint, npm run, ...)',
         'may be compressed by rtk; such results say "[compressed by rtk ...]". Pass raw=true for the exact, uncompressed output.',
