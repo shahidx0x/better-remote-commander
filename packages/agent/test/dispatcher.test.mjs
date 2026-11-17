@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {callTool} from '../dist/dispatcher.js';
+process.env.BRC_HOME = (await import('node:fs')).mkdtempSync((await import('node:path')).join((await import('node:os')).tmpdir(), 'brc-home-'));
+const {callTool} = await import('../dist/dispatcher.js');
 const sha=s=>createHash('sha256').update(s).digest('hex');
 const txt=r=>r.content.map(c=>c.text??'').join('');
 test('dispatcher: unknown tool -> structured error with call id',async()=>{
