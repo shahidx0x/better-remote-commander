@@ -19,7 +19,7 @@ import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middlew
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { DeviceHub } from './device-hub.js';
-import { SqliteStore, verifyPassword } from './store/sqlite.js';
+import { SqliteStore, verifyPassword, type ConnectionLinkRow } from './store/sqlite.js';
 import { RelayOAuthProvider, SCOPES } from './auth/provider.js';
 import { Sessions } from './auth/sessions.js';
 import { createMcpServer } from './mcp/server.js';
@@ -237,7 +237,7 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     }
     next();
   };
-  for (const p of ['/admin', '/auth/clients', '/auth/apikeys', '/device/verify']) app.use(p, withCsrfFields);
+  for (const p of ['/admin', '/auth/clients', '/auth/apikeys', '/auth/links', '/device/verify']) app.use(p, withCsrfFields);
 
   app.get('/device/verify', requireLogin, (req, res) => res.type('html').send(pages.deviceVerifyPage(String(req.query.user_code ?? ''))));
   app.post('/device/verify', requireLogin, requireCsrf, (req, res) => {
@@ -269,20 +269,40 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
   /* ---------- MCP endpoint (stateless: new server + transport per request) ---------- */
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
-  app.all('/mcp', bearer, express.json({ limit: '32mb' }), async (req, res) => {
-    const auth = (req as Request & { auth?: AuthInfo }).auth!;
-    const userId = String(auth.extra?.userId ?? '');
-    if (!userId) return res.status(401).json({ error: 'invalid_token' });
-    const server = createMcpServer(hub, store, { userId, clientId: auth.clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log });
+  const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, { registry, publicUrl: cfg.publicUrl, log }, access);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { void transport.close(); void server.close(); });
     try {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
-      log('error', `mcp request failed: ${err instanceof Error ? err.message : String(err)}`);
+      // Never log the request URL or body: a private link carries its secret in the path.
+      log('error', `mcp request failed: ${err instanceof Error ? err.name : 'unexpected error'}`);
       if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'internal error' }, id: null });
     }
+  };
+
+  app.all('/mcp', bearer, express.json({ limit: '32mb' }), async (req, res) => {
+    const auth = (req as Request & { auth?: AuthInfo }).auth!;
+    const userId = String(auth.extra?.userId ?? '');
+    if (!userId) return res.status(401).json({ error: 'invalid_token' });
+    await handleMcp(req, res, userId, auth.clientId);
+  });
+
+  // OAuth-free capability URLs. A fresh hashed lookup on EVERY request, so revocation/expiry apply to the next call.
+  // Failed lookups are rate limited per client IP to make guessing impractical (keys carry 256 bits anyway).
+  const linkLimiter = new LoginLimiter(30, 5 * 60_000);
+  app.all('/c/:key/mcp', (req, res, next) => {
+    const ip = `link:${req.ip}`;
+    if (linkLimiter.locked(ip)) return res.status(429).json({ error: 'too_many_requests' });
+    const link = store.getConnectionLink(String(req.params.key ?? ''));
+    if (!link) { linkLimiter.fail(ip); return res.status(404).json({ error: 'invalid_connection' }); }
+    res.locals.connectionLink = link;
+    next();
+  }, express.json({ limit: '32mb' }), async (req, res) => {
+    const link = res.locals.connectionLink as ConnectionLinkRow;
+    await handleMcp(req, res, link.user_id, `link:${link.id}`, link.mode);
   });
 
   /* ---------- plugins: marketplace, per-device plugin admin, AI install requests ---------- */
@@ -310,6 +330,29 @@ export function buildRelay(cfg: RelayConfig, log: (level: string, msg: string) =
     }
     log('info', `admin: ${action} device ${dev.device_id}`);
     res.redirect('/admin');
+  });
+
+  /* ---------- private MCP links ---------- */
+  app.get('/auth/links', requireLogin, (req, res) => res.type('html').send(adminPages.connectionLinksPage(store.listConnectionLinks(currentUser(req)!), sessions.csrfToken(req))));
+  app.post('/auth/links', requireLogin, requireCsrf, (req, res) => {
+    const userId = currentUser(req)!;
+    const csrf = sessions.csrfToken(req);
+    try {
+      const publicUrl = new URL(cfg.publicUrl);
+      if (publicUrl.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(publicUrl.hostname)) throw new Error('A public connection URL requires HTTPS.');
+      const mode = req.body?.mode === 'full' ? 'full' : req.body?.mode === 'read' ? 'read' : null;
+      if (!mode) throw new Error('Choose a valid access level.');
+      const created = store.createConnectionLink(userId, String(req.body?.name ?? ''), mode, Number(req.body?.days));
+      log('info', `private link created: ${mode}`);
+      res.type('html').send(adminPages.connectionLinksPage(store.listConnectionLinks(userId), csrf, { name: String(req.body?.name ?? '').trim().slice(0, 80), url: `${cfg.publicUrl}/c/${created.key}/mcp`, expiresAt: created.expiresAt }));
+    } catch (error) {
+      res.status(400).type('html').send(adminPages.connectionLinksPage(store.listConnectionLinks(userId), csrf, undefined, error instanceof Error ? error.message : 'Invalid request'));
+    }
+  });
+  app.post('/auth/links/revoke', requireLogin, requireCsrf, (req, res) => {
+    store.revokeConnectionLink(currentUser(req)!, String(req.body?.link_id ?? ''));
+    log('info', 'private link revoked');
+    res.redirect('/auth/links');
   });
 
   /* ---------- API keys ---------- */

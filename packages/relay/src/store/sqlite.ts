@@ -7,6 +7,9 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypt
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
+/** Allowed lifetimes (days) of a private connection link. Capped at 90: a URL is a bearer credential. */
+export const CONNECTION_LINK_DAYS = [1, 7, 30, 90];
+export interface ConnectionLinkRow { id: string; user_id: string; name: string; mode: 'read' | 'full'; key_hash: string; created_at: number; expires_at: number }
 export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 export const randomToken = (bytes = 32) => randomBytes(bytes).toString('base64url');
 
@@ -202,9 +205,11 @@ export class SqliteStore {
     return this.db.prepare('SELECT * FROM audit WHERE user_id = ? ORDER BY id DESC LIMIT ?').all(userId, limit) as unknown as AuditRow[];
   }
 
-  /** Housekeeping: drop expired codes/tokens. */
+  /** Housekeeping: drop expired codes/tokens/links. */
   vacuumExpired(): void {
     const now = Date.now();
+    this.ensureConnectionLinks();
+    this.db.prepare('DELETE FROM connection_links WHERE expires_at <= ?').run(now);
     this.db.prepare('DELETE FROM auth_codes WHERE expires_at < ?').run(now);
     this.db.prepare('DELETE FROM device_codes WHERE expires_at < ?').run(now);
     this.db.prepare('DELETE FROM tokens WHERE expires_at IS NOT NULL AND expires_at < ?').run(now - 7 * 86_400_000);
@@ -251,6 +256,40 @@ export class SqliteStore {
   revokeApiKey(userId: string, prefix: string): void {
     this.ensureApiKeys();
     this.db.prepare('UPDATE api_keys SET revoked = 1 WHERE user_id = ? AND prefix = ?').run(userId, prefix);
+  }
+
+  /* ---------- private MCP connection links (capability URLs, hashed at rest) ---------- */
+  private ensureConnectionLinks(): void {
+    this.db.exec("CREATE TABLE IF NOT EXISTS connection_links (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL, mode TEXT NOT NULL CHECK (mode IN ('read','full')), key_hash TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)");
+    this.db.exec('CREATE INDEX IF NOT EXISTS connection_links_owner_expiry ON connection_links(user_id, expires_at)');
+  }
+  createConnectionLink(userId: string, rawName: string, mode: 'read' | 'full', days = 7): { id: string; key: string; expiresAt: number } {
+    this.ensureConnectionLinks();
+    if (!['read', 'full'].includes(mode)) throw new Error('Invalid connection access mode');
+    if (!CONNECTION_LINK_DAYS.includes(days)) throw new Error('Invalid connection lifetime');
+    const name = rawName.trim().slice(0, 80);
+    if (!name) throw new Error('Connection name is required');
+    const active = this.db.prepare('SELECT COUNT(*) AS n FROM connection_links WHERE user_id = ? AND expires_at > ?').get(userId, Date.now()) as { n: number };
+    if (active.n >= 20) throw new Error('Maximum 20 active connection URLs. Revoke an unused URL first.');
+    const id = randomToken(12);
+    const key = 'brc_link_' + randomToken(32);
+    const expiresAt = Date.now() + days * 86_400_000;
+    this.db.prepare('INSERT INTO connection_links (id, user_id, name, mode, key_hash, created_at, expires_at) VALUES (?,?,?,?,?,?,?)').run(id, userId, name, mode, sha256(key), Date.now(), expiresAt);
+    return { id, key, expiresAt };
+  }
+  listConnectionLinks(userId: string): ConnectionLinkRow[] {
+    this.ensureConnectionLinks();
+    return this.db.prepare('SELECT * FROM connection_links WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC').all(userId, Date.now()) as unknown as ConnectionLinkRow[];
+  }
+  /** Fresh lookup on every request so revocation and expiry apply to the very next call. */
+  getConnectionLink(key: string): ConnectionLinkRow | undefined {
+    if (!/^brc_link_[A-Za-z0-9_-]{43}$/.test(key)) return undefined;
+    this.ensureConnectionLinks();
+    return this.db.prepare('SELECT * FROM connection_links WHERE key_hash = ? AND expires_at > ?').get(sha256(key), Date.now()) as ConnectionLinkRow | undefined;
+  }
+  revokeConnectionLink(userId: string, id: string): boolean {
+    this.ensureConnectionLinks();
+    return Number(this.db.prepare('DELETE FROM connection_links WHERE id = ? AND user_id = ?').run(id, userId).changes) > 0;
   }
 
   /* ---------- plugin install requests (AI -> owner approval) ---------- */
