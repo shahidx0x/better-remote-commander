@@ -15,6 +15,7 @@ import { WORKSPACE_TOOL_HANDLERS, buildWorkspaceToolDefinitions } from './tools/
 import { IMAGE_TOOL_HANDLERS, buildImageToolDefinitions } from './tools/image-tools.js';
 import { availableOnTermux, isTermuxRuntime } from './runtime/platform-capabilities.js';
 import { SANDBOX_TOOL_HANDLERS, buildSandboxToolDefinitions } from './tools/sandbox-tools.js';
+import { CHECK_TOOL_HANDLERS, buildCheckToolDefinitions } from './tools/check-tools.js';
 import type { ToolResult } from 'brc-shared';
 import type { ServerResult } from './core/types.js';
 import { randomUUID } from 'node:crypto';
@@ -69,6 +70,8 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(IMAGE_TOOL_HANDLERS),
   // Optional restricted Docker sandbox (preview by default)
   ...Object.entries(SANDBOX_TOOL_HANDLERS),
+  // Discovered project checks
+  ...Object.entries(CHECK_TOOL_HANDLERS),
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
@@ -80,6 +83,7 @@ export function listTools(): ToolDefinition[] {
       ...buildWorkspaceToolDefinitions(),
       ...buildImageToolDefinitions(),
       ...buildSandboxToolDefinitions(),
+      ...buildCheckToolDefinitions(),
     ]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && (!isTermuxRuntime() || availableOnTermux(t.name)));
   }
