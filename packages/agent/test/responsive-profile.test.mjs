@@ -173,16 +173,16 @@ test('start_process path completes a simple native command without shell persist
   assert.equal(mgr.listActiveSessions().length,0);
 });
 
-test('activity history stays within its share of the combined 100-KiB log budget', async () => {
+test('activity history stays within its share of the combined 500-KiB log budget', async () => {
   const {ActivityLog,MAX_ACTIVITY_LOG_BYTES,MAX_ACTIVITY_EVENT_BYTES} = await import('../dist/runtime/activity.js');
   const {recentActivity} = await import('../dist/terminal-ui.js');
-  assert.equal(MAX_ACTIVITY_LOG_BYTES, 100 * 1024);
+  assert.equal(MAX_ACTIVITY_LOG_BYTES, 500 * 1024);
   const log = new ActivityLog(path.join(scratch,'quiet-activity'),true);
-  for (let i=0;i<3000;i++) log.tool('OK','read_file',String(i),i);
+  for (let i=0;i<7000;i++) log.tool('OK','read_file',String(i),i);
   const recent=log.recent();
   assert.ok(recent.length>20, 'no arbitrary 20-entry truncation');
-  assert.ok(recent.length<3000, 'older activity must be released when the byte cap is exceeded');
-  assert.equal(recent.at(-1).id,'2999');
+  assert.ok(recent.length<7000, 'older activity must be released when the byte cap is exceeded');
+  assert.equal(recent.at(-1).id,'6999');
   assert.notEqual(recent[0].id,'0');
   assert.ok(recent.reduce((n,e)=>n+Buffer.byteLength(JSON.stringify(e),'utf8'),0)<=MAX_ACTIVITY_EVENT_BYTES);
   assert.ok(MAX_ACTIVITY_EVENT_BYTES + (MAX_ACTIVITY_LOG_BYTES - MAX_ACTIVITY_EVENT_BYTES) === MAX_ACTIVITY_LOG_BYTES);
@@ -253,7 +253,7 @@ test('completed 350-KiB command output survives in memory for read_process_outpu
   assert.ok(result.lines.join('').length>=350000,'output should not be lost on completion');
 });
 
-test('rolling BRC console stays within its 40-KiB share of the 100-KiB log budget', async () => {
+test('rolling BRC console stays within its share of the 500-KiB log budget', async () => {
   const {ActivityLog,MAX_ACTIVITY_CONSOLE_BYTES} = await import('../dist/runtime/activity.js');
   const log = new ActivityLog(path.join(scratch, 'rolling-activity'),false);
   // Exercise the console buffer without drawing terminal screens during tests.
@@ -269,7 +269,7 @@ test('rolling BRC console stays within its 40-KiB share of the 100-KiB log budge
   await log.close();
 });
 
-test('paused console queue stays within its 40-KiB share of the 100-KiB log budget', async () => {
+test('paused console queue stays within its share of the 500-KiB log budget', async () => {
   const {ActivityLog,MAX_ACTIVITY_CONSOLE_BYTES} = await import('../dist/runtime/activity.js');
   const log = new ActivityLog(path.join(scratch, 'queue-activity'),false);
   const resume = log.pauseConsole();

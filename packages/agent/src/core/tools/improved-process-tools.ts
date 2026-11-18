@@ -455,6 +455,25 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
     return executeNodeCode(input, effectiveTimeout);
   }
 
+  // Reject stale PIDs BEFORE sending input; an exited process cannot accept input.
+  if (!terminalManager.getSession(pid)) {
+    const prior = terminalManager.listCompletedSessions().find(s => s.pid === pid);
+    const code = prior ? 'PROCESS_ALREADY_EXITED' : 'PROCESS_NOT_ACTIVE';
+    const advice = prior
+      ? 'Process already exited. Use read_process_output to inspect exit code and logs.'
+      : 'PID not active. Use list_sessions, or get_job / wait_jobs for managed commands.';
+    return {
+      isError:true,
+      content:[{type:'text',text:code+': '+advice+' No input was sent.'}],
+      structuredContent:{
+        error:{code,message:advice,retryable:false},
+        commandExecuted:false,pid,
+        ...(prior?{exitCode:prior.exitCode}:{}),
+        recovery:{automaticRetry:false,suggestion:advice}
+      }
+    };
+  }
+
   // Timing telemetry
   const startTime = Date.now();
   let firstOutputTime: number | undefined;
@@ -475,9 +494,15 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
     const success = terminalManager.sendInputToProcess(pid, input);
 
     if (!success) {
+      const reason = 'Process input was not accepted. Stdin may be closed or the process has exited.';
       return {
-        content: [{ type: "text", text: `Error: Failed to send input to process ${pid}. The process may have exited or doesn't accept input.` }],
-        isError: true,
+        content:[{type:'text',text:'PROCESS_INPUT_REJECTED: '+reason}],
+        isError:true,
+        structuredContent:{
+          error:{code:'PROCESS_INPUT_REJECTED',message:reason,retryable:false},
+          commandExecuted:false,pid,
+          recovery:{automaticRetry:false,suggestion:'Check list_sessions or read_process_output before retrying any input.'}
+        }
       };
     }
 

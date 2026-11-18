@@ -127,7 +127,7 @@ test('real CLI auto-connects after four seconds; live menu pauses only new calls
     assert.equal(relay.hub.list().length, 1); assert.ok(!p.output.includes('Choose [1]:')); assert.ok(!p.output.includes(token));
     const socket = relay.hub.get('auto-pc').socket;
     const read = await relay.hub.call('auto-pc', 'read_code_file', { path: codeFile }); assert.equal(read.isError, false);
-    await until(() => /OK\s+read_code_file/.test(p.output), p);
+    await until(() => /\[OK\]\s+read_code_file/.test(p.output), p);
     p.stdin.write('m\n'); await until(() => p.output.includes('Choose [1]:'), p);
     const paused = await relay.hub.call('auto-pc', 'write_file', { path: codeFile, content: 'should not write', mode: 'rewrite' });
     assert.equal(paused.isError, true); assert.equal(paused.structuredContent.error.code, 'SETTINGS_OPEN'); assert.equal(await fs.readFile(codeFile, 'utf8'), 'preserve this file');
@@ -135,7 +135,7 @@ test('real CLI auto-connects after four seconds; live menu pauses only new calls
     assert.equal((await relay.hub.call('auto-pc', 'read_code_file', { path: codeFile })).isError, false);
     // A settings keystroke during real running work must not cancel it or disconnect the client.
     const running = relay.hub.call('auto-pc', 'run_command', { cwd: home, command: 'node -e "setTimeout(()=>console.log(42),700)"', timeout_ms: 5000 });
-    await until(() => /START\s+run_command/.test(p.output), p); p.stdin.write('m\n');
+    await until(() => /\[START\]\s+run_command/.test(p.output), p); p.stdin.write('m\n');
     await until(() => p.output.includes('no work was interrupted'), p); const completed = await running; assert.notEqual(completed.isError, true); assert.equal(completed.structuredContent.exitCode, 0);
     assert.equal((p.output.match(/Choose \[1\]:/g) ?? []).length, 1); assert.equal(relay.hub.get('auto-pc').socket, socket);
     p.stdin.write('m\n'); await until(() => (p.output.match(/Choose \[1\]:/g) ?? []).length === 2, p);

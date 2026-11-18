@@ -19,7 +19,8 @@ import { workerCoordinator } from './runtime/worker-coordination.js';
 import { DEVELOPER_TOOL_HANDLERS, buildDeveloperToolDefinitions } from './tools/developer-tools.js';
 import { reclaimCaches, markToolStarted, markToolFinished } from './runtime/resource-limits.js';
 import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions, runBatch } from './tools/coding-tools.js';
-import { activity } from './runtime/activity.js';
+import { activity, activityAction } from './runtime/activity.js';
+import { summarizeCommandActivity } from './runtime/command-log-summary.js';
 import { recordToolFailure, failureReason } from './runtime/failure-log.js';
 import { POLYGLOT_TOOL_HANDLERS, buildPolyglotToolDefinitions } from './tools/polyglot-tools.js';
 import { codeGraph } from './runtime/code-graph.js';
@@ -142,7 +143,8 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   markToolStarted();
   try {
   const start=performance.now();
-  activity.tool('START',name,parent.id);
+   const action=activityAction(name,args);
+  activity.tool('START',name,parent.id,undefined,undefined,action);
   let out:ToolResult;
   try{
     checkCancelled();
@@ -193,11 +195,19 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   }catch(err){out=failure(err,parent.id);}
   const durationMs=Math.round(performance.now()-start);
   const error=out.structuredContent?.error as {code?:string}|undefined;
-  activity.tool(out.isError?'ERROR':'OK',name,parent.id,durationMs,error?.code);
+   const phase=out.isError?'ERROR':out.structuredContent?.pending===true?'PENDING':'OK';
+  const managedId=out.structuredContent?.jobId;
+  const note=phase==='PENDING'
+    ? ('Job '+(typeof managedId==='string'?managedId:'pending')+' | running locally; not finished')
+    : name==='run_command' ? summarizeCommandActivity(out).detail
+    : name==='start_process' && phase==='OK' ? 'Process started; it may still be running'
+    : phase==='ERROR' ? ((error?.code??'TOOL_FAILED')+': '+failureReason(name,error?.code??'TOOL_FAILED')) : undefined;
+  activity.tool(phase,name,parent.id,durationMs,error?.code,action,note);
   if(out.isError){
     const code=error?.code??'TOOL_FAILED';
-    const reason=failureReason(name,code);
-    activity.log('error','FAILURE CAUSE '+name+' '+code+': '+reason);
+    // Preserve classified failures in the bounded diagnostic records.
+    // The compact 3-line tool entry already contains this safe diagnosis.
+    // Do not print a fourth generic failure line; the detailed result remains available.
     const meta=out.structuredContent as Record<string,unknown>|undefined;
     const cause=(meta?.recovery as Record<string,unknown>|undefined)?.cause;
     const exitCode=name==='run_command'&&code==='COMMAND_FAILED'&&typeof meta?.exitCode==='number'

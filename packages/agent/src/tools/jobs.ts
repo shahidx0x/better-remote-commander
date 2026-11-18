@@ -22,7 +22,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import { runCommandCore } from './brc-tools.js';
+import { runCommandCore, RunCommandArgsSchema } from './brc-tools.js';
+import { activity, activityAction } from '../runtime/activity.js';
+import { summarizeCommandActivity } from '../runtime/command-log-summary.js';
+import type { CommandActivityResult } from '../runtime/command-log-summary.js';
+import { getCallContext } from '../context.js';
+import type { CommandProgress } from './brc-tools.js';
 import { homeDir } from '../transport/pairing.js';
 import type { ServerResult } from '../core/types.js';
 import type { ToolDefinition } from '../core/tool-definitions.js';
@@ -32,7 +37,7 @@ import { isHeavyTool } from '../runtime/operations.js';
 // Limits
 // ---------------------------------------------------------------------------
 const MAX_WAIT_MS = 100_000; // stay well below the relay's 120 s call timeout
-const DEFAULT_WAIT_MS = 60_000;
+const DEFAULT_WAIT_MS = 5_000;
 const DEFAULT_JOB_TIMEOUT_MS = 30 * 60_000;
 const MAX_JOB_TIMEOUT_MS = 6 * 60 * 60_000;
 const CPU_PARALLELISM = Math.max(1, typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length);
@@ -83,6 +88,7 @@ const CommandStepSchema = z.object({
   timeout_ms: z.number().int().min(1).optional().describe('Per-command timeout. Default: whatever is left of the job timeout.'),
   shell: z.string().optional(),
   raw: z.boolean().optional().describe('Bypass rtk output compression (full output).'),
+  maxOutputChars: z.number().int().min(1000).max(1_000_000).optional(),
   label: z.string().max(120).optional(),
 });
 
@@ -217,6 +223,10 @@ interface Job {
   /** true once a finished job's result has been returned to the AI. */
   reported: boolean;
   // runtime only
+  quickReturnPending?: boolean;
+  quickResult?: ServerResult;
+  consoleOutcome?: CommandActivityResult;
+  progress?: CommandProgress;
   abort?: AbortController;
   cancelRequested?: boolean;
   timedOut?: boolean;
@@ -283,18 +293,19 @@ function abortable<T>(p: Promise<T>, signal: AbortSignal, onAbort: () => T): Pro
   });
 }
 
-async function execStep(step: Step, signal: AbortSignal, remainingMs: number): Promise<ServerResult> {
+async function execStep(step: Step, signal: AbortSignal, remainingMs: number,
+  onProgress?: (p: CommandProgress) => void): Promise<ServerResult> {
   if ('command' in step) {
     return runCommandCore(
-      { command: step.command, cwd: step.cwd, shell: step.shell, raw: step.raw, timeout_ms: Math.max(1, Math.min(step.timeout_ms ?? remainingMs, remainingMs)) },
-      { maxTimeoutMs: remainingMs, signal, failOnNonZero: true },
+      { command: step.command, cwd: step.cwd, shell: step.shell, raw: step.raw, maxOutputChars: step.maxOutputChars, timeout_ms: Math.max(1, Math.min(step.timeout_ms ?? remainingMs, remainingMs)) },
+      { maxTimeoutMs: remainingMs, signal, failOnNonZero: true, onProgress },
     );
   }
   if (JOB_TOOL_NAMES.has(step.tool)) return text(`Tool "${step.tool}" cannot be used inside a job.`, true);
   if (step.tool === 'run_command') {
     const a = step.args as Record<string, unknown>;
     const t = typeof a.timeout_ms === 'number' ? Math.min(a.timeout_ms, remainingMs) : remainingMs;
-    return runCommandCore({ ...a, timeout_ms: Math.max(1, t) }, { maxTimeoutMs: remainingMs, signal, failOnNonZero: true });
+    return runCommandCore({ ...a, timeout_ms: Math.max(1, t) }, { maxTimeoutMs: remainingMs, signal, failOnNonZero: true, onProgress });
   }
   if (!executor) return text('Job executor not initialised', true);
   return abortable(executor(step.tool, step.args as Record<string, unknown>), signal, () => text('CANCELLED', true));
@@ -315,10 +326,12 @@ async function runJob(job: Job): Promise<void> {
       const t0 = Date.now();
       let res: ServerResult;
       try {
-        res = await execStep(step, signal, Math.max(1, job.timeoutMs - (t0 - job.startedAt)));
+        res = await execStep(step, signal, Math.max(1, job.timeoutMs - (t0 - job.startedAt)), p => { job.progress = p; });
       } catch (e) {
         res = text(`Error: ${e instanceof Error ? e.message : String(e)}`, true);
       }
+      if (job.quickReturnPending) job.quickResult = res;
+      if (job.label === 'run_command') job.consoleOutcome = summarizeCommandActivity(res);
       const ok = !res.isError;
       job.results.push({ index: i, name: stepName(step), ok, ms: Date.now() - t0, output: resultText(res) });
       if (!ok) {
@@ -331,6 +344,24 @@ async function runJob(job: Job): Promise<void> {
     job.status = job.cancelRequested ? 'cancelled' : job.timedOut ? 'timed_out' : anyFailed ? 'failed' : 'succeeded';
     job.endedAt = Date.now();
     job.currentStep = -1;
+    // If it finished inside the synchronous window, the original run_command
+    // response already logs the result. After a PENDING handoff, emit exactly
+    // one FINAL event using the same tool name and the stable job ID.
+    if (job.label === 'run_command' && !job.quickReturnPending) {
+      const first = job.steps[0];
+      const action = first && 'command' in first
+        ? activityAction('run_command',{command:first.command,cwd:first.cwd})
+        : 'managed shell command';
+      const ok = job.status === 'succeeded';
+      const exit = job.consoleOutcome?.exitCode;
+      const code = ok ? undefined : job.status === 'failed' && exit !== null &&
+        exit !== undefined ? 'EXIT_'+exit : job.status.toUpperCase();
+      const note = 'Job '+job.id+' | '+(job.consoleOutcome?.detail ??
+        (ok ? 'finished' : job.status.toUpperCase()));
+      activity.tool(ok ? 'OK' : 'ERROR','run_command',job.id,
+        job.endedAt - (job.startedAt ?? job.createdAt),code,action,note);
+    }
+    job.consoleOutcome=undefined;
     job.resolveDone!();
     void persist(job);
     prune();
@@ -447,7 +478,8 @@ function cancel(job: Job): boolean {
 // Persistence (best effort)
 // ---------------------------------------------------------------------------
 function serialisable(job: Job) {
-  const { abort, done, resolveDone, cancelRequested, timedOut, ...rest } = job;
+  const { abort, done, resolveDone, cancelRequested, timedOut, quickReturnPending, quickResult,
+    progress, consoleOutcome, ...rest } = job;
   return rest;
 }
 
@@ -512,6 +544,15 @@ function headline(j: Job): string {
 
 function detail(j: Job, outputChars: number, stepOffset=0, stepLimit=10): string {
   let s = headline(j);
+  if (j.status === 'running' && j.progress) {
+    const p = j.progress;
+    const idle = p.lastOutputAt === null ? 'no output yet' :
+      secs(Math.max(0, Date.now()-p.lastOutputAt)) + ' since last output';
+    s += '\n  LIVE: pid=' + (p.pid ?? 'starting') + ', ' + p.outputChars +
+      ' output chars, ' + idle + '. Process is still running.';
+    if (p.lastOutputAt && Date.now()-p.lastOutputAt > 120000)
+      s += '\n  WARNING: no output for 2 minutes; inspect before deciding it is stuck.';
+  }
   const selected=j.results.slice(stepOffset,stepOffset+stepLimit);
   let rendered=0;
   for (const r of selected) {
@@ -581,6 +622,64 @@ async function waitUntil(picked: Job[], cond: () => boolean, timeoutMs: number):
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+export async function handleManagedRunCommand(args: unknown): Promise<ServerResult> {
+  const parsed = RunCommandArgsSchema.safeParse(args);
+  if (!parsed.success) return text('Invalid run_command args: '+parsed.error.message.slice(0,800),true);
+  await loadHistory();
+  if (queue.length >= MAX_QUEUED_JOBS) return text('BUSY: queue full; no command started.',true);
+  const a = parsed.data, runtimeMs = a.max_runtime_ms ?? (6 * 60 * 60_000);
+  const job = createJob([{command:a.command,cwd:a.cwd,shell:a.shell,raw:a.raw,
+    maxOutputChars:a.maxOutputChars,timeout_ms:runtimeMs}],{timeoutMs:runtimeMs,label:'run_command'});
+  job.quickReturnPending=true;
+  enqueue(job);
+  // An explicit cancel_operation BEFORE the handoff still cancels this job.
+  // After a PENDING receipt, it is independent from relay call deadlines and
+  // can only be intentionally cancelled through cancel_job.
+  const callerSignal=getCallContext()?.signal;
+  const abortBeforeHandoff=()=>{cancel(job);};
+  callerSignal?.addEventListener('abort',abortBeforeHandoff,{once:true});
+  if(callerSignal?.aborted) abortBeforeHandoff();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    // Most pnpm lint/test/build checks here finish in ~4-5 seconds. Returning
+    // PENDING after only 1.8s forces needless additional AI tool calls.
+    // Keep non-package commands low-latency, and never hold near relay limits.
+    const quickWaitMs=/^(?:pnpm|npm|yarn|bun|cargo|dotnet)(?:\s|$)/i.test(a.command.trim())?6000:1800;
+    await Promise.race([job.done!,new Promise<void>(resolve=>{timer=setTimeout(resolve,quickWaitMs);})]);
+  } finally {
+    if(timer)clearTimeout(timer);
+    callerSignal?.removeEventListener('abort',abortBeforeHandoff);
+  }
+  if(callerSignal?.aborted) {
+    if(!isFinished(job)) {
+      let grace:NodeJS.Timeout|undefined;
+      await Promise.race([job.done!,new Promise<void>(resolve=>{grace=setTimeout(resolve,2600);})]);
+      if(grace)clearTimeout(grace);
+    }
+    job.quickReturnPending=false;
+    const stopped=job.quickResult;
+    job.quickResult=undefined;
+    if(stopped?.isError)return stopped;
+    return {
+      isError:true,
+      content:[{type:'text',text:'CANCELLED: explicit cancellation requested before command handoff. Check job '+job.id+' if cleanup is still pending.'}],
+      structuredContent:{cancelled:true,jobId:job.id,pending:false,
+        error:{code:'CANCELLED',retryable:false},
+        recovery:{automaticRetry:false,suggestion:'Inspect job state before rerunning any side effects.'}}
+    };
+  }
+  job.quickReturnPending=false;
+  const result=job.quickResult;
+  job.quickResult=undefined;
+  if(isFinished(job)&&result)return result;
+  return {
+    content:[{type:'text',text:'PENDING: command still running on local machine, not completed.\n'+detail(job,1200)+
+      '\nNEXT: get_job({id:"'+job.id+'"}), then wait_jobs({ids:["'+job.id+
+      '"],timeout_ms:5000}) until final status. Do not rerun the command or declare the AI task complete.'}],
+    structuredContent:{pending:true,jobId:job.id,status:job.status,maxRuntimeMs:runtimeMs,
+      next:{tool:'get_job',args:{id:job.id}}}
+  };
+}
 export async function handleSpawnJob(args: unknown): Promise<ServerResult> {
   const parsed = SpawnJobArgsSchema.safeParse(args);
   if (!parsed.success) return text(`Invalid arguments for spawn_job: ${parsed.error.message}`, true);

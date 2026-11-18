@@ -108,9 +108,14 @@ export const RunCommandArgsSchema = z.object({
   shell: z.string().optional(),
   maxOutputChars: z.number().int().min(1_000).max(1_000_000).optional().default(100_000),
   raw: z.boolean().optional().default(false),
+  max_runtime_ms: z.number().int().min(1000).max(6*60*60_000).optional(),
 });
 
 export async function handleRunCommand(args: unknown): Promise<ServerResult> {
+  if (getCallContext()?.remote) {
+    const { handleManagedRunCommand } = await import('./jobs.js');
+    return handleManagedRunCommand(args);
+  }
   return runCommandCore(args, { maxTimeoutMs: MAX_TIMEOUT_MS });
 }
 
@@ -119,9 +124,15 @@ export async function handleRunCommand(args: unknown): Promise<ServerResult> {
  * timeout cap (they are not bound by the relay's per-call timeout) and an
  * AbortSignal so cancel_job can kill the process tree.
  */
+export interface CommandProgress {
+  pid: number | null;
+  lastOutputAt: number | null;
+  outputChars: number;
+}
 export async function runCommandCore(
   args: unknown,
-  opts: { maxTimeoutMs: number; signal?: AbortSignal; failOnNonZero?: boolean },
+  opts: { maxTimeoutMs: number; signal?: AbortSignal; failOnNonZero?: boolean;
+    onProgress?: (p: CommandProgress) => void },
 ): Promise<ServerResult> {
   const parsed = RunCommandArgsSchema.safeParse(args);
   if (!parsed.success) return failure(new AgentError('INVALID_ARGUMENT',
@@ -235,6 +246,12 @@ export async function runCommandCore(
     }
     let timedOut = false, cancelled = false, settled = false, stopRequested = false;
     let graceTimer: NodeJS.Timeout | undefined;
+    let outputChars = 0, lastOutputAt: number | null = null;
+    let progressTimer: NodeJS.Timeout | undefined;
+    const progress = () => {
+      try { opts.onProgress?.({pid:child.pid ?? null,lastOutputAt,outputChars}); }
+      catch { /* observers never interrupt execution */ }
+    };
     const abort = () => { cancelled = true; requestStop(); };
     const onAbort = () => { cancelled = true; requestStop(); };
     const finish = (exitCode: number | null, signal: NodeJS.Signals | null, spawnError?: Error) => {
@@ -242,6 +259,8 @@ export async function runCommandCore(
       settled = true;
       clearTimeout(timer);
       clearTimeout(graceTimer);
+      if (progressTimer) clearInterval(progressTimer);
+      progress();
       abortSignal?.removeEventListener('abort', abort);
       opts.signal?.removeEventListener('abort', onAbort);
       done({ exitCode, signal, spawnError, timedOut, cancelled });
@@ -265,8 +284,17 @@ export async function runCommandCore(
     const timer = setTimeout(() => { timedOut = true; requestStop(); }, timeoutMs);
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', (d: string) => stdout.push(d));
-    child.stderr?.on('data', (d: string) => stderr.push(d));
+    const received = (d: string) => {
+      outputChars += d.length;
+      lastOutputAt = Date.now();
+    };
+    child.stdout?.on('data', (d: string) => { stdout.push(d); received(d); });
+    child.stderr?.on('data', (d: string) => { stderr.push(d); received(d); });
+    if (opts.onProgress) {
+      progressTimer = setInterval(progress, 3000);
+      progressTimer.unref();
+      progress();
+    }
     child.on('error', (e) => finish(null, null, e));
     child.on('close', (code, signal) => finish(code, signal));
     abortSignal?.addEventListener('abort', abort, { once: true });
@@ -559,7 +587,8 @@ export function buildBrcToolDefinitions(): ToolDefinition[] {
     {
       name: 'run_command',
       description: [
-        'Run a shell command to completion and return its exit code, stdout and stderr in ONE call.',
+        'Quick commands return normally. Remote long-running commands return PENDING with a jobId after about 2 seconds. PENDING is not completion; get_job and wait_jobs must be called until final status, then continue the AI task.',
+        'Local execution keeps its original timeout; remote managed commands have a 6-hour hard cap configurable with max_runtime_ms, not timeout_ms.',
         'Prefer this over start_process + read_process_output for non-interactive commands',
         '(builds, tests, git, package managers, scripts, one-off queries).',
         'Use start_process/interact_with_process only for interactive or long-running sessions (REPLs, servers).',

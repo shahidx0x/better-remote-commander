@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {withCallContext} from '../dist/context.js';
+import {handleRunCommand} from '../dist/tools/brc-tools.js';
+import {handleGetJob,handleWaitJobs} from '../dist/tools/jobs.js';
+const call=(command)=>withCallContext({id:'managed-test-'+Date.now(),client:'test',remote:true,deadline:Date.now()+115000},()=>handleRunCommand({command,raw:true}));
+const fast=await call('node -p "40+2"');
+assert.equal(fast.isError,undefined,JSON.stringify(fast));
+assert.equal(fast.structuredContent?.pending,undefined);
+assert.equal(fast.structuredContent?.exitCode,0);
+const slow=await call('node -e "setTimeout(()=>console.log(42),3300)"');
+assert.equal(slow.structuredContent?.pending,true,JSON.stringify(slow));
+const id=slow.structuredContent.jobId;
+const progress=await handleGetJob({id});
+assert.match(progress.content[0].text,/RUNNING|SUCCEEDED/);
+const end=await handleWaitJobs({ids:[id],timeout_ms:10000});
+assert.match(end.content[0].text,/SUCCEEDED/);
+assert.match(end.content[0].text,/42/);
+console.log('MANAGED PASS',id);

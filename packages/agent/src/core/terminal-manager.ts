@@ -88,7 +88,7 @@ export function outputSinceSnapshot(
 export const MAX_BUFFERED_OUTPUT_CHARS = 500 * 1024;
 const MAX_LINE_CHARS = 8 * 1024;
 // No line-count truncation: lots of short build lines can fit inside 500 KiB.
-// Agent's interactive activity console separately retains up to 100 KiB of log text.
+// Agent's interactive activity console retains a bounded share of 500 KiB of UTF-8 activity text.
 export const MAX_VISIBLE_TERMINAL_LINES = Number.POSITIVE_INFINITY;
 /** Keep the latest bounded text for the initial start_process response. */
 export function keepRecentTerminalOutput(previous:string, chunk:string):string {

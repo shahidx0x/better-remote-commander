@@ -1,5 +1,5 @@
-/** Lightweight console labels and status screens; the rolling 100-KiB activity view lives in runtime/activity.ts. */
-import type { ActivityEvent } from './runtime/activity.js';
+/** Lightweight console labels and status screens; bounded 500-KiB live activity lives in runtime/activity.ts. */
+import { MAX_ACTIVITY_LOG_BYTES, formatActivityEvent, type ActivityEvent } from './runtime/activity.js';
 
 export interface AgentTerminal {
   name: string;
@@ -60,7 +60,7 @@ export function connectionPanel(
     + '\n  Storage  Only bounded in-memory activity, no saved transcripts\n';
 }
 
-export function recentActivity(events: ActivityEvent[], max = 8, byteBudget = 100 * 1024): string {
+export function recentActivity(events: ActivityEvent[], max = 8, byteBudget = MAX_ACTIVITY_LOG_BYTES): string {
   // The L shortcut shows as much useful activity as fits its text budget,
   // rather than silently imposing the old 20-message limit.
   const recent: string[] = [];
@@ -69,13 +69,14 @@ export function recentActivity(events: ActivityEvent[], max = 8, byteBudget = 10
   for (let i = events.length - 1; i >= 0 && recent.length < limit; i--) {
     const e = events[i];
     if (e.phase === 'START') continue;
-    const line = '  ' + e.timestamp.slice(11, 19) + '  ' + plain(e.message, 115);
+    const line = formatActivityEvent(e,'compact',120).split('\n')
+      .map(part=>'  '+part).join('\n');
     const size = Buffer.byteLength(line + '\n', 'utf8');
     if (bytes + size > byteBudget) break;
     recent.push(line);
     bytes += size;
   }
   if (!recent.length) return '\n  RECENT ACTIVITY\n  No completed tool calls or connection changes yet.\n';
-  return '\n  RECENT ACTIVITY (' + recent.length + ' entries, up to 100 KiB)\n'
+  return '\n  RECENT ACTIVITY (' + recent.length + ' operations, up to ' + Math.floor(byteBudget/1024) + ' KiB)\n'
     + recent.reverse().join('\n') + '\n';
 }

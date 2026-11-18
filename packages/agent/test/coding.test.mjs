@@ -13,7 +13,7 @@ const {configManager}=await import('../dist/core/config-manager.js');await confi
 const {callTool,listTools}=await import('../dist/dispatcher.js');
 const {withCallContext,getCurrentRemoteClient,getCallContext}=await import('../dist/context.js');
 const {sha256,atomicWrite,withFileLocks}=await import('../dist/runtime/file-safety.js');
-const {ActivityLog,compactLine}=await import('../dist/runtime/activity.js');
+const {ActivityLog,compactLine,MAX_ACTIVITY_EVENT_BYTES}=await import('../dist/runtime/activity.js');
 const {projectIndex}=await import('../dist/runtime/project-index.js');
 const {OperationScheduler,cancelOperation,operationStatus}=await import('../dist/runtime/operations.js');
 const {searchManager}=await import('../dist/core/search-manager.js');
@@ -133,7 +133,7 @@ test('log expiry/migration does not delete credentials or config',async()=>{
 });
 test('console and volatile history stay bounded and disk logging cannot be enabled',async()=>{
  assert.ok(!/[\r\n\x1b]/.test(compactLine('token=secret\r\n\x1b[31m red')));assert.ok(!compactLine('token=secret').includes('secret'));
- const home=path.join(scratch,'bounded-log'),log=new ActivityLog(home,true,true);await log.start();for(let i=0;i<1500;i++)log.tool('OK','read_file',String(i),i);assert.ok(log.recent().length > 0 && log.recent().length <= 1000);assert.ok(log.dropped > 0);await log.flush();
+ const home=path.join(scratch,'bounded-log'),log=new ActivityLog(home,true,true);await log.start();for(let i=0;i<9000;i++)log.tool('OK','read_file',String(i),i);assert.ok(log.recent().length>0 && log.recent().reduce((n,e)=>n+Buffer.byteLength(JSON.stringify(e),'utf8'),0)<=MAX_ACTIVITY_EVENT_BYTES);assert.ok(log.dropped > 0);await log.flush();
  assert.equal(await fs.stat(home).catch(()=>null),null);await log.close();
 });
 

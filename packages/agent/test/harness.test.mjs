@@ -12,7 +12,7 @@ process.env.BRC_HOME=home;process.env.BRC_LOG_LEVEL='silent';process.env.BRC_LOG
 const {configManager}=await import('../dist/core/config-manager.js');await configManager.setValue('allowedDirectories',[root]);
 const {callTool,listTools}=await import('../dist/dispatcher.js');
 const {sha256}=await import('../dist/runtime/file-safety.js');
-const {activity,ActivityLog}=await import('../dist/runtime/activity.js');
+const {activity,ActivityLog,MAX_ACTIVITY_EVENT_BYTES}=await import('../dist/runtime/activity.js');
 const {clearHarnessSessions}=await import('../dist/runtime/harness.js');
 const {clearWorkspaceMemory}=await import('../dist/runtime/workspace.js');
 const {clearCodeCache}=await import('../dist/runtime/code-structure.js');
@@ -126,7 +126,7 @@ test('SQLite activity is volatile and never appears in the database',()=>{
  const file=path.join(scratch,'live.sqlite');let s=new SqliteStore(file);const u=s.upsertUser('admin','test-only');s.audit({ts:Date.now(),user_id:u.id,device_id:'pc',client:'test',tool:'read_symbol',args_hash:'abc',ok:1,ms:2,error:null});assert.equal(s.recentAudit(u.id).length,1);assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM audit').get().n,0);s.close();s=new SqliteStore(file);assert.equal(s.recentAudit(u.id).length,0);assert.ok(s.getUserByName('admin'));s.close();
 });
 test('live-only logging ignores old enable flags and writes nothing',async()=>{
- const h=path.join(scratch,'no-logs'),l=new ActivityLog(h,true,true);await l.start();for(let i=0;i<1200;i++)l.tool('OK','read_symbol','call-'+i,1);await l.flush();assert.ok(l.recent().length > 0 && l.recent().length <= 1000);assert.ok(l.dropped > 0);assert.equal(await fs.stat(h).catch(()=>null),null);await l.close();
+ const h=path.join(scratch,'no-logs'),l=new ActivityLog(h,true,true);await l.start();for(let i=0;i<9000;i++)l.tool('OK','read_symbol','call-'+i,1);await l.flush();assert.ok(l.recent().length>0 && l.recent().reduce((n,e)=>n+Buffer.byteLength(JSON.stringify(e),'utf8'),0)<=MAX_ACTIVITY_EVENT_BYTES);assert.ok(l.dropped > 0);assert.equal(await fs.stat(h).catch(()=>null),null);await l.close();
  const {isTelemetryDisabledByEnv}=await import('../dist/core/utils/capture.js');assert.equal(isTelemetryDisabledByEnv(),true);
 });
 
