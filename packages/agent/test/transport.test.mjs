@@ -25,7 +25,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
  await new Promise(r=>relay.http.listen(0,'127.0.0.1',r));
  const url=`http://127.0.0.1:${relay.http.address().port}`,user=relay.store.getUserByName('admin');
  const token=relay.store.issueDeviceToken('integration-pc',user.id,'Test PC','win32'),apiKey=relay.store.createApiKey(user.id,'integration');
- const child=spawn(process.execPath,[path.resolve('packages/agent/dist/cli.js'),'--relay',url,'--device-id','integration-pc','--name','Test PC','--no-browser','--allow-dir',project],{windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,BRC_HOME:home,BRC_TOKEN:token,BRC_LOG_FILE:'1',BRC_LOG_LEVEL:'info',BRC_DEBUG:'0',BRC_ERROR_LOG:'0'}});
+ const child=spawn(process.execPath,[path.resolve('packages/agent/dist/cli.js'),'--relay',url,'--device-id','integration-pc','--name','Test PC','--no-browser','--allow-dir',project],{windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,BRC_HOME:home,BRC_TOKEN:token,BRC_PLUGINS:'none',BRC_CONSOLE_MODE:'verbose',BRC_LOG_FILE:'1',BRC_LOG_LEVEL:'info',BRC_DEBUG:'0',BRC_ERROR_LOG:'0'}});
  let output='',seq=0;for(const stream of [child.stdout,child.stderr])stream.on('data',b=>{output=(output+b.toString()).slice(-1000000);});
  async function rpc(method,params){
   const r=await fetch(`${url}/mcp`,{method:'POST',headers:{authorization:`Bearer ${apiKey.raw}`,'content-type':'application/json',accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:++seq,method,params}),signal:AbortSignal.timeout(20000)});

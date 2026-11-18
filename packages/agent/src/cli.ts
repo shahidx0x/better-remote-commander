@@ -173,9 +173,25 @@ function startPluginSetup(): void {
   void (async () => {
     const { registerInstaller } = await import('./plugins/installer.js');
     registerInstaller();
-    // Avoid startup CPU/disk spikes on every PC. Existing installed plugins
-    // continue to work; explicit --update-plugins / --add-plugin remain available.
-    log('info', 'Automatic background plugin installation deferred. Use explicit plugin update/install commands when needed.');
+    // Restore the built-in first-run and missing-plugin repair workflow.
+    // Connected tool calls remain available: never await the installation pass
+    // inside the relay's onConnected callback. Limit installs to one at a time.
+    const { ensureDefaultPlugins } = await import('./plugins/first-run.js');
+    const setup = await ensureDefaultPlugins(log, { concurrency: 1 });
+    if (setup.queued.length) {
+      log('info', 'Automatic background plugin setup started (' + setup.queued.length +
+        ' installation(s), one at a time). Agent tool calls remain available.');
+      void setup.done.then(async () => {
+        const { getPlugin } = await import('./plugins/store.js');
+        const installed = setup.queued.filter(id => getPlugin(id)?.status === 'installed').length;
+        log(installed === setup.queued.length ? 'info' : 'warn',
+          'Automatic plugin setup finished: ' + installed + '/' + setup.queued.length +
+          ' installed. Use --list-plugins for details.');
+      }).catch(e => log('warn', 'Background plugin setup completion error: ' +
+        (e instanceof Error ? e.message : String(e))));
+    } else if (setup.firstRun && setup.defined.length) {
+      log('info', 'Default plugins configured; no installation required.');
+    }
   })().catch(e => log('warn', 'Plugin initialization failed: ' + (e instanceof Error ? e.message : String(e))));
 }
 
@@ -186,10 +202,10 @@ function armShortcuts(): void {
   shortcuts = listenForTerminalShortcuts(process.stdin, choice => {
     if (choice === 'settings') void openSettings();
     else if (choice === 'status') console.log(connectionPanel(client.status(), { ...terminalInfo, name: activeCredentials.name, relay: activeCredentials.relayUrl }));
-    else if (choice === 'activity') console.log(recentActivity(activity.recent(), Number.MAX_SAFE_INTEGER));
+    else if (choice === 'activity') console.log(recentActivity(activity.recent(), 50));
     else if (choice === 'verbose') {
       activity.setConsoleMode(activity.getConsoleMode() === 'compact' ? 'verbose' : 'compact');
-      console.log('  Console mode: ' + activity.getConsoleMode() + '. All tool metadata remains in bounded memory.');
+      console.log('  Console mode: ' + activity.getConsoleMode() + '. Press L for the last 50 calls; log history stays byte-bounded.');
     }
     else if (choice === 'help') console.log(controlHint(!!process.stdin.isTTY));
     else if (choice === 'exit') shutdown('Ctrl+C');

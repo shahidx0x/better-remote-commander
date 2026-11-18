@@ -145,7 +145,8 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   try {
   const start=performance.now();
    const action=activityAction(name,args);
-  activity.tool('START',name,parent.id,undefined,undefined,action,undefined,traceToolArguments(name,args));
+  activity.tool('START',name,parent.id,undefined,undefined,action,undefined,
+    activity.getConsoleMode()==='verbose'?traceToolArguments(name,args):undefined);
   let out:ToolResult;
   try{
     checkCancelled();
@@ -203,7 +204,8 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     : name==='run_command' ? summarizeCommandActivity(out).detail
     : name==='start_process' && phase==='OK' ? 'Process started; it may still be running'
     : phase==='ERROR' ? ((error?.code??'TOOL_FAILED')+': '+failureReason(name,error?.code??'TOOL_FAILED')) : undefined;
-  activity.tool(phase,name,parent.id,durationMs,error?.code,action,note,traceToolResult(name,out));
+  activity.tool(phase,name,parent.id,durationMs,error?.code,action,note,
+    activity.getConsoleMode()==='verbose'?traceToolResult(name,out):undefined);
   if(out.isError){
     const code=error?.code??'TOOL_FAILED';
     // Preserve classified failures in the bounded diagnostic records.

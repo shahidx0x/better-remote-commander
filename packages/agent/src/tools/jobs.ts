@@ -335,7 +335,7 @@ async function runJob(job: Job): Promise<void> {
       if (job.quickReturnPending) job.quickResult = res;
       if (job.label === 'run_command') {
         job.consoleOutcome = summarizeCommandActivity(res);
-        job.consoleTrace = traceToolResult('run_command',res);
+        job.consoleTrace = activity.getConsoleMode()==='verbose' ? traceToolResult('run_command',res) : undefined;
       }
       const ok = !res.isError;
       job.results.push({ index: i, name: stepName(step), ok, ms: Date.now() - t0, output: resultText(res) });

@@ -5,9 +5,10 @@ import { ActivityLog,formatActivityEvent,
 import { traceToolArguments,traceToolResult,redactTrace } from '../dist/runtime/tool-trace.js';
 import { recentActivity } from '../dist/terminal-ui.js';
 
-test('verbose is the default and returns multi-line received/completed previews', async()=>{
+test('verbose mode is opt-in and returns multi-line received/completed previews', async()=>{
   const log = new ActivityLog(undefined,true);
-  if(process.env.BRC_CONSOLE_MODE!=='compact')assert.equal(log.getConsoleMode(),'verbose');
+  if(process.env.BRC_CONSOLE_MODE!=='verbose')assert.equal(log.getConsoleMode(),'compact');
+  log.setConsoleMode('verbose');
   const args=traceToolArguments('start_process',{
     command:"pnpm --dir 'D:\\client-project\\restaurants\\frontend' build",
     timeout_ms:3000,verbose_timing:false,
@@ -18,7 +19,7 @@ test('verbose is the default and returns multi-line received/completed previews'
   });
   log.tool('START','start_process','call-test-001',undefined,undefined,'pnpm build',undefined,args);
   log.tool('OK','start_process','call-test-001',3350,undefined,'pnpm build',undefined,reply);
-  const shown=recentActivity(log.recent());
+  const shown=log.recent().map(e=>formatActivityEvent(e,'verbose',120)).join('\n');
   assert.match(shown,/\[START\].*start_process/);
   assert.match(shown,/Arguments:/);
   assert.match(shown,/client-project/);
@@ -26,6 +27,8 @@ test('verbose is the default and returns multi-line received/completed previews'
   assert.match(shown,/29620/);
   assert.match(shown,/tsc -p tsconfig\.json/);
   assert.ok(shown.split('\n').length>=9,shown);
+  const compactHistory=recentActivity(log.recent());
+  assert.doesNotMatch(compactHistory,/Arguments:|Output preview/);
   await log.close();
 });
 
@@ -69,8 +72,8 @@ test('verbose output wraps without 160-character truncation while bounded by 500
   assert.ok(display.includes('aaaaaa'));
   assert.ok(display.replace(/\n/g,'').includes('a'.repeat(950)));
   assert.ok(display.split('\n').length>12,display);
-  assert.equal(MAX_ACTIVITY_LOG_BYTES,500*1024);
-  assert.equal(MAX_ACTIVITY_EVENT_BYTES+MAX_ACTIVITY_CONSOLE_BYTES,500*1024);
+  assert.equal(MAX_ACTIVITY_LOG_BYTES,1024*1024);
+  assert.equal(MAX_ACTIVITY_EVENT_BYTES+MAX_ACTIVITY_CONSOLE_BYTES+64*1024,1024*1024);
   for(let i=0;i<800;i++)log.tool('OK','run_command','id'+i,1,
     undefined,'pnpm build',undefined,'Output preview:\n'+text);
   const all=log.recent();

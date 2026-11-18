@@ -4,9 +4,12 @@ import path from 'node:path';
 import os from 'node:os';
 export const RETENTION_MS = 0;
 /** Combined live-log text budget: structured history plus one console ring/queue. */
-export const MAX_ACTIVITY_LOG_BYTES = 500 * 1024;
-export const MAX_ACTIVITY_EVENT_BYTES = 244 * 1024; // retained searchable events
-export const MAX_ACTIVITY_CONSOLE_BYTES = MAX_ACTIVITY_LOG_BYTES - MAX_ACTIVITY_EVENT_BYTES;
+// Size budgets apply to retained UTF-8 text, not the whole Node process RSS.
+// 460 KiB structured history + 500 KiB live history + 64 KiB pending stdout.
+export const MAX_ACTIVITY_LOG_BYTES = 1024 * 1024;
+export const MAX_ACTIVITY_CONSOLE_BYTES = 500 * 1024;
+export const MAX_ACTIVITY_QUEUE_BYTES = 64 * 1024;
+export const MAX_ACTIVITY_EVENT_BYTES = MAX_ACTIVITY_LOG_BYTES - MAX_ACTIVITY_CONSOLE_BYTES - MAX_ACTIVITY_QUEUE_BYTES;
 let stdoutAvailable = true;
 process.stdout.on('error', () => { stdoutAvailable = false; });
 export type ConsoleMode = 'compact' | 'verbose';
@@ -89,11 +92,12 @@ export function formatActivityEvent(event: ActivityEvent, mode: ConsoleMode, wid
     const legacyTool = /^\s*(?:START|OK|ERROR|PENDING)\s+([a-z][a-z0-9_]*)\b/i.exec(event.message)?.[1];
     const label = '['+time+'] ['+state+'] '+(event.tool??legacyTool??'operation')+duration;
     if (mode === 'compact') {
-        const lines=[label];
-        if(event.action) lines.push('           Task: '+event.action);
-        if(event.note) lines.push('           '+event.note);
-        else if(event.code) lines.push('           '+event.code);
-        return lines.slice(0,3).map(line=>compactLine(line,max)).join('\n');
+        // One line per successful operation; a second line for a failure or a
+        // still-running command. This maximizes actual visible history.
+        const summary=compactLine(label+(event.action?' | '+event.action:''),max);
+        const diagnostic=event.phase === 'ERROR' || event.phase === 'PENDING'
+            ? (event.note||event.code) : undefined;
+        return diagnostic ? summary+'\n'+compactLine('    '+diagnostic,max) : summary;
     }
     const parts=[label+(event.id?'  (call '+event.id.slice(0,16)+')':'')];
     if(event.action)parts.push('  Task: '+event.action);
@@ -124,7 +128,9 @@ export class ActivityLog {
     private blocked = false;
     private started = false;
     private consolePauses = 0;
-    private consoleMode: ConsoleMode = process.env.BRC_CONSOLE_MODE === 'compact' ? 'compact' : 'verbose';
+    // The default must remain readable for 40-50 recent operations.
+    // Rich per-call traces are opt-in with V or --verbose.
+    private consoleMode: ConsoleMode = process.env.BRC_CONSOLE_MODE === 'verbose' ? 'verbose' : 'compact';
     dropped = 0;
     ioErrors = 0;
     // The legacy third argument is deliberately ignored: disk logging cannot be enabled.
@@ -196,6 +202,9 @@ export class ActivityLog {
             line = line.split('\n').map(part => '\x1b['+code+'m'+part+'\x1b[0m').join('\n');
         }
         if (this.rollingConsole) {
+            // Keep the latest 500 KiB in memory, but *append* to the terminal
+            // instead of erasing older calls on every update. This lets the
+            // terminal's normal scrollback show 40-50+ previous operations.
             for (const row of line.split('\n')) {
                 this.rollingLines.push(row);
                 this.rollingBytes += Buffer.byteLength(row+'\n','utf8');
@@ -205,19 +214,19 @@ export class ActivityLog {
                 this.rollingBytes -= Buffer.byteLength(old + '\n', 'utf8');
                 this.dropped++;
             }
-            this.scheduleRolling();
-            return;
         }
-        const queuedLine = line + '\n';
+        const queuedLine=line+'\n';
         this.consoleQueue.push(queuedLine);
         this.queuedBytes += Buffer.byteLength(queuedLine, 'utf8');
-        while (this.queuedBytes > MAX_ACTIVITY_CONSOLE_BYTES) {
-            const old = this.consoleQueue.shift();
-            if (!old) break;
-            this.queuedBytes -= Buffer.byteLength(old, 'utf8');
+        // A separate 64-KiB pending-output queue avoids memory growth if
+        // stdout is slow or settings temporarily pause log output.
+        while (this.queuedBytes > MAX_ACTIVITY_QUEUE_BYTES && this.consoleQueue.length > 1) {
+            const old=this.consoleQueue.shift()!;
+            this.queuedBytes-=Buffer.byteLength(old,'utf8');
             this.dropped++;
         }
-        this.drainConsole();
+        if (this.rollingConsole) this.scheduleRolling();
+        else this.drainConsole();
     }
     /** Keep a settings prompt readable; queued live lines remain bounded and are never written to disk. */
     pauseConsole(): () => void {
@@ -233,30 +242,17 @@ export class ActivityLog {
     private scheduleRolling(): void {
         if (!this.rollingConsole || this.rollingTimer || this.blocked || this.consolePauses ||
             !stdoutAvailable || process.stdout.destroyed) return;
-        // Keep the budgeted ring in RAM but paint only visible rows to avoid expensive redraws.
-        this.rollingTimer = setTimeout(() => {
-            this.rollingTimer = null;
-            if (!this.rollingConsole || this.consolePauses || this.blocked || process.stdout.destroyed) return;
-            // ANSI erase-screen is limited to the BRC agent's own TTY window.
-            // No interaction with user shell commands, relay or other consoles.
-            const visibleLines=this.rollingLines.slice(-Math.min(65,Math.max(15,(process.stdout.rows||38)-6)));
-            const frame = '\x1b[H\x1b[2J\x1b[3J'
-                + '  BRC LIVE ACTIVITY  |  latest ' + Math.ceil(this.rollingBytes / 1024)
-                + ' / ' + Math.round(MAX_ACTIVITY_CONSOLE_BYTES / 1024) + ' KiB  |  500 KiB total budget\n'
-                + '  [M] settings  [S] status  [L] activity  [V] verbose  [?] help  [Ctrl+C] stop\n'
-                + '-'.repeat(68) + '\n'
-                + visibleLines.join('\n') + '\n';
-            try {
-                if (!process.stdout.write(frame)) {
-                    this.blocked = true;
-                    process.stdout.once('drain', () => { this.blocked = false; this.scheduleRolling(); });
-                }
-            } catch { this.rollingConsole = false; }
-        }, 350);
+        // Coalesce short bursts. Never clear the terminal screen: native
+        // scrollback keeps older activity accessible without redrawing 500 KiB.
+        this.rollingTimer=setTimeout(() => {
+            this.rollingTimer=null;
+            if (!this.rollingConsole || this.blocked || this.consolePauses ||
+                process.stdout.destroyed) return;
+            this.drainConsole();
+        },60);
         this.rollingTimer.unref();
     }
     private drainConsole(): void {
-        if (this.rollingConsole) { this.scheduleRolling(); return; }
         if (!stdoutAvailable || process.stdout.destroyed) {
             this.consoleQueue.length = 0;
             this.queuedBytes = 0;

@@ -18,7 +18,7 @@ test('ESLint exit 1 shows actionable location and rule without raw output',()=>{
   assert.doesNotMatch(result.detail,/SECRET_NOT_FOR_CONSOLE|apostrophe should/);
 });
 
-test('short activity cards use 2-3 lines and retain job identity',()=>{
+test('compact activity uses at most two lines and retains the failure explanation',()=>{
   const action=activityAction('run_command',{
     cwd:'D:\\client-project\\restaurants\\frontend',
     command:'pnpm exec eslint components/admin/reservations-screen.tsx --token SUPERPRIVATE',
@@ -31,9 +31,9 @@ test('short activity cards use 2-3 lines and retain job identity',()=>{
     ms:4505,code:'EXIT_1',action,
     note:'Job jmwm758yfed21 | exit 1 | ESLint 428:89 react/no-unescaped-entities'};
   const display=formatActivityEvent(e,'compact',150);
-  assert.equal(display.split('\n').length,3);
+  assert.equal(display.split('\n').length,2);
   assert.match(display,/FAIL.*run_command/);
-  assert.match(display,/Task:.*reservations-screen\.tsx/);
+  assert.match(display,/reservations-screen\.tsx/);
   assert.match(display,/jmwm758yfed21.*react\/no-unescaped-entities/);
   const history=recentActivity([e],100);
   assert.match(history,/FAIL/);
@@ -57,7 +57,7 @@ test('polling disappears from compact stream but completion does not',async()=>{
     'Job job-123 | exit 1 | ESLint 428:89 react/no-unescaped-entities');
   assert.equal(log.consoleQueue.length,2);
   assert.match(log.consoleQueue[1],/\[FAIL\].*run_command/);
-  assert.match(log.consoleQueue[1],/Task:/);
+  assert.match(log.consoleQueue[1],/pnpm eslint/);
   assert.match(log.consoleQueue[1],/ESLint 428:89/);
   log.consoleQueue.length=0;log.queuedBytes=0;
   resume();await log.close();

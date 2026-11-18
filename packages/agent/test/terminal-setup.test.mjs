@@ -105,7 +105,8 @@ test('already-cancelled pairing makes no request and saves no credentials', asyn
 const children = new Set();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function childCli(home, args = [], env = {}) {
-  const clean = { ...process.env, BRC_HOME: home, BRC_LOG_LEVEL: 'info' };
+  // Prevent network installations in disposable CLI pairing tests.
+  const clean = { ...process.env, BRC_HOME: home, BRC_LOG_LEVEL: 'info', BRC_PLUGINS: 'none' };
   for (const key of ['BRC_RELAY', 'BRC_TOKEN', 'BRC_DEVICE_ID', 'BRC_NAME', 'NODE_TEST_CONTEXT']) delete clean[key];
   const child = spawn(process.execPath, [path.resolve('packages/agent/dist/cli.js'), ...args], { env: { ...clean, ...env }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   children.add(child); child.output = ''; child.done = false; child.exited = new Promise(resolve => child.once('exit', code => { child.done = true; children.delete(child); resolve(code); }));

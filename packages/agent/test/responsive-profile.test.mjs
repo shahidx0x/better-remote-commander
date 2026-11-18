@@ -176,7 +176,7 @@ test('start_process path completes a simple native command without shell persist
 test('activity history stays within its share of the combined 500-KiB log budget', async () => {
   const {ActivityLog,MAX_ACTIVITY_LOG_BYTES,MAX_ACTIVITY_EVENT_BYTES} = await import('../dist/runtime/activity.js');
   const {recentActivity} = await import('../dist/terminal-ui.js');
-  assert.equal(MAX_ACTIVITY_LOG_BYTES, 500 * 1024);
+  assert.equal(MAX_ACTIVITY_LOG_BYTES, 1024 * 1024);
   const log = new ActivityLog(path.join(scratch,'quiet-activity'),true);
   for (let i=0;i<7000;i++) log.tool('OK','read_file',String(i),i);
   const recent=log.recent();

@@ -1,5 +1,5 @@
 /** Lightweight console labels and status screens; bounded 500-KiB live activity lives in runtime/activity.ts. */
-import { MAX_ACTIVITY_LOG_BYTES, formatActivityEvent, type ActivityEvent } from './runtime/activity.js';
+import { MAX_ACTIVITY_CONSOLE_BYTES, formatActivityEvent, type ActivityEvent } from './runtime/activity.js';
 
 export interface AgentTerminal {
   name: string;
@@ -42,7 +42,7 @@ export function controlHint(tty = !!process.stdin.isTTY, color = terminalColors(
   const key = (s: string) => c('[' + s + ']', '1;96', color);
   const enter = tty ? '' : ' (press Enter for commands)';
   return '  ' + key('M') + ' Settings   ' + key('S') + ' Status   '
-    + key('L') + ' Activity   ' + key('V') + ' Verbose   '
+    + key('L') + ' Last 50   ' + key('V') + ' Details   '
     + key('?') + ' Help   ' + key('Ctrl+C') + ' Stop' + enter + '\n';
 }
 
@@ -60,15 +60,17 @@ export function connectionPanel(
     + '\n  Storage  Only bounded in-memory activity, no saved transcripts\n';
 }
 
-export function recentActivity(events: ActivityEvent[], max = Number.MAX_SAFE_INTEGER, byteBudget = MAX_ACTIVITY_LOG_BYTES): string {
-  // The L shortcut shows as much useful activity as fits its text budget,
-  // rather than silently imposing the old 20-message limit.
+export function recentActivity(events: ActivityEvent[], max = 50, byteBudget = MAX_ACTIVITY_CONSOLE_BYTES): string {
+  // The L shortcut prints the last 50 meaningful events into scrollback.
+  // It does not clear the live console or render a multi-page payload.
   const recent: string[] = [];
   let bytes = 0;
   const limit = Math.max(1, Math.min(events.length, Math.floor(max)));
   for (let i = events.length - 1; i >= 0 && recent.length < limit; i--) {
     const e = events[i];
-    const line = formatActivityEvent(e,'verbose',120).split('\n')
+    if (e.phase === 'START') continue;
+    if (e.phase === 'OK' && ['wait_jobs','get_job','list_jobs'].includes(e.tool ?? '')) continue;
+    const line = formatActivityEvent(e,'compact',120).split('\n')
       .map(part=>'  '+part).join('\n');
     const size = Buffer.byteLength(line + '\n', 'utf8');
     if (bytes + size > byteBudget) break;
@@ -76,6 +78,7 @@ export function recentActivity(events: ActivityEvent[], max = Number.MAX_SAFE_IN
     bytes += size;
   }
   if (!recent.length) return '\n  RECENT ACTIVITY\n  No completed tool calls or connection changes yet.\n';
-  return '\n  RECENT ACTIVITY (' + recent.length + ' events, up to ' + Math.floor(byteBudget/1024) + ' KiB requested)\n'
+  return '\n  LAST ' + recent.length + ' ACTIVITY EVENTS  |  scroll up for older calls  |  ' +
+    Math.floor(byteBudget/1024) + ' KiB console history budget\n'
     + recent.reverse().join('\n') + '\n';
 }
