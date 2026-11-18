@@ -1,15 +1,17 @@
 import { AgentError } from './errors.js';
 interface Operation { id:string; tool:string; started:number; state:'queued'|'running'; controller:AbortController }
 const operations=new Map<string,Operation>();
-// Concurrency is for responsive I/O, not permission to launch multiple CPU-heavy
-// operations. One heavy tool at a time; lightweight reads can proceed alongside it.
-const RESPONSIVE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
+// One CPU-heavy operation at a time in every profile. Up to two lightweight
+// operations may proceed beside it, keeping reads responsive during long builds.
 const HEAVY_TOOLS = new Set([
- 'run_command','start_process','run_project_checks','run_parallel',
+ 'run_command','start_process','run_project_checks','verify_project',
  'code_graph','code_outline','code_context','code_relationships','code_symbols',
- 'project_context','ast_search','ast_rewrite','edit_block','workspace_batch'
+ 'project_context','context_pack','ast_search','ast_rewrite','edit_block','workspace_batch',
+ 'write_file','move_file','delete_file','create_directory',
+ 'read_images','sandbox_run','project_index','code_diagnostics','find_symbols',
+ 'find_references','related_files','test_impact'
 ]);
-export const isHeavyTool = (tool:string):boolean => RESPONSIVE && HEAVY_TOOLS.has(tool);
+export const isHeavyTool = (tool:string):boolean => HEAVY_TOOLS.has(tool);
 export function operationStatus(){return [...operations.values()].map(o=>({id:o.id,tool:o.tool,state:o.state,elapsedMs:Date.now()-o.started,cancelRequested:o.controller.signal.aborted}));}
 export function cancelOperation(id:string):boolean {const o=operations.get(id);if(!o)return false;o.controller.abort(new AgentError('CANCELLED','Operation cancelled.'));return true;}
 interface Job<T=unknown>{operation:Operation;task:(signal:AbortSignal)=>Promise<T>;resolve:(v:T)=>void;reject:(e:unknown)=>void;timer:NodeJS.Timeout;abort:()=>void}
@@ -19,7 +21,7 @@ export class OperationScheduler{
  private activeHeavy=0;
  private queue:Job<any>[]=[];
  private owned=new Set<Operation>();
- constructor(readonly concurrency=4,readonly capacity=32){}
+ constructor(readonly concurrency=3,readonly capacity=32){}
  run<T>(id:string,tool:string,timeoutMs:number,task:(signal:AbortSignal)=>Promise<T>):Promise<T>{
   if(operations.has(id))return Promise.reject(new AgentError('DUPLICATE_CALL','Duplicate operation ID; not executed again.'));
   if(this.queue.length>=this.capacity)return Promise.reject(new AgentError('BUSY','Agent queue is full. Retry later.',true));

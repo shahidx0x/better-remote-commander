@@ -589,7 +589,9 @@ export function buildToolDefinitions(): ToolDefinition[] {
                 - Prevents context overflow from verbose processes
                 
                 SMART FEATURES:
-                - For offset=0, waits up to timeout_ms for new output to arrive
+                - For offset=0, waits up to timeout_ms (default 5 seconds) for new output
+                - timeout_ms limits only this read wait; it NEVER terminates the process or limits build duration
+                - For long-running jobs, repeat reads or use wait_jobs; the process continues in the background
                 - Detects REPL prompts and process completion
                 - Shows process state (waiting for input, finished, etc.)
                 

@@ -26,6 +26,19 @@ const p=f=>path.join(root,f),sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function write(f,text){const target=p(f);await fs.mkdir(path.dirname(target),{recursive:true});await fs.writeFile(target,text);return target;}
 after(async()=>{stopResourceMaintenance();clearCodeCache();codeGraph.clear();projectIndex.close();await configManager.close();await fs.rm(scratch,{recursive:true,force:true,maxRetries:8,retryDelay:100});});
 
+test('terminal polling slices only recent output and preserves snapshot suffixes', async () => {
+ const {sliceJoinedOutputTail,outputSinceSnapshot}=await import('../dist/core/terminal-manager.js');
+ const {analyzeProcessState}=await import('../dist/core/utils/process-detection.js');
+ assert.equal(sliceJoinedOutputTail(['alpha','beta','gamma'],8),'ta\ngamma');
+ assert.equal(sliceJoinedOutputTail(['alpha','beta','gamma'],100),'alpha\nbeta\ngamma');
+ assert.equal(sliceJoinedOutputTail(['alpha'],0),'');
+ assert.equal(outputSinceSnapshot(['hello','world'],0,11,5),'\nworld');
+ assert.equal(outputSinceSnapshot(['tail'],20,4,10),'tail');
+ const staleMarker='Process finished\n'+'still working\n'.repeat(10000);
+ assert.equal(analyzeProcessState(staleMarker).isFinished,false,'old completion text must not mark a live process finished');
+ assert.equal(analyzeProcessState('output\n>>> ').isWaitingForInput,true);
+});
+
 test('developer tools are discoverable, no duplicate tool names',()=>{
  const defs=listTools();assert.equal(new Set(defs.map(d=>d.name)).size,defs.length);
  for(const name of ['workspace_batch','docker_inventory','docker_inspect','read_images','sandbox_run'])assert.ok(defs.some(d=>d.name===name));

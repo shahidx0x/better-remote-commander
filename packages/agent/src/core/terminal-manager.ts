@@ -48,6 +48,33 @@ interface CompletedSession {
   retainedChars: number;
 }
 
+/** Slice the tail of a joined line buffer without joining/copying the full buffer. */
+export function sliceJoinedOutputTail(lines: readonly string[], maxChars: number): string {
+  let remaining = Math.max(0, Math.floor(maxChars));
+  if (!remaining || !lines.length) return '';
+  const reversed: string[] = [];
+  for (let i = lines.length - 1; i >= 0 && remaining > 0; i--) {
+    const line = lines[i] ?? '';
+    const take = Math.min(line.length, remaining);
+    if (take) reversed.push(line.slice(line.length - take));
+    remaining -= take;
+    if (remaining > 0 && i > 0) {
+      reversed.push('\n');
+      remaining--;
+    }
+  }
+  return reversed.reverse().join('');
+}
+
+/** Return only text written after a snapshot, bounded by the retained tail. */
+export function outputSinceSnapshot(
+  lines: readonly string[], evictedChars: number, retainedChars: number, snapshotTotalChars: number
+): string {
+  const newChars = evictedChars + retainedChars - snapshotTotalChars;
+  if (newChars <= 0) return '';
+  return sliceJoinedOutputTail(lines, Math.min(newChars, retainedChars));
+}
+
 /**
  * Output buffering caps. Without a cap, a process emitting enough output makes
  * string concatenation throw "RangeError: Invalid string length" at V8's max
@@ -56,11 +83,10 @@ interface CompletedSession {
  * The cap also bounds the join() cost in snapshot reads and the periodic
  * process-state scan, both of which are O(total output).
  */
-const RESPONSIVE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
-// Budget for retained command text (measured in JS characters, not total process RSS).
-// Capping stored output prevents unbounded RAM while preserving substantial logs.
-export const MAX_BUFFERED_OUTPUT_CHARS = RESPONSIVE ? 500 * 1024 : 50 * 1024 * 1024;
-const MAX_LINE_CHARS = RESPONSIVE ? 8 * 1024 : 1024 * 1024;
+// Keep a small rolling terminal-output buffer in every profile. Large builds
+// can run for a long time, but only the newest 500 KiB of text is retained.
+export const MAX_BUFFERED_OUTPUT_CHARS = 500 * 1024;
+const MAX_LINE_CHARS = 8 * 1024;
 // No line-count truncation: lots of short build lines can fit inside 500 KiB.
 // Agent's interactive activity console separately retains up to 100 KiB of log text.
 export const MAX_VISIBLE_TERMINAL_LINES = Number.POSITIVE_INFINITY;
@@ -73,12 +99,13 @@ export function keepRecentTerminalOutput(previous:string, chunk:string):string {
   const keep = budget - chunk.length;
   return previous.length > keep ? previous.slice(-keep) + chunk : previous + chunk;
 }
-const MAX_WAIT_OUTPUT_CHARS = RESPONSIVE ? 500 * 1024 : 2 * 1024 * 1024;
-const MAX_ACTIVE_TERMINALS = RESPONSIVE ? 2 : 32;
-// A finished 500-KiB command must remain readable: the old 256-KiB aggregate
-// budget evicted it immediately. Keep at most four completed sessions / 2 MiB.
-const MAX_COMPLETED_TERMINALS = RESPONSIVE ? 4 : 100;
-const MAX_COMPLETED_CHARS = RESPONSIVE ? 2 * 1024 * 1024 : 100 * MAX_BUFFERED_OUTPUT_CHARS;
+const MAX_WAIT_OUTPUT_CHARS = 500 * 1024;
+// Only one interactive terminal process is allowed at a time. It can keep
+// running while read_process_output and other lightweight agent tools proceed.
+const MAX_ACTIVE_TERMINALS = 1;
+// Retain only a few completed sessions; each session is individually capped at 500 KiB.
+const MAX_COMPLETED_TERMINALS = 4;
+const MAX_COMPLETED_CHARS = 2 * 1024 * 1024;
 
 // Result type for paginated output reading
 export interface PaginatedOutputResult {
@@ -295,7 +322,7 @@ export class TerminalManager {
 
     // Spawn the process with appropriate arguments
     const childProcess = spawn(spawnConfig.executable, spawnConfig.args, spawnOptions);
-    if (RESPONSIVE && process.platform === 'win32' && childProcess.pid) {
+    if (process.platform === 'win32' && childProcess.pid) {
       try { os.setPriority(childProcess.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
       catch { /* best effort; never change unrelated processes */ }
     }
@@ -471,7 +498,7 @@ export class TerminalManager {
 
       // Periodic comprehensive check every 100ms
       periodicCheck = setInterval(() => {
-        if (output.trim()) {
+        if (output.length > 0) {
           const processState = analyzeProcessState(output, childProcess.pid);
           if (processState.isWaitingForInput) {
             session.isBlocked = true;
@@ -752,12 +779,9 @@ export class TerminalManager {
   captureOutputSnapshot(pid: number): { totalChars: number; lineCount: number } | null {
     const session = this.sessions.get(pid);
     if (session) {
-      const fullOutput = session.outputLines.join('\n');
       return {
-        // Absolute since process start (includes evicted output), so the
-        // offset stays valid even if the cap evicts lines between
-        // snapshot and read.
-        totalChars: session.evictedChars + fullOutput.length,
+        // bufferedChars is maintained with each append/eviction and avoids a full-buffer join.
+        totalChars: session.evictedChars + session.bufferedChars,
         lineCount: session.evictedLines + session.outputLines.length
       };
     }
@@ -770,33 +794,28 @@ export class TerminalManager {
    * Also checks completed sessions in case process finished between snapshot and poll.
    */
   getOutputSinceSnapshot(pid: number, snapshot: { totalChars: number; lineCount: number }): string | null {
-    // Check active session first
+    // Check active session first; only copy the new suffix, not the whole retained buffer.
     const session = this.sessions.get(pid);
     if (session) {
-      return TerminalManager.outputSinceSnapshot(session.outputLines, session.evictedChars, snapshot.totalChars);
+      return outputSinceSnapshot(session.outputLines, session.evictedChars, session.bufferedChars, snapshot.totalChars);
     }
 
     // Fallback to completed sessions - process may have finished between snapshot and poll
     const completedSession = this.completedSessions.get(pid);
     if (completedSession) {
-      return TerminalManager.outputSinceSnapshot(completedSession.outputLines, completedSession.evictedChars, snapshot.totalChars);
+      return outputSinceSnapshot(completedSession.outputLines, completedSession.evictedChars, completedSession.retainedChars, snapshot.totalChars);
     }
 
     return null;
   }
 
-  /**
-   * New output since a snapshot, in absolute (since process start) offsets.
-   * If eviction dropped part of the unseen output, returns what the buffer
-   * still holds — the oldest unseen chars are lost to the cap.
-   */
-  private static outputSinceSnapshot(outputLines: string[], evictedChars: number, snapshotTotalChars: number): string {
-    const fullOutput = outputLines.join('\n');
-    const newChars = evictedChars + fullOutput.length - snapshotTotalChars;
-    if (newChars <= 0) {
-      return ''; // No new output
-    }
-    return fullOutput.substring(Math.max(0, fullOutput.length - newChars));
+  /** Return a bounded tail for prompt/state detection without joining all retained output. */
+  getRecentOutput(pid: number, maxChars = 8192): string | null {
+    const session = this.sessions.get(pid);
+    if (session) return sliceJoinedOutputTail(session.outputLines, maxChars);
+    const completedSession = this.completedSessions.get(pid);
+    if (completedSession) return sliceJoinedOutputTail(completedSession.outputLines, maxChars);
+    return null;
   }
 
     /**

@@ -19,7 +19,7 @@ export async function runProgram(program: string, args: string[], cwd: string, t
     return new Promise<ReturnType<typeof result>>((resolve) => {
         let stdout = '', stderr = '', truncated = false, timedOut = false, cancelled = false, done = false, fallback: NodeJS.Timeout | undefined;
         const child = spawn(program, args, { cwd, env, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], shell: false });
-        if (process.platform === 'win32' && (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') && child.pid) {
+        if (process.platform === 'win32' && child.pid) {
             try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
             catch { /* priority adjustments are best effort only */ }
         }

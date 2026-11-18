@@ -1,4 +1,4 @@
-// Local agent-only responsive-profile regression tests. No relay or user project is touched.
+// Local agent-only Normal-profile resource-safety tests. No relay or user project is touched.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -8,10 +8,13 @@ import path from 'node:path';
 const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'brc-low-resource-'));
 const project = path.join(scratch, 'project');
 process.env.BRC_HOME = path.join(scratch, 'agent-home');
+// Simulate stale launcher settings from an older responsive build. Normal must override them.
 process.env.BRC_RESOURCE_PROFILE = 'responsive';
+process.env.BRC_LOW_RESOURCE_MODE = '1';
 process.env.BRC_MAX_CONCURRENCY = '1';
 process.env.BRC_MAX_JOBS = '1';
 process.env.BRC_PARSER_WORKERS = '1';
+await import('../dist/runtime/resource-profile.js');
 process.env.BRC_ERROR_LOG = '0';
 process.env.BRC_LOG_LEVEL = 'silent';
 await fs.mkdir(project, { recursive: true });
@@ -28,8 +31,13 @@ after(async () => {
 });
 const text = r => (r.content ?? []).map(c => c.text ?? '').join('\n');
 
-test('responsive profile tracks active work without forcing GC', () => {
-  assert.equal(cacheStatus().resourceProfile, 'responsive');
+test('Normal profile overrides stale responsive settings and tracks active work without forcing GC', () => {
+  assert.equal(cacheStatus().resourceProfile, 'normal');
+  assert.ok(cacheStatus().hardware.maxConcurrentJobs >= 1 && cacheStatus().hardware.maxConcurrentJobs <= 3);
+  assert.ok(cacheStatus().hardware.maxToolConcurrency >= 1 && cacheStatus().hardware.maxToolConcurrency <= 3);
+  assert.ok(cacheStatus().hardware.parserWorkers >= 1 && cacheStatus().hardware.parserWorkers <= 2);
+  assert.equal(process.env.BRC_RESOURCE_PROFILE, 'normal');
+  assert.equal(process.env.BRC_LOW_RESOURCE_MODE, undefined);
   markToolStarted();
   assert.equal(cacheStatus().activeToolCalls, 1);
   markToolFinished();
@@ -165,8 +173,8 @@ test('start_process path completes a simple native command without shell persist
   assert.equal(mgr.listActiveSessions().length,0);
 });
 
-test('responsive activity retains up to 100 KiB without a 20-message limit', async () => {
-  const {ActivityLog,MAX_ACTIVITY_LOG_BYTES} = await import('../dist/runtime/activity.js');
+test('activity history stays within its share of the combined 100-KiB log budget', async () => {
+  const {ActivityLog,MAX_ACTIVITY_LOG_BYTES,MAX_ACTIVITY_EVENT_BYTES} = await import('../dist/runtime/activity.js');
   const {recentActivity} = await import('../dist/terminal-ui.js');
   assert.equal(MAX_ACTIVITY_LOG_BYTES, 100 * 1024);
   const log = new ActivityLog(path.join(scratch,'quiet-activity'),true);
@@ -176,7 +184,8 @@ test('responsive activity retains up to 100 KiB without a 20-message limit', asy
   assert.ok(recent.length<3000, 'older activity must be released when the byte cap is exceeded');
   assert.equal(recent.at(-1).id,'2999');
   assert.notEqual(recent[0].id,'0');
-  assert.ok(recent.reduce((n,e)=>n+Buffer.byteLength(JSON.stringify(e),'utf8'),0)<=MAX_ACTIVITY_LOG_BYTES);
+  assert.ok(recent.reduce((n,e)=>n+Buffer.byteLength(JSON.stringify(e),'utf8'),0)<=MAX_ACTIVITY_EVENT_BYTES);
+  assert.ok(MAX_ACTIVITY_EVENT_BYTES + (MAX_ACTIVITY_LOG_BYTES - MAX_ACTIVITY_EVENT_BYTES) === MAX_ACTIVITY_LOG_BYTES);
   const screen=recentActivity(recent,10000);
   assert.ok(screen.split('\n').length>20, 'L activity view should show more than 20 entries');
   assert.ok(Buffer.byteLength(screen,'utf8')<MAX_ACTIVITY_LOG_BYTES+256);
@@ -244,29 +253,29 @@ test('completed 350-KiB command output survives in memory for read_process_outpu
   assert.ok(result.lines.join('').length>=350000,'output should not be lost on completion');
 });
 
-test('rolling BRC console retains 100 KiB of text, not just 20 messages', async () => {
-  const {ActivityLog,MAX_ACTIVITY_LOG_BYTES} = await import('../dist/runtime/activity.js');
+test('rolling BRC console stays within its 40-KiB share of the 100-KiB log budget', async () => {
+  const {ActivityLog,MAX_ACTIVITY_CONSOLE_BYTES} = await import('../dist/runtime/activity.js');
   const log = new ActivityLog(path.join(scratch, 'rolling-activity'),false);
   // Exercise the console buffer without drawing terminal screens during tests.
   log.rollingConsole = true;
   log.scheduleRolling = () => {};
   for(let i=0;i<3200;i++) log.tool('OK','read_file',String(i),i);
   assert.ok(log.rollingLines.length>20, log.rollingLines.length);
-  assert.ok(log.rollingBytes<=MAX_ACTIVITY_LOG_BYTES, log.rollingBytes);
-  assert.ok(log.rollingBytes>60*1024, 'the ring should make useful use of its budget');
+  assert.ok(log.rollingBytes<=MAX_ACTIVITY_CONSOLE_BYTES, log.rollingBytes);
+  assert.ok(log.rollingBytes>20*1024, 'the console ring should make useful use of its allocated budget');
   assert.equal(log.rollingBytes, log.rollingLines.reduce((n,s)=>n+Buffer.byteLength(s+'\n','utf8'),0));
   assert.ok(log.rollingLines.at(-1).includes('read_file'));
   assert.ok(!log.rollingLines.some(s=>s.includes('[0]')));
   await log.close();
 });
 
-test('paused console queue has a 100-KiB byte budget even without TTY rendering', async () => {
-  const {ActivityLog,MAX_ACTIVITY_LOG_BYTES} = await import('../dist/runtime/activity.js');
+test('paused console queue stays within its 40-KiB share of the 100-KiB log budget', async () => {
+  const {ActivityLog,MAX_ACTIVITY_CONSOLE_BYTES} = await import('../dist/runtime/activity.js');
   const log = new ActivityLog(path.join(scratch, 'queue-activity'),false);
   const resume = log.pauseConsole();
   for(let i=0;i<3200;i++) log.tool('OK','read_file',String(i),i);
   assert.ok(log.consoleQueue.length>20);
-  assert.ok(log.queuedBytes<=MAX_ACTIVITY_LOG_BYTES,log.queuedBytes);
+  assert.ok(log.queuedBytes<=MAX_ACTIVITY_CONSOLE_BYTES,log.queuedBytes);
   assert.equal(log.queuedBytes,log.consoleQueue.reduce((n,s)=>n+Buffer.byteLength(s,'utf8'),0));
   // Do not dump test data to the real console on resume.
   log.consoleQueue.length=0;

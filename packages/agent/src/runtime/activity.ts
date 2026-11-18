@@ -3,10 +3,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 export const RETENTION_MS = 0;
-const RESPONSIVE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
-/** The BRC console uses a 100-KiB log budget, independent of start_process's 500-KiB buffer. */
-export const MAX_ACTIVITY_LOG_BYTES = RESPONSIVE ? 100 * 1024 : 256 * 1024;
-const MAX_QUEUED_ACTIVITY_LINES = RESPONSIVE ? Number.POSITIVE_INFINITY : 200;
+/** Combined live-log text budget: structured history plus one console ring/queue. */
+export const MAX_ACTIVITY_LOG_BYTES = 100 * 1024;
+export const MAX_ACTIVITY_EVENT_BYTES = 60 * 1024;
+export const MAX_ACTIVITY_CONSOLE_BYTES = MAX_ACTIVITY_LOG_BYTES - MAX_ACTIVITY_EVENT_BYTES;
+const MAX_QUEUED_ACTIVITY_LINES = 200;
 let stdoutAvailable = true;
 process.stdout.on('error', () => { stdoutAvailable = false; });
 export type ConsoleMode = 'compact' | 'verbose';
@@ -81,7 +82,7 @@ export class ActivityLog {
         const bytes = Buffer.byteLength(JSON.stringify(event), 'utf8');
         this.events.push(event);
         this.eventsBytes += bytes;
-        while (this.eventsBytes > MAX_ACTIVITY_LOG_BYTES || (!RESPONSIVE && this.events.length > 1000)) {
+        while (this.eventsBytes > MAX_ACTIVITY_EVENT_BYTES || this.events.length > 1000) {
             const old = this.events.shift();
             if (!old) break;
             this.eventsBytes -= Buffer.byteLength(JSON.stringify(old), 'utf8');
@@ -111,7 +112,7 @@ export class ActivityLog {
         if (this.rollingConsole) {
             this.rollingLines.push(line);
             this.rollingBytes += Buffer.byteLength(line + '\n', 'utf8');
-            while (this.rollingBytes > MAX_ACTIVITY_LOG_BYTES && this.rollingLines.length > 1) {
+            while (this.rollingBytes > MAX_ACTIVITY_CONSOLE_BYTES && this.rollingLines.length > 1) {
                 const old = this.rollingLines.shift()!;
                 this.rollingBytes -= Buffer.byteLength(old + '\n', 'utf8');
                 this.dropped++;
@@ -122,7 +123,7 @@ export class ActivityLog {
         const queuedLine = line + '\n';
         this.consoleQueue.push(queuedLine);
         this.queuedBytes += Buffer.byteLength(queuedLine, 'utf8');
-        while (this.consoleQueue.length > MAX_QUEUED_ACTIVITY_LINES || this.queuedBytes > MAX_ACTIVITY_LOG_BYTES) {
+        while (this.consoleQueue.length > MAX_QUEUED_ACTIVITY_LINES || this.queuedBytes > MAX_ACTIVITY_CONSOLE_BYTES) {
             const old = this.consoleQueue.shift();
             if (!old) break;
             this.queuedBytes -= Buffer.byteLength(old, 'utf8');
@@ -153,7 +154,7 @@ export class ActivityLog {
             // No interaction with user shell commands, relay or other consoles.
             const frame = '\x1b[H\x1b[2J\x1b[3J'
                 + '  BRC LIVE ACTIVITY  |  latest ' + Math.ceil(this.rollingBytes / 1024)
-                + ' / 100 KiB  |  no disk transcript\n'
+                + ' / ' + Math.round(MAX_ACTIVITY_CONSOLE_BYTES / 1024) + ' KiB  |  100 KiB total budget\n'
                 + '  [M] settings  [S] status  [L] activity  [V] verbose  [?] help  [Ctrl+C] stop\n'
                 + '-'.repeat(68) + '\n'
                 + this.rollingLines.join('\n') + '\n';

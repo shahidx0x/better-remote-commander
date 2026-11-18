@@ -18,6 +18,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
@@ -25,6 +26,7 @@ import { runCommandCore } from './brc-tools.js';
 import { homeDir } from '../transport/pairing.js';
 import type { ServerResult } from '../core/types.js';
 import type { ToolDefinition } from '../core/tool-definitions.js';
+import { isHeavyTool } from '../runtime/operations.js';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -33,19 +35,30 @@ const MAX_WAIT_MS = 100_000; // stay well below the relay's 120 s call timeout
 const DEFAULT_WAIT_MS = 60_000;
 const DEFAULT_JOB_TIMEOUT_MS = 30 * 60_000;
 const MAX_JOB_TIMEOUT_MS = 6 * 60 * 60_000;
-// Bounded even if the environment variable is accidentally set very high.
-const configuredJobs=Number(process.env.BRC_MAX_JOBS);
-const MAX_CONCURRENT_JOBS = Number.isInteger(configuredJobs) && configuredJobs>0 ? Math.min(8,configuredJobs) : 4;
-const MAX_STORED_STEP_OUTPUT = (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 16_000 : 32_000;
-const KEEP_IN_MEMORY = (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 32 : 64;
+const CPU_PARALLELISM = Math.max(1, typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length);
+// At most three background workers, scaled down on very small CPUs. A separate
+// heavy-work gate below permits only one CPU-heavy job at a time.
+const HARDWARE_WORKER_LIMIT = Math.max(1, Math.min(3, CPU_PARALLELISM));
+const MAX_CONCURRENT_JOBS = HARDWARE_WORKER_LIMIT;
+const MAX_QUEUED_JOBS = 64;
+const MAX_CONCURRENT_HEAVY_JOBS = 1;
+const MAX_STORED_STEP_OUTPUT = 16_000;
+const KEEP_IN_MEMORY = 32;
 const MAX_MCP_JOB_OUTPUT = 128_000;
-const KEEP_ON_DISK = (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 100 : 500;
+const KEEP_ON_DISK = 100;
 
 export const JOB_TOOL_NAMES = new Set(['spawn_job', 'wait_jobs', 'get_job', 'list_jobs', 'cancel_job', 'run_parallel']);
-const RESPONSIVE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
 const FAST_PARALLEL_READS = new Set([
   'read_file','read_code_file','read_multiple_files','list_directory','get_file_info',
   'git_status','git_diff','git_log','agent_status','list_sessions','get_more_search_results'
+]);
+const PARALLEL_FILE_IO_TOOLS = new Set([
+  'read_file','read_code_file','read_multiple_files','write_file','edit_block',
+  'move_file','delete_file','create_directory','get_file_info'
+]);
+const MUTATING_FILE_IO_TOOLS = new Set(['write_file','edit_block','move_file','delete_file','create_directory']);
+const HEAVY_FILE_EXTENSIONS = new Set([
+  '.pdf','.xlsx','.xls','.docx','.pptx','.png','.jpg','.jpeg','.webp','.gif','.tif','.tiff','.avif'
 ]);
 
 // One enormous combined job report can break an MCP client's message stream.
@@ -81,6 +94,51 @@ const ToolStepSchema = z.object({
 
 const StepSchema = z.union([CommandStepSchema, ToolStepSchema]);
 type Step = z.infer<typeof StepSchema>;
+
+/** Extract safe absolute file paths for the bounded parallel file-I/O lane. */
+function fileIoPaths(step: Step): string[] | null {
+  if (!('tool' in step) || !PARALLEL_FILE_IO_TOOLS.has(step.tool)) return null;
+  const args = step.args as Record<string, unknown>;
+  let values: unknown[];
+  switch (step.tool) {
+    case 'edit_block': values = [args.file_path]; break;
+    case 'move_file': values = [args.source, args.destination]; break;
+    case 'read_multiple_files': {
+      const paths = Array.isArray(args.paths) ? args.paths : [];
+      const files = Array.isArray(args.files) ? args.files : [];
+      values = [...paths, ...files.map(entry =>
+        entry && typeof entry === 'object' ? (entry as Record<string, unknown>).path : undefined)];
+      break;
+    }
+    default: values = [args.path]; break;
+  }
+  if (!values.length || values.some(value => typeof value !== 'string' || !path.isAbsolute(value))) return null;
+  const paths = values as string[];
+  if (paths.some(value => HEAVY_FILE_EXTENSIONS.has(path.extname(value).toLowerCase()))) return null;
+  return paths.map(value => {
+    const absolute = path.resolve(value);
+    return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  });
+}
+
+function pathContains(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));
+}
+
+/** Only disjoint ordinary file operations may share the responsive I/O lane. */
+export function isDisjointFileIoBatch(calls: readonly Step[]): boolean {
+  const groups = calls.map(fileIoPaths);
+  if (!groups.length || groups.some(group => !group)) return false;
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = i + 1; j < groups.length; j++) {
+      for (const a of groups[i]!) for (const b of groups[j]!) {
+        if (pathContains(a, b) || pathContains(b, a)) return false;
+      }
+    }
+  }
+  return true;
+}
 
 export const SpawnJobArgsSchema = z.object({
   command: z.string().optional().describe('Shortcut for a one-command job. Use either command or steps.'),
@@ -121,8 +179,8 @@ export const CancelJobArgsSchema = z.object({
 });
 
 export const RunParallelArgsSchema = z.object({
-  calls: z.array(StepSchema).min(1).max((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 24 : 50).describe('Items run concurrently: {tool, args} or {command, cwd?, timeout_ms?}.'),
-  max_concurrency: z.number().int().min(1).max(8).optional().default(4),
+  calls: z.array(StepSchema).min(1).max(50).describe('Independent items scheduled with at most three workers; CPU-heavy commands are serialized while lightweight reads can continue.'),
+  max_concurrency: z.number().int().min(1).max(3).optional().default(3),
   timeout_ms: z.number().int().min(1_000).max(MAX_WAIT_MS).optional().default(90_000)
     .describe('How long to wait for results. Calls still running then continue as background jobs.'),
   output_chars: z.number().int().min(200).max(50_000).optional().default(4_000).describe('Max output characters shown per call.'),
@@ -145,6 +203,8 @@ interface Job {
   id: string;
   label?: string;
   group?: string;
+  /** Per-run_parallel group cap; global worker and heavy-work limits still apply. */
+  groupConcurrency?: number;
   status: JobStatus;
   steps: Step[];
   results: StepResult[];
@@ -167,6 +227,9 @@ interface Job {
 const jobs = new Map<string, Job>();
 const queue: Job[] = [];
 let runningPooled = 0;
+let runningHeavy = 0;
+const runningByGroup = new Map<string, number>();
+const runningFileIo: Array<{ jobId: string; access: { paths: string[]; mutating: boolean } }> = [];
 let historyLoaded = false;
 
 const isFinished = (j: Job) => j.status !== 'queued' && j.status !== 'running';
@@ -181,11 +244,12 @@ function stepName(s: Step): string {
   return s.label ?? s.tool;
 }
 
-function createJob(steps: Step[], opts: { label?: string; group?: string; continueOnError?: boolean; timeoutMs?: number }): Job {
+function createJob(steps: Step[], opts: { label?: string; group?: string; groupConcurrency?: number; continueOnError?: boolean; timeoutMs?: number }): Job {
   const job: Job = {
     id: newId(),
     label: opts.label,
     group: opts.group,
+    groupConcurrency: opts.groupConcurrency,
     status: 'queued',
     steps,
     results: [],
@@ -273,7 +337,37 @@ async function runJob(job: Job): Promise<void> {
   }
 }
 
-/** Pooled jobs (spawn_job) share MAX_CONCURRENT_JOBS slots. */
+function jobFileIoAccess(job: Job): { paths: string[]; mutating: boolean } | null {
+  if (job.steps.length !== 1 || !('tool' in job.steps[0])) return null;
+  const step = job.steps[0];
+  const paths = fileIoPaths(step);
+  if (!paths) return null;
+  return { paths, mutating: MUTATING_FILE_IO_TOOLS.has(step.tool) };
+}
+
+function fileIoConflicts(
+  a: { paths: string[]; mutating: boolean },
+  b: { paths: string[]; mutating: boolean },
+): boolean {
+  if (!a.mutating && !b.mutating) return false;
+  for (const left of a.paths) for (const right of b.paths) {
+    if (pathContains(left, right) || pathContains(right, left)) return true;
+  }
+  return false;
+}
+
+/** Commands and explicitly expensive tools share one serialized CPU-heavy lane. */
+function isHeavyJob(job: Job): boolean {
+  if (job.steps.length > 1 && job.steps.some(step => 'tool' in step && MUTATING_FILE_IO_TOOLS.has(step.tool))) return true;
+  return job.steps.some(step => {
+    if ('command' in step) return true;
+    // Ordinary file I/O has its own path-aware concurrency gate below.
+    if (fileIoPaths(step)) return false;
+    return isHeavyTool(step.tool) || MUTATING_FILE_IO_TOOLS.has(step.tool);
+  });
+}
+
+/** Pooled jobs share three bounded worker slots; at most one may be CPU-heavy. */
 function enqueue(job: Job): void {
   queue.push(job);
   pump();
@@ -293,11 +387,45 @@ function markInternalJobFailure(job:Job,error:unknown):void {
 
 function pump(): void {
   while (runningPooled < MAX_CONCURRENT_JOBS && queue.length) {
-    const job = queue.shift()!;
-    if (job.status !== 'queued') continue; // cancelled while queued
+    // Skip cancelled entries and allow lightweight work to pass a queued heavy
+    // task that is waiting for the single heavy slot to become available.
+    let index = -1;
+    for (let i = 0; i < queue.length; i++) {
+      const candidate = queue[i];
+      if (candidate.status !== 'queued') {
+        queue.splice(i--, 1);
+        continue;
+      }
+      const heavy = isHeavyJob(candidate);
+      if (heavy && runningHeavy >= MAX_CONCURRENT_HEAVY_JOBS) continue;
+      const access = jobFileIoAccess(candidate);
+      if (access && runningFileIo.some(active => fileIoConflicts(access, active.access))) continue;
+      if (candidate.group && candidate.groupConcurrency &&
+          (runningByGroup.get(candidate.group) ?? 0) >= candidate.groupConcurrency) continue;
+      index = i;
+      break;
+    }
+    if (index < 0) break;
+    const job = queue.splice(index, 1)[0];
+    const heavy = isHeavyJob(job);
+    const access = jobFileIoAccess(job);
     runningPooled++;
+    if (heavy) runningHeavy++;
+    if (access) runningFileIo.push({ jobId: job.id, access });
+    if (job.group) runningByGroup.set(job.group, (runningByGroup.get(job.group) ?? 0) + 1);
     void runJob(job).catch(e=>markInternalJobFailure(job,e))
-      .finally(() => { runningPooled--; pump(); });
+      .finally(() => {
+        runningPooled--;
+        if (heavy) runningHeavy--;
+        const activeIoIndex = runningFileIo.findIndex(active => active.jobId === job.id);
+        if (activeIoIndex >= 0) runningFileIo.splice(activeIoIndex, 1);
+        if (job.group) {
+          const left = (runningByGroup.get(job.group) ?? 1) - 1;
+          if (left > 0) runningByGroup.set(job.group, left);
+          else runningByGroup.delete(job.group);
+        }
+        pump();
+      });
   }
 }
 
@@ -462,8 +590,8 @@ export async function handleSpawnJob(args: unknown): Promise<ServerResult> {
   const bad = steps.find((s) => 'tool' in s && JOB_TOOL_NAMES.has(s.tool));
   if (bad) return text(`Tool "${(bad as { tool: string }).tool}" cannot be used inside a job.`, true);
   await loadHistory();
-  if ((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') && queue.length >= 8)
-    return text('BUSY: eight jobs are already queued. Wait for earlier work to finish; no new job was started.', true);
+  if (queue.length >= MAX_QUEUED_JOBS)
+    return text(`BUSY: ${MAX_QUEUED_JOBS} jobs are already queued. Wait for earlier work to finish; no new job was started.`, true);
   const job = createJob(steps, { label: a.label, group: a.group, continueOnError: a.continue_on_error, timeoutMs: a.timeout_ms });
   enqueue(job);
   const pos = job.status === 'queued' ? ` (queued: ${MAX_CONCURRENT_JOBS} jobs run at once)` : '';
@@ -532,22 +660,17 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
   if (bad) return text(`Tool "${(bad as { tool: string }).tool}" cannot be used inside run_parallel.`, true);
   await loadHistory();
 
+  if (queue.length + a.calls.length > MAX_QUEUED_JOBS)
+    return text(`BUSY: this batch would exceed the ${MAX_QUEUED_JOBS}-job queue. Wait for earlier work to finish; no calls were started.`, true);
   const group = `par-${Date.now().toString(36)}`;
-  const batch = a.calls.map((c, i) => createJob([c], { label: c.label ?? `#${i + 1} ${stepName(c)}`, group }));
-  // Keep file/metadata reads fast even when the system is busy. Mixed and
-  // command batches run one at a time to avoid parallel CPU-heavy processes.
-  const readsOnly = a.calls.every(s => 'tool' in s && FAST_PARALLEL_READS.has(s.tool));
-  const workerLimit = RESPONSIVE ? (readsOnly ? 3 : 1) : 8;
-  let next = 0;
-  const worker = async () => {
-    while (next < batch.length) {
-      const job=batch[next++];
-      try {await runJob(job);}
-      catch(e) {markInternalJobFailure(job,e);}
-    }
-  };
-  for (let w = 0; w < Math.min(a.max_concurrency, workerLimit, batch.length); w++)
-    void worker().catch(()=>{ /* Last resort: job-level exceptions are handled above. */ });
+  const batch = a.calls.map((c, i) => createJob([c], {
+    label: c.label ?? `#${i + 1} ${stepName(c)}`,
+    group,
+    groupConcurrency: a.max_concurrency,
+  }));
+  // Feed the shared scheduler: at most three workers globally, one CPU-heavy
+  // job at a time, and lightweight work can pass a queued heavy job.
+  for (const job of batch) enqueue(job);
 
   await waitUntil(batch, () => batch.every(isFinished), a.timeout_ms);
 
@@ -588,12 +711,12 @@ export function buildJobToolDefinitions(): ToolDefinition[] {
     {
       name: 'run_parallel',
       description: [
-        'Run independent tool calls/shell commands concurrently on this device. Total combined reply is capped at 128K characters; use wait_jobs(group) and get_job(id,step_offset) for omitted results without rerunning side effects.',
-        'Use it whenever you would otherwise make several independent calls in a row: reading many files, several searches,',
-        'git_status in many repos, running lint + typecheck + tests together, etc.',
+        'Run independent tool calls/shell commands concurrently on this device. Up to three workers run globally, but only one CPU-heavy command/build/check runs at a time; lightweight file reads continue while it runs.',
+        'Use it for independent reads, file operations on separate paths, searches and lightweight checks.',
+        'Heavy builds/tests/commands are serialized; lightweight reads can finish while a heavy job continues.',
         'Each item is {tool, args} (any BRC tool, args exactly as for a direct call) or {command, cwd?, timeout_ms?}.',
         'Results come back in input order, with bounded output and an explicit group for follow-up. Do not run writes to the same file concurrently. Items still running at timeout_ms (default 90s, max 100s) continue as',
-        'background jobs; collect them with wait_jobs({group}). Commands that exit non-zero are reported as failed.',
+        'background jobs; collect them with wait_jobs({group}). Heavy jobs are serialized; independent light work can run alongside them. Total combined reply is capped at 128K characters.',
       ].join('\n'),
       inputSchema: zodToJsonSchema(RunParallelArgsSchema),
       annotations: { title: 'Run in parallel', readOnlyHint: false, destructiveHint: true, openWorldHint: true },
@@ -603,10 +726,10 @@ export function buildJobToolDefinitions(): ToolDefinition[] {
       description: [
         'Start a background worker job on this device and return its id immediately.',
         'Use for work that takes longer than one call (builds, test suites, installs, long scripts) or to run several',
-        'workstreams in parallel: spawn one job per piece, then call wait_jobs. A job is either a single "command"',
+        'workstreams: spawn one job per piece, then call wait_jobs. Up to three workers run globally; only one CPU-heavy job runs at a time, while light file work can continue. A job is either a single "command"',
         'or "steps": a list run in order, each {command, cwd?, timeout_ms?} or {tool, args} (e.g. edit_block then run tests).',
         'A failed step stops the job unless continue_on_error=true. Jobs are not limited by the 2-minute call timeout',
-        `(default limit ${DEFAULT_JOB_TIMEOUT_MS / 60_000} min, max 6 h). Up to ${MAX_CONCURRENT_JOBS} jobs run at once; more are queued.`,
+        `(default limit ${DEFAULT_JOB_TIMEOUT_MS / 60_000} min, max 6 h). Up to ${MAX_CONCURRENT_JOBS} jobs run at once; CPU-heavy jobs are serialized and light reads may run beside one heavy job.`,
         'Give related jobs the same "group" to wait for or cancel them together.',
       ].join('\n'),
       inputSchema: zodToJsonSchema(SpawnJobArgsSchema),

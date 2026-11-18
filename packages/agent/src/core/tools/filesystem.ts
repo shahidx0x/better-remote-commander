@@ -705,7 +705,8 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
 }
 
 export async function readMultipleFiles(entries: MultiFileEntry[]): Promise<MultiFileResult[]> {
-    return mapWithConcurrency(entries, 8, async (entry: MultiFileEntry) => {
+    // Three concurrent reads balance batch latency against disk/cache pressure on all PCs.
+    return mapWithConcurrency(entries, 3, async (entry: MultiFileEntry) => {
             const filePath = typeof entry === 'string' ? entry : entry.path;
             const range = typeof entry === 'string' ? undefined : entry;
             try {
@@ -759,7 +760,7 @@ export async function listDirectory(dirPath: string, depth: number = 2): Promise
     const MAX_NESTED_ITEMS = 100; // Maximum items to show per nested directory
     // BRC: subdirectories are read concurrently (bounded, to stay clear of EMFILE);
     // results are assembled in the same order as a sequential walk.
-    const MAX_CONCURRENT_READDIR = 32;
+    const MAX_CONCURRENT_READDIR = 3;
     let active = 0;
     const waiting: (() => void)[] = [];
     async function readdirLimited(p: string) {

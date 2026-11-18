@@ -1,4 +1,5 @@
 /** BRC agent library entry. */
+import './runtime/resource-profile.js';
 export * from './context.js';
 export { callTool, listTools, hasTool } from './dispatcher.js';
 export { WsClient, type WsClientOptions } from './transport/ws-client.js';

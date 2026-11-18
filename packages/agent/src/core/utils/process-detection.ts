@@ -23,6 +23,7 @@ const REPL_PROMPTS = {
   redis: ['redis> '],
   mongo: ['> ', '... ']
 };
+const ALL_PROMPTS = Object.values(REPL_PROMPTS).flat();
 
 // Error patterns that indicate completion (even with errors)
 const ERROR_COMPLETION_PATTERNS = [
@@ -52,7 +53,7 @@ const COMPLETION_INDICATORS = [
  * Analyze process output to determine current state
  */
 export function analyzeProcessState(output: string, pid?: number): ProcessState {
-  if (!output || output.trim().length === 0) {
+  if (!output) {
     return {
       isWaitingForInput: false,
       isFinished: false,
@@ -61,13 +62,16 @@ export function analyzeProcessState(output: string, pid?: number): ProcessState 
     };
   }
 
-  const lines = output.split('\n');
-  const lastLine = lines[lines.length - 1] || '';
-  const lastFewLines = lines.slice(-3).join('\n');
+  // Inspect only the tail. Terminal buffers can retain hundreds of KiB; splitting
+  // the complete buffer every 50-100 ms made process polling unnecessarily expensive.
+  const lastBreak = output.lastIndexOf('\n');
+  const lastLine = output.slice(lastBreak + 1);
+  let tailStart = lastBreak;
+  for (let i = 0; i < 2 && tailStart > 0; i++) tailStart = output.lastIndexOf('\n', tailStart - 1);
+  const lastFewLines = output.slice(tailStart + 1);
 
   // Check for REPL prompts (waiting for input)
-  const allPrompts = Object.values(REPL_PROMPTS).flat();
-  const detectedPrompt = allPrompts.find(prompt => 
+  const detectedPrompt = ALL_PROMPTS.find(prompt =>
     lastLine.endsWith(prompt) || lastLine.includes(prompt)
   );
 
@@ -82,8 +86,8 @@ export function analyzeProcessState(output: string, pid?: number): ProcessState 
   }
 
   // Check for completion indicators
-  const hasCompletionIndicator = COMPLETION_INDICATORS.some(pattern => 
-    pattern.test(output)
+  const hasCompletionIndicator = COMPLETION_INDICATORS.some(pattern =>
+    pattern.test(lastFewLines)
   );
 
   if (hasCompletionIndicator) {

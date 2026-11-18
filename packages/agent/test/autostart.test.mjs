@@ -7,6 +7,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import { spawn } from 'node:child_process';
+process.env.BRC_ERROR_LOG = '0';
 const scratch = mkdtempSync(path.join(realpathSync.native(tmpdir()), 'brc-autostart-test-'));
 process.env.BRC_HOME = path.join(scratch, 'agent');
 process.env.BRC_LOG_LEVEL = 'silent';

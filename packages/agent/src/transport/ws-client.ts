@@ -24,7 +24,7 @@ export class WsClient {
  private pongTimer?:NodeJS.Timeout;
  private reconnectTimer?:NodeJS.Timeout;
  private unauthorizedCount=0;
- private scheduler=new OperationScheduler(Math.min(16,Math.max(1,Number(process.env.BRC_MAX_CONCURRENCY)||(isTermuxRuntime()?2:4))),isTermuxRuntime()?16:32);
+ private scheduler=new OperationScheduler(Math.min(3,Math.max(1,Number(process.env.BRC_MAX_CONCURRENCY)||(isTermuxRuntime()?2:3))),isTermuxRuntime()?16:32);
  private seen=new Map<string,number>();
  private readonly log:NonNullable<WsClientOptions['log']>;
  private readonly plugins:PluginAdmin;

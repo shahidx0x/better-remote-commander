@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+process.env.BRC_ERROR_LOG='0';
 const scratch=mkdtempSync(path.join(realpathSync.native(tmpdir()),'brc-harness-test-'));
 const root=path.join(scratch,'project'),home=path.join(scratch,'agent');
 await fs.mkdir(path.join(root,'src'),{recursive:true});await fs.mkdir(path.join(root,'tests'));await fs.mkdir(path.join(root,'.vscode'));
@@ -125,7 +126,7 @@ test('SQLite activity is volatile and never appears in the database',()=>{
  const file=path.join(scratch,'live.sqlite');let s=new SqliteStore(file);const u=s.upsertUser('admin','test-only');s.audit({ts:Date.now(),user_id:u.id,device_id:'pc',client:'test',tool:'read_symbol',args_hash:'abc',ok:1,ms:2,error:null});assert.equal(s.recentAudit(u.id).length,1);assert.equal(s.db.prepare('SELECT COUNT(*) AS n FROM audit').get().n,0);s.close();s=new SqliteStore(file);assert.equal(s.recentAudit(u.id).length,0);assert.ok(s.getUserByName('admin'));s.close();
 });
 test('live-only logging ignores old enable flags and writes nothing',async()=>{
- const h=path.join(scratch,'no-logs'),l=new ActivityLog(h,true,true);await l.start();for(let i=0;i<1200;i++)l.tool('OK','read_symbol','call-'+i,1);await l.flush();assert.equal(l.recent().length,1000);assert.equal(await fs.stat(h).catch(()=>null),null);await l.close();
+ const h=path.join(scratch,'no-logs'),l=new ActivityLog(h,true,true);await l.start();for(let i=0;i<1200;i++)l.tool('OK','read_symbol','call-'+i,1);await l.flush();assert.ok(l.recent().length > 0 && l.recent().length <= 1000);assert.ok(l.dropped > 0);assert.equal(await fs.stat(h).catch(()=>null),null);await l.close();
  const {isTelemetryDisabledByEnv}=await import('../dist/core/utils/capture.js');assert.equal(isTelemetryDisabledByEnv(),true);
 });
 

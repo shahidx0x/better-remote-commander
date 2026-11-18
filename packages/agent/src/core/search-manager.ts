@@ -20,10 +20,9 @@ export interface SearchResult {
 }
 
 const MAX_LINE_TEXT = 400;
-// A search is a separate native process: safe mode limits how many may run.
-const RESPONSIVE_PROFILE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
-const MAX_ACTIVE_SEARCHES = RESPONSIVE_PROFILE ? 1 : 2;
-const SEARCH_RESULT_BYTE_BUDGET = RESPONSIVE_PROFILE ? 768 * 1024 : 2 * 1024 * 1024;
+// Keep search fan-out and retained results bounded in the Normal profile.
+const MAX_ACTIVE_SEARCHES = 2;
+const SEARCH_RESULT_BYTE_BUDGET = 1 * 1024 * 1024;
 const capLine = (s: string | undefined): string | undefined => {
   if (s === undefined) return undefined;
   const t = s.replace(/\r?\n$/, '');
@@ -113,7 +112,7 @@ export interface SearchSessionOptions {
     if (!rgProcess.pid) {
       throw new Error('Failed to start ripgrep process');
     }
-    if (RESPONSIVE_PROFILE && process.platform === 'win32') {
+    if (process.platform === 'win32') {
       try { os.setPriority(rgProcess.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
       catch { /* running without permissions is okay: executable still starts */ }
     }
@@ -150,8 +149,7 @@ export interface SearchSessionOptions {
 
     // Set up timeout if specified and auto-terminate
     // For exact filename searches, use a shorter default timeout
-    const timeoutMs = options.timeout ?? (this.isExactFilename(options.pattern) ? 1500 :
-      (RESPONSIVE_PROFILE ? 15000 : undefined));
+    const timeoutMs = options.timeout ?? (this.isExactFilename(options.pattern) ? 1500 : undefined);
     
     let killTimer: NodeJS.Timeout | null = null;
     if (timeoutMs) {
@@ -724,7 +722,7 @@ export interface SearchSessionOptions {
    * Clean up completed sessions older than specified time
    * Called automatically by cleanup interval
    */
-  cleanupSessions(maxAge: number = RESPONSIVE_PROFILE ? 60_000 : 5 * 60 * 1000): void {
+  cleanupSessions(maxAge: number = 5 * 60 * 1000): void {
     const cutoffTime = Date.now() - maxAge;
     
     for (const [sessionId, session] of this.sessions) {
@@ -1102,7 +1100,7 @@ function startCleanupIfNeeded(): void {
   if (!cleanupInterval) {
     cleanupInterval = setInterval(() => {
       searchManager.cleanupSessions();
-    }, RESPONSIVE_PROFILE ? 15_000 : 5 * 60 * 1000);
+    }, 5 * 60 * 1000);
     cleanupInterval.unref();
     
     // Also check immediately after a short delay (let search process finish)

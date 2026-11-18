@@ -37,8 +37,7 @@ async function executeNodeCode(code: string, timeout_ms: number = 30000): Promis
         timeout: timeout_ms,
         windowsHide: true  // Prevent visible console windows on Windows
       });
-      if (os.platform() === 'win32' &&
-          (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') && proc.pid) {
+      if (os.platform() === 'win32' && proc.pid) {
         try { os.setPriority(proc.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch {}
       }
 
@@ -291,6 +290,10 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
     verbose_timing = false 
   } = parsed.data;
 
+  // This is only the wait window for new output. It never terminates the process;
+  // long builds remain alive and can be read repeatedly with offset=0 or tail reads.
+  const waitTimeoutMs = timeout_ms;
+
   // Timing telemetry
   const startTime = Date.now();
 
@@ -323,18 +326,16 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
           resolve();
         };
 
-        // Poll for new output
+        // Poll at a modest cadence; process output is already buffered by the terminal manager.
         interval = setInterval(() => {
           const newLineCount = terminalManager.getOutputLineCount(pid) || 0;
           if (newLineCount > session.lastReadIndex) {
             resolveOnce();
           }
-        }, 50);
+        }, 100);
 
         // Timeout
-        timeout = setTimeout(() => {
-          resolveOnce();
-        }, timeout_ms);
+        timeout = setTimeout(resolveOnce, waitTimeoutMs);
       });
     };
 
@@ -388,8 +389,8 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
     processStateMessage = `\n✅ Process completed with exit code ${result.exitCode}${runtimeStr}`;
   } else if (session) {
     // Analyze state for running processes
-    const fullOutput = session.outputLines.join('\n');
-    const processState = analyzeProcessState(fullOutput, pid);
+    const recentOutput = terminalManager.getRecentOutput(pid, 8192) ?? '';
+    const processState = analyzeProcessState(recentOutput, pid);
     if (processState.isWaitingForInput) {
       processStateMessage = `\n🔄 ${formatProcessStateMessage(processState, pid)}`;
     }

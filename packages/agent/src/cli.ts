@@ -17,7 +17,9 @@
  *   brc-agent --update-plugins         latest versions for the default plugins, then reinstall them
  * Env: BRC_RELAY, BRC_NAME, BRC_TOKEN, BRC_DEVICE_ID, BRC_HOME, BRC_DEBUG, BRC_PLUGINS=none (same as --no-plugins)
  */
+import './runtime/resource-profile.js';
 import os from 'node:os';
+import { getResourceProfileStatus } from './runtime/resource-profile.js';
 import { workerCoordinator } from './runtime/worker-coordination.js';
 import { listenForTerminalShortcuts } from './terminal-shortcuts.js';
 import { createTerminalPrompts, resolveStartupConnection, shouldPromptForConnection, type ConnectionOptions } from './terminal-setup.js';
@@ -142,6 +144,8 @@ if (!creds) {
   process.exit(startupExitCode);
 }
 await startResourceMaintenance();
+const resourceProfile = getResourceProfileStatus();
+log('info', `Resource profile: ${resourceProfile.profile} (${resourceProfile.selection}); ${resourceProfile.cpuParallelism} available CPUs, ${(resourceProfile.totalMemoryBytes / (1024 ** 3)).toFixed(1)} GiB RAM, ${resourceProfile.maxConcurrentJobs} background jobs, ${resourceProfile.maxToolConcurrency} tool calls.`);
 setCurrentClient({ name: 'brc-agent', version: AGENT_VERSION });
 const tools = listTools();
 if (isTermuxRuntime()) {
@@ -167,22 +171,11 @@ function startPluginSetup(): void {
   if (pluginSetupStarted || flag('no-plugins') || process.env.BRC_PLUGINS === 'none' || isTermuxRuntime()) return;
   pluginSetupStarted = true;
   void (async () => {
-    const [{ registerInstaller }, { ensureDefaultPlugins }] = await Promise.all([
-      import('./plugins/installer.js'), import('./plugins/first-run.js'),
-    ]);
+    const { registerInstaller } = await import('./plugins/installer.js');
     registerInstaller();
-    // Installing/repairing packages automatically on reconnect can saturate CPU
-    // and disk while the owner is gaming. Existing installed plugins still work.
-    // Explicit --update-plugins / --add-plugin commands remain available.
-    if (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') {
-      log('info', 'Responsive mode: automatic background plugin installation deferred.');
-      return;
-    }
-    const setup = await ensureDefaultPlugins(log);
-    if (setup.defined.length) log('info', 'Default plugins added: ' + setup.defined.join(', '));
-    if (setup.queued.length) log('info', 'Plugin setup running: ' + setup.queued.join(', '));
-    await setup.done;
-    if (setup.queued.length) log('info', 'Plugin setup completed.');
+    // Avoid startup CPU/disk spikes on every PC. Existing installed plugins
+    // continue to work; explicit --update-plugins / --add-plugin remain available.
+    log('info', 'Automatic background plugin installation deferred. Use explicit plugin update/install commands when needed.');
   })().catch(e => log('warn', 'Plugin initialization failed: ' + (e instanceof Error ? e.message : String(e))));
 }
 

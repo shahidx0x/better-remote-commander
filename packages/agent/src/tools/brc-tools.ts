@@ -229,9 +229,9 @@ export async function runCommandCore(
 
     // Only the command spawned by BRC receives reduced scheduling priority.
     // Never alter system processes or force a CPU core affinity.
-    if (isWindows && (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') && child.pid) {
+    if (isWindows && child.pid) {
       try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
-      catch { /* Windows may deny priority changes; the launcher is already below normal. */ }
+      catch { /* Windows may deny priority changes; the command still runs at inherited priority. */ }
     }
     let timedOut = false, cancelled = false, settled = false, stopRequested = false;
     let graceTimer: NodeJS.Timeout | undefined;

@@ -20,7 +20,7 @@ test('parallel output remains under 128K and unreported results can be fetched w
   const file=path.join(process.env.BRC_HOME,'parallel-huge.txt');
   await fs.writeFile(file,'T'.repeat(38000));
   const calls=Array.from({length:12},(_,i)=>({tool:'read_file',args:{path:file,length:1},label:'read-'+i}));
-  const result=await callTool('run_parallel',{calls,max_concurrency:4,output_chars:20000,timeout_ms:30000});
+  const result=await callTool('run_parallel',{calls,max_concurrency:3,output_chars:20000,timeout_ms:30000});
   const body=out(result);
   assert.ok(body.length<=128000,'Too-large combined reply '+body.length);
   assert.match(body,/MORE PARALLEL RESULTS/);
@@ -54,14 +54,36 @@ test('job tools are registered', () => {
   for (const n of ['run_parallel', 'spawn_job', 'wait_jobs', 'get_job', 'list_jobs', 'cancel_job']) assert.ok(names.includes(n), n);
 });
 
+test('parallel file I/O allows disjoint paths but serializes overlapping and heavyweight paths', async () => {
+  const { isDisjointFileIoBatch } = await import('../dist/tools/jobs.js');
+  const one = path.join(process.env.BRC_HOME, 'one.txt');
+  const two = path.join(process.env.BRC_HOME, 'two.txt');
+  assert.equal(isDisjointFileIoBatch([
+    { tool: 'write_file', args: { path: one } },
+    { tool: 'edit_block', args: { file_path: two } },
+  ]), true);
+  assert.equal(isDisjointFileIoBatch([
+    { tool: 'write_file', args: { path: one } },
+    { tool: 'edit_block', args: { file_path: one } },
+  ]), false);
+  assert.equal(isDisjointFileIoBatch([
+    { tool: 'write_file', args: { path: one } },
+    { tool: 'create_directory', args: { path: process.env.BRC_HOME } },
+  ]), false);
+  assert.equal(isDisjointFileIoBatch([
+    { tool: 'read_file', args: { path: path.join(process.env.BRC_HOME, 'large.pdf') } },
+  ]), false);
+  assert.equal(isDisjointFileIoBatch([{ command: 'node -v' }]), false);
+});
+
 // Prints its own start and end time, so overlap can be checked without wall-clock thresholds
 // (CI runners can be slow to start processes).
 const stampCmd = (ms, tag) => `node -e "console.log('${tag}S'+Date.now());setTimeout(()=>console.log('${tag}E'+Date.now()),${ms})"`;
 
-test('run_parallel runs calls concurrently and keeps input order', async () => {
+test('run_parallel serializes heavy commands and keeps input order', async () => {
   const r = await callTool('run_parallel', { calls: [
-    { command: stampCmd(1500, 'A'), label: 'A' },
-    { command: stampCmd(1500, 'B'), label: 'B' },
+    { command: stampCmd(700, 'A'), label: 'A' },
+    { command: stampCmd(700, 'B'), label: 'B' },
     { tool: 'read_file', args: { path: path.join(repo, 'package.json'), length: 2 } },
     { command: 'node -e "process.exit(3)"', label: 'bad' },
   ] });
@@ -69,10 +91,26 @@ test('run_parallel runs calls concurrently and keeps input order', async () => {
   const stamp = (k) => Number(text.match(new RegExp(`${k}(\\d{13})`))?.[1]);
   const [aS, aE, bS, bE] = ['AS', 'AE', 'BS', 'BE'].map(stamp);
   assert.ok([aS, aE, bS, bE].every(Number.isFinite), `timestamps missing:\n${text}`);
-  assert.ok(aS < bE && bS < aE, `A [${aS}-${aE}] and B [${bS}-${bE}] should overlap`);
+  assert.ok(aE <= bS, `heavy commands must not overlap: A [${aS}-${aE}] B [${bS}-${bE}]`);
   assert.match(text, /4\/4 done, 1 failed/);
   assert.ok(text.indexOf('=== A') < text.indexOf('=== B') && text.indexOf('=== B') < text.indexOf('=== bad'));
   assert.match(text, /=== bad -> FAILED/);
+});
+
+test('lightweight reads finish while a long heavy background command is still running', async () => {
+  const r = await callTool('run_parallel', { timeout_ms: 1200, max_concurrency: 3, calls: [
+    { command: sleepCmd(4000, 'heavy-finished'), label: 'heavy' },
+    { tool: 'read_file', args: { path: path.join(repo, 'package.json'), length: 2 }, label: 'quick-read' },
+  ] });
+  const text = out(r);
+  assert.match(text, /run_parallel: 1\/2 done/);
+  assert.match(text, /=== heavy -> STILL RUNNING/);
+  assert.match(text, /=== quick-read -> OK/);
+  const group = text.match(/wait_jobs\(\{"group":"(par-[a-z0-9]+)"\}\)/)?.[1];
+  assert.ok(group, text);
+  const finished = await callTool('wait_jobs', { group, timeout_ms: 10_000 });
+  assert.match(out(finished), /SUCCEEDED/);
+  assert.match(out(finished), /heavy-finished/);
 });
 
 test('run_parallel hands unfinished calls over to background jobs', async () => {

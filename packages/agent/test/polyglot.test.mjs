@@ -5,6 +5,7 @@ import {mkdtempSync,realpathSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {EventEmitter} from 'node:events';
+process.env.BRC_ERROR_LOG='0';
 const scratch=mkdtempSync(path.join(realpathSync.native(os.tmpdir()),'brc-polyglot-test-'));
 const root=path.join(scratch,'project');await fs.mkdir(root);
 process.env.BRC_HOME=path.join(scratch,'agent');process.env.BRC_LOG_LEVEL='silent';

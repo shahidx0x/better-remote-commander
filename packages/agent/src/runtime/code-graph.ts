@@ -134,8 +134,7 @@ export class CodeGraph {
                 // Cooperative one-millisecond pauses only after sustained parsing.
                 // This keeps WebSocket pings, cancel requests and other apps responsive
                 // without slowing ordinary small-file operations.
-                if ((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1')
-                    && Date.now() - lastYield >= 12) {
+                if (Date.now() - lastYield >= 12) {
                     await new Promise<void>(resolve => setTimeout(resolve, 1));
                     lastYield = Date.now();
                     checkCancelled();
