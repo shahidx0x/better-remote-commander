@@ -89,7 +89,9 @@ export async function handleStartSearch(args: unknown): Promise<ServerResult> {
 // BRC: blocking search mode (start_search with wait=true).
 // Must stay below the relay's per-call timeout (120s).
 const WAIT_DEFAULT_TIMEOUT_MS = 30_000;
-const WAIT_MAX_TIMEOUT_MS = 110_000;
+// Includes queue admission and result formatting. Leave margin below the
+// relay's normal 120-second request deadline even when workers are busy.
+const WAIT_MAX_TIMEOUT_MS = 105_000;
 const WAIT_DEFAULT_MAX_RESULTS = 200;
 const WAIT_POLL_MS = 250; // upper bound; waitForActivity wakes earlier on output or exit
 
@@ -97,6 +99,7 @@ type StartSearchArgs = ReturnType<typeof StartSearchArgsSchema.parse>;
 
 async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
   const timeoutMs = Math.min(Math.max(args.timeout_ms ?? WAIT_DEFAULT_TIMEOUT_MS, 1_000), WAIT_MAX_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs; // includes time waiting for a free worker
   const cap = Math.max(1, args.maxResults ?? WAIT_DEFAULT_MAX_RESULTS);
   const isContent = args.searchType === 'content';
 
@@ -128,15 +131,21 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
     return structuredSearchFailure(error,'start') as ServerResult;
   }
 
-  const deadline = Date.now() + timeoutMs;
   let stoppedReason: 'complete' | 'cap' | 'timeout' = 'complete';
-  for (;;) {
-    checkCancelled();
-    const s = searchManager.readSearchResults(sessionId, 0, 0);
-    if (s.isComplete) { stoppedReason = 'complete'; break; }
-    if (s.totalMatches >= cap) { stoppedReason = 'cap'; break; }
-    if (Date.now() >= deadline) { stoppedReason = 'timeout'; break; }
-    await searchManager.waitForActivity(sessionId, Math.min(WAIT_POLL_MS, Math.max(1, deadline - Date.now())));
+  try {
+    for (;;) {
+      checkCancelled();
+      const s = searchManager.readSearchResults(sessionId, 0, 0);
+      if (s.isComplete) { stoppedReason = 'complete'; break; }
+      if (s.totalMatches >= cap) { stoppedReason = 'cap'; break; }
+      if (Date.now() >= deadline) { stoppedReason = 'timeout'; break; }
+      await searchManager.waitForActivity(sessionId, Math.min(WAIT_POLL_MS, Math.max(1, deadline - Date.now())));
+    }
+  } catch (error) {
+    // A cancelled/failed blocking request must release its ripgrep process.
+    // Previously this path bypassed terminateSearch and could hold a worker.
+    searchManager.terminateSearch(sessionId);
+    throw error;
   }
   if (stoppedReason !== 'complete') searchManager.terminateSearch(sessionId);
 

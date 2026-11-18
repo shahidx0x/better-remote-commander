@@ -156,3 +156,47 @@ test('job tools cannot be nested', async () => {
   const p = await callTool('run_parallel', { calls: [{ tool: 'spawn_job', args: {} }] });
   assert.equal(p.isError, true);
 });
+
+test('get_job reports a specific missing-ID error with safe recovery rather than TOOL_FAILED',async()=>{
+  const result=await callTool('get_job',{id:'job-does-not-exist-987654'});
+  assert.equal(result.isError,true);
+  assert.equal(result.structuredContent?.error?.code,'JOB_NOT_FOUND');
+  assert.equal(result.structuredContent?.commandExecuted,false);
+  assert.equal(result.structuredContent?.recovery?.automaticRetry,false);
+  assert.equal(result.structuredContent?.recovery?.next?.tool,'list_jobs');
+  assert.match(out(result),/list_jobs/);
+});
+
+test('invalid get_job and run_parallel inputs return classified pre-execution errors',async()=>{
+  const invalidJob=await callTool('get_job',{});
+  assert.equal(invalidJob.isError,true);
+  assert.equal(invalidJob.structuredContent?.error?.code,'INVALID_ARGUMENT');
+  const invalidParallel=await callTool('run_parallel',{calls:[]});
+  assert.equal(invalidParallel.isError,true);
+  assert.equal(invalidParallel.structuredContent?.error?.code,'INVALID_ARGUMENT');
+  const nested=await callTool('run_parallel',{calls:[{tool:'spawn_job',args:{command:'echo side-effect'}}]});
+  assert.equal(nested.isError,true);
+  assert.equal(nested.structuredContent?.error?.code,'NESTED_JOB_TOOL');
+  assert.equal(nested.structuredContent?.commandExecuted,false);
+  assert.equal(nested.structuredContent?.recovery?.automaticRetry,false);
+});
+
+
+test('all job-control invalid requests have classified errors and no side effects',async()=>{
+  const requests=[
+    ['spawn_job',{},'INVALID_ARGUMENT'],
+    ['spawn_job',{steps:[{tool:'get_job',args:{id:'missing'}}]},'NESTED_JOB_TOOL'],
+    ['wait_jobs',{ids:['definitely-unknown-job-id'],timeout_ms:0},'JOB_NOT_FOUND'],
+    ['wait_jobs',{timeout_ms:-2},'INVALID_ARGUMENT'],
+    ['list_jobs',{limit:0},'INVALID_ARGUMENT'],
+    ['cancel_job',{},'INVALID_ARGUMENT'],
+    ['cancel_job',{all:'yes'},'INVALID_ARGUMENT'],
+  ];
+  for(const [tool,args,code] of requests){
+    const r=await callTool(tool,args);
+    assert.equal(r.isError,true,tool+': '+out(r));
+    assert.equal(r.structuredContent?.error?.code,code,tool+': '+out(r));
+    assert.equal(r.structuredContent?.commandExecuted,false,tool);
+    assert.equal(r.structuredContent?.recovery?.automaticRetry,false,tool);
+  }
+});

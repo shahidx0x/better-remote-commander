@@ -74,6 +74,20 @@ const capJobReply=(s:string):string=>s.length<=MAX_MCP_JOB_OUTPUT?s:
 const text = (t: string, isError = false): ServerResult => ({
   content: [{ type: 'text', text: capJobReply(t) }], ...(isError ? { isError: true } : {})
 });
+/** Classify pre-execution job-tool errors instead of reporting TOOL_FAILED.
+ * Never auto-retry a mutation, job batch, or uncertain request. */
+function jobToolError(code:string, message:string, suggestion:string,
+  next?:{tool:string;args:Record<string,unknown>}):ServerResult {
+  return {
+    isError:true,
+    content:[{type:'text',text:capJobReply(code+': '+message+'\n'+suggestion)}],
+    structuredContent:{
+      error:{code,message,retryable:false},
+      commandExecuted:false,
+      recovery:{automaticRetry:false,suggestion,...(next?{next}:{})}
+    }
+  };
+}
 
 // The dispatcher injects itself here (avoids a circular import).
 type Executor = (tool: string, args: Record<string, unknown>) => Promise<ServerResult>;
@@ -688,15 +702,23 @@ export async function handleManagedRunCommand(args: unknown): Promise<ServerResu
 }
 export async function handleSpawnJob(args: unknown): Promise<ServerResult> {
   const parsed = SpawnJobArgsSchema.safeParse(args);
-  if (!parsed.success) return text(`Invalid arguments for spawn_job: ${parsed.error.message}`, true);
+  if (!parsed.success) return jobToolError('INVALID_ARGUMENT',
+    'Invalid spawn_job arguments: '+parsed.error.message.slice(0,700),
+    'Provide one command or a sequence of valid tool/command steps. No job was started.');
   const a = parsed.data;
   const steps: Step[] = [...(a.command ? [{ command: a.command, cwd: a.cwd }] : []), ...(a.steps ?? [])];
-  if (!steps.length) return text('spawn_job needs "command" or "steps".', true);
+  if (!steps.length) return jobToolError('INVALID_ARGUMENT',
+    'spawn_job requires command or steps.', 'Provide a command or at least one step; no job was started.');
   const bad = steps.find((s) => 'tool' in s && JOB_TOOL_NAMES.has(s.tool));
-  if (bad) return text(`Tool "${(bad as { tool: string }).tool}" cannot be used inside a job.`, true);
+  if (bad) return jobToolError('NESTED_JOB_TOOL',
+    `Tool "${(bad as { tool: string }).tool}" cannot run inside a background job.`,
+    'Use job-control tools separately. No job was started.');
   await loadHistory();
   if (queue.length >= MAX_QUEUED_JOBS)
-    return text(`BUSY: ${MAX_QUEUED_JOBS} jobs are already queued. Wait for earlier work to finish; no new job was started.`, true);
+    return jobToolError('JOB_QUEUE_FULL',
+      `${MAX_QUEUED_JOBS} jobs are already queued; no job was started.`,
+      'Wait for existing jobs to finish, then inspect list_jobs before scheduling another.',
+      {tool:'list_jobs',args:{limit:50}});
   const job = createJob(steps, { label: a.label, group: a.group, continueOnError: a.continue_on_error, timeoutMs: a.timeout_ms });
   enqueue(job);
   const pos = job.status === 'queued' ? ` (queued: ${MAX_CONCURRENT_JOBS} jobs run at once)` : '';
@@ -705,11 +727,17 @@ export async function handleSpawnJob(args: unknown): Promise<ServerResult> {
 
 export async function handleWaitJobs(args: unknown): Promise<ServerResult> {
   const parsed = WaitJobsArgsSchema.safeParse(args);
-  if (!parsed.success) return text(`Invalid arguments for wait_jobs: ${parsed.error.message}`, true);
+  if (!parsed.success) return jobToolError('INVALID_ARGUMENT',
+    'Invalid wait_jobs arguments: '+parsed.error.message.slice(0,700),
+    'Pass known ids or a group, and a timeout_ms within the allowed range.');
   const a = parsed.data;
   await loadHistory();
   const { picked, missing } = select(a);
-  if (!picked.length) return text(missing.length ? `Unknown job ids: ${missing.join(', ')}` : 'No jobs to wait for.', !!missing.length);
+  if (!picked.length && missing.length) return jobToolError('JOB_NOT_FOUND',
+    `Unknown or expired job IDs: ${missing.slice(0,15).join(', ')}`,
+    'Inspect list_jobs for retained IDs and verify completed effects before repeating work.',
+    {tool:'list_jobs',args:{limit:50}});
+  if (!picked.length) return text('No jobs to wait for.');
   const cond = a.mode === 'any'
     ? () => picked.every(isFinished) || picked.some((j) => isFinished(j) && !j.reported)
     : () => picked.every(isFinished);
@@ -719,10 +747,16 @@ export async function handleWaitJobs(args: unknown): Promise<ServerResult> {
 
 export async function handleGetJob(args: unknown): Promise<ServerResult> {
   const parsed = GetJobArgsSchema.safeParse(args);
-  if (!parsed.success) return text(`Invalid arguments for get_job: ${parsed.error.message}`, true);
+  if (!parsed.success) return jobToolError('INVALID_ARGUMENT',
+    'Invalid get_job arguments: '+parsed.error.message.slice(0,700),
+    'Supply a known job id from list_jobs and valid output_chars/step_offset/step_limit.',
+    {tool:'list_jobs',args:{limit:50}});
   await loadHistory();
   const j = jobs.get(parsed.data.id);
-  if (!j) return text(`Unknown job id: ${parsed.data.id}`, true);
+  if (!j) return jobToolError('JOB_NOT_FOUND',
+    `Unknown or expired job id: ${parsed.data.id}`,
+    'Call list_jobs to find retained job IDs. A job may have been pruned; do not replay a previous command or mutation without checking its effects.',
+    {tool:'list_jobs',args:{limit:50}});
   const out = detail(j, parsed.data.output_chars,parsed.data.step_offset,parsed.data.step_limit);
   if (isFinished(j) && !out.includes('[MORE JOB STEPS:')) j.reported = true;
   return text(out);
@@ -730,7 +764,9 @@ export async function handleGetJob(args: unknown): Promise<ServerResult> {
 
 export async function handleListJobs(args: unknown): Promise<ServerResult> {
   const parsed = ListJobsArgsSchema.safeParse(args);
-  if (!parsed.success) return text(`Invalid arguments for list_jobs: ${parsed.error.message}`, true);
+  if (!parsed.success) return jobToolError('INVALID_ARGUMENT',
+    'Invalid list_jobs arguments: '+parsed.error.message.slice(0,700),
+    'Use a valid status, group and a limit between 1 and 500.');
   const a = parsed.data;
   await loadHistory();
   let list = [...jobs.values()];
@@ -746,9 +782,13 @@ export async function handleListJobs(args: unknown): Promise<ServerResult> {
 
 export async function handleCancelJob(args: unknown): Promise<ServerResult> {
   const parsed = CancelJobArgsSchema.safeParse(args);
-  if (!parsed.success) return text(`Invalid arguments for cancel_job: ${parsed.error.message}`, true);
+  if (!parsed.success) return jobToolError('INVALID_ARGUMENT',
+    'Invalid cancel_job arguments: '+parsed.error.message.slice(0,700),
+    'Pass job IDs, a group, or all:true. No cancellation was requested.');
   const a = parsed.data;
-  if (!a.all && !a.ids?.length && !a.group) return text('cancel_job needs ids, group or all=true.', true);
+  if (!a.all && !a.ids?.length && !a.group) return jobToolError('INVALID_ARGUMENT',
+    'cancel_job requires IDs, group or all:true.',
+    'Select target jobs explicitly; no cancellation was requested.');
   const picked = a.all ? [...jobs.values()] : select(a).picked;
   const cancelled = picked.filter(cancel);
   await Promise.race([Promise.all(cancelled.map((j) => j.done)), new Promise((r) => setTimeout(r, 5_000))]);
@@ -759,14 +799,21 @@ export async function handleCancelJob(args: unknown): Promise<ServerResult> {
 
 export async function handleRunParallel(args: unknown): Promise<ServerResult> {
   const parsed = RunParallelArgsSchema.safeParse(args);
-  if (!parsed.success) return text(`Invalid arguments for run_parallel: ${parsed.error.message}`, true);
+  if (!parsed.success) return jobToolError('INVALID_ARGUMENT',
+    'Invalid run_parallel arguments: '+parsed.error.message.slice(0,700),
+    'Supply 1-50 independent calls containing {tool,args} or {command,cwd}. No tasks were started.');
   const a = parsed.data;
   const bad = a.calls.find((s) => 'tool' in s && JOB_TOOL_NAMES.has(s.tool));
-  if (bad) return text(`Tool "${(bad as { tool: string }).tool}" cannot be used inside run_parallel.`, true);
+  if (bad) return jobToolError('NESTED_JOB_TOOL',
+    `Tool "${(bad as { tool: string }).tool}" cannot run inside run_parallel.`,
+    'Call job-control tools separately; only independent ordinary tools or commands may be grouped. Nothing was started.');
   await loadHistory();
 
   if (queue.length + a.calls.length > MAX_QUEUED_JOBS)
-    return text(`BUSY: this batch would exceed the ${MAX_QUEUED_JOBS}-job queue. Wait for earlier work to finish; no calls were started.`, true);
+    return jobToolError('JOB_QUEUE_FULL',
+      `The batch would exceed the ${MAX_QUEUED_JOBS}-job queue; no calls were started.`,
+      'Wait for existing jobs to finish and inspect list_jobs before submitting another batch.',
+      {tool:'list_jobs',args:{limit:50}});
   const group = `par-${Date.now().toString(36)}`;
   const batch = a.calls.map((c, i) => createJob([c], {
     label: c.label ?? `#${i + 1} ${stepName(c)}`,

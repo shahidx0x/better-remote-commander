@@ -172,10 +172,21 @@ export interface SearchSessionOptions {
       throw new Error(`Failed to locate ripgrep binary: ${err instanceof Error ? err.message : String(err)}`);
     }
     
-    // Start ripgrep process
-    const rgProcess = spawn(rgPath, args, { windowsHide: true });  // Prevent visible console windows on Windows
-    
+    // Start ripgrep. A platform-specific spawn() failure must return a
+    // classified SEARCH_START_FAILED, not kill the agent or leak worker slots.
+    let rgProcess: ChildProcess;
+    try {
+      rgProcess = spawn(rgPath, args, { windowsHide: true });
+    } catch (error) {
+      throw new Error('Failed to start ripgrep process: '+
+        (error instanceof Error ? error.message : String(error)));
+    }
+
     if (!rgProcess.pid) {
+      // Node emits the spawn error on a subsequent tick. Without this listener,
+      // throwing here can leave an unhandled ChildProcess 'error' that crashes
+      // the entire agent instead of returning SEARCH_START_FAILED.
+      rgProcess.once('error', () => {});
       throw new Error('Failed to start ripgrep process');
     }
     if (process.platform === 'win32') {
