@@ -1,5 +1,6 @@
 /** Execute an explicitly requested toolchain command without a shell or argument interpolation. */
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import { validatePath } from '../core/tools/filesystem.js';
 import { commandManager } from '../core/command-manager.js';
 import { checkCancelled, getCallContext } from '../context.js';
@@ -18,6 +19,10 @@ export async function runProgram(program: string, args: string[], cwd: string, t
     return new Promise<ReturnType<typeof result>>((resolve) => {
         let stdout = '', stderr = '', truncated = false, timedOut = false, cancelled = false, done = false, fallback: NodeJS.Timeout | undefined;
         const child = spawn(program, args, { cwd, env, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+        if (process.platform === 'win32' && (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') && child.pid) {
+            try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
+            catch { /* priority adjustments are best effort only */ }
+        }
         const capture = (old: string, chunk: string) => { const s = old + chunk; if (s.length > outputLimit) {
             truncated = true;
             return s.slice(0, Math.floor(outputLimit * .25)) + '\n[output truncated]\n' + s.slice(-Math.floor(outputLimit * .7));

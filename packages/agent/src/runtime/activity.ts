@@ -1,8 +1,11 @@
-/** Live-only metadata diagnostics. No append/write API, disk buffer or log timer. */
+/** Live-only metadata diagnostics. Bounded 20-line history and throttled TTY redraw, no transcript written to disk. */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 export const RETENTION_MS = 0;
+const RESPONSIVE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
+export const MAX_VISIBLE_ACTIVITY_LINES = RESPONSIVE ? 20 : 1000;
+const MAX_QUEUED_ACTIVITY_LINES = RESPONSIVE ? 20 : 200;
 let stdoutAvailable = true;
 process.stdout.on('error', () => { stdoutAvailable = false; });
 export type ConsoleMode = 'compact' | 'verbose';
@@ -27,6 +30,9 @@ const safeId = (v: string) => v.replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 80);
 export class ActivityLog {
     private events: ActivityEvent[] = [];
     private consoleQueue: string[] = [];
+    private rollingLines: string[] = [];
+    private rollingTimer: NodeJS.Timeout | null = null;
+    private rollingConsole = false;
     private blocked = false;
     private started = false;
     private consolePauses = 0;
@@ -38,6 +44,18 @@ export class ActivityLog {
     get directory(): string { return path.join(this.home, 'logs'); }
     getConsoleMode(): ConsoleMode { return this.consoleMode; }
     setConsoleMode(mode: ConsoleMode): void { this.consoleMode = mode; }
+    /** Enabled only after pairing, in an interactive TTY. Never redraw prompts. */
+    setRollingConsole(enabled:boolean):void {
+        this.rollingConsole = !!enabled && !!process.stdout.isTTY && process.env.TERM !== 'dumb';
+        if (this.rollingConsole) {
+            this.consoleQueue.length = 0;
+            this.scheduleRolling();
+        } else {
+            if (this.rollingTimer) clearTimeout(this.rollingTimer);
+            this.rollingTimer = null;
+            this.rollingLines.length = 0;
+        }
+    }
     async start(): Promise<void> { if (this.started)
         return; this.started = true; await this.prune(); }
     log(level: string, message: string): void {
@@ -54,8 +72,8 @@ export class ActivityLog {
     }
     private record(event: ActivityEvent): void {
         this.events.push(event);
-        if (this.events.length > 1000)
-            this.events.shift();
+        if (this.events.length > MAX_VISIBLE_ACTIVITY_LINES)
+            this.events.splice(0, this.events.length - MAX_VISIBLE_ACTIVITY_LINES);
         if (this.quiet)
             return;
         // Compact mode halves successful tool chatter by displaying the
@@ -63,10 +81,6 @@ export class ActivityLog {
         if (this.consoleMode === 'compact' && event.phase === 'START') return;
         if (this.consoleMode === 'compact' && event.level === 'info' && !event.phase
             && !/^(Connecting to |Ready: |Disconnected|Relay refused|Device authorization)/.test(event.message)) return;
-        if (this.consoleQueue.length >= 200) {
-            this.consoleQueue.shift();
-            this.dropped++;
-        }
         const width = Math.min(160, Math.max(40, (process.stdout.columns || 120) - 1));
         const hhmmss = event.timestamp.slice(11, 19);
         let line = this.consoleMode === 'compact'
@@ -80,6 +94,16 @@ export class ActivityLog {
             const code = event.phase === 'ERROR' || event.level === 'error' ? '31'
                 : event.phase === 'OK' ? '32' : event.level === 'warn' ? '33' : '36';
             line = '\x1b[' + code + 'm' + line + '\x1b[0m';
+        }
+        if (this.rollingConsole) {
+            this.rollingLines.push(line);
+            if (this.rollingLines.length > 20) this.rollingLines.splice(0,this.rollingLines.length-20);
+            this.scheduleRolling();
+            return;
+        }
+        if (this.consoleQueue.length >= MAX_QUEUED_ACTIVITY_LINES) {
+            this.consoleQueue.shift();
+            this.dropped++;
         }
         this.consoleQueue.push(line + '\n');
         this.drainConsole();
@@ -95,7 +119,31 @@ export class ActivityLog {
             this.drainConsole();
         };
     }
+    private scheduleRolling(): void {
+        if (!this.rollingConsole || this.rollingTimer || this.blocked || this.consolePauses ||
+            !stdoutAvailable || process.stdout.destroyed) return;
+        // Coalesce bursts instead of redrawing 20 lines for each tool message.
+        this.rollingTimer = setTimeout(() => {
+            this.rollingTimer = null;
+            if (!this.rollingConsole || this.consolePauses || this.blocked || process.stdout.destroyed) return;
+            // ANSI erase-screen is limited to the BRC agent's own TTY window.
+            // No interaction with user shell commands, relay or other consoles.
+            const frame = '\x1b[H\x1b[2J\x1b[3J'
+                + '  BRC LIVE ACTIVITY  |  newest 20 lines only  |  no disk transcript\n'
+                + '  [M] settings  [S] status  [L] activity  [V] verbose  [?] help  [Ctrl+C] stop\n'
+                + '-'.repeat(68) + '\n'
+                + this.rollingLines.join('\n') + '\n';
+            try {
+                if (!process.stdout.write(frame)) {
+                    this.blocked = true;
+                    process.stdout.once('drain', () => { this.blocked = false; this.scheduleRolling(); });
+                }
+            } catch { this.rollingConsole = false; }
+        }, 100);
+        this.rollingTimer.unref();
+    }
     private drainConsole(): void {
+        if (this.rollingConsole) { this.scheduleRolling(); return; }
         if (!stdoutAvailable || process.stdout.destroyed) {
             this.consoleQueue.length = 0;
             return;
@@ -143,6 +191,13 @@ export class ActivityLog {
             }
         }
     }
-    async close(): Promise<void> { this.drainConsole(); this.events = []; }
+    async close(): Promise<void> {
+        if (this.rollingTimer) clearTimeout(this.rollingTimer);
+        this.rollingTimer = null;
+        this.rollingConsole = false;
+        this.drainConsole();
+        this.events = [];
+        this.rollingLines = [];
+    }
 }
 export const activity = new ActivityLog();

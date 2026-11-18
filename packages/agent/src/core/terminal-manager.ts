@@ -2,6 +2,8 @@ import { spawn } from 'child_process';
 import path from 'path';
 import { TerminalSession, CommandExecutionResult, ActiveSession, TimingInfo, OutputEvent } from './types.js';
 import { DEFAULT_COMMAND_TIMEOUT } from './config.js';
+import { planFastExec } from '../tools/fast-exec.js';
+import os from 'node:os';
 import { configManager } from './config-manager.js';
 import {capture} from "./utils/capture.js";
 import { analyzeProcessState } from './utils/process-detection.js';
@@ -43,6 +45,7 @@ interface CompletedSession {
   endTime: Date;
   evictedLines: number;        // Carried over from the active session (see TerminalSession)
   evictedChars: number;
+  retainedChars: number;
 }
 
 /**
@@ -53,9 +56,28 @@ interface CompletedSession {
  * The cap also bounds the join() cost in snapshot reads and the periodic
  * process-state scan, both of which are O(total output).
  */
-export const MAX_BUFFERED_OUTPUT_CHARS = 50 * 1024 * 1024;  // per session; oldest lines evicted first
-const MAX_LINE_CHARS = 1024 * 1024;                  // force-split longer lines so eviction can work
-const MAX_WAIT_OUTPUT_CHARS = 2 * 1024 * 1024;       // start_process wait buffer (prompt/state detection)
+const RESPONSIVE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
+export const MAX_BUFFERED_OUTPUT_CHARS = RESPONSIVE ? 64 * 1024 : 50 * 1024 * 1024;
+const MAX_LINE_CHARS = RESPONSIVE ? 8 * 1024 : 1024 * 1024;
+export const MAX_VISIBLE_TERMINAL_LINES = RESPONSIVE ? 20 : Number.POSITIVE_INFINITY;
+/** Initial start_process output is also a tail, not a hidden multi-MB buffer. */
+export function keepRecentTerminalOutput(previous:string, chunk:string):string {
+  let text = previous + chunk;
+  if (text.length > MAX_WAIT_OUTPUT_CHARS)
+    text = text.slice(-MAX_WAIT_OUTPUT_CHARS);
+  if (!RESPONSIVE) return text;
+  let start = text.length;
+  for (let i = 0; i < MAX_VISIBLE_TERMINAL_LINES; i++) {
+    const newline = text.lastIndexOf('\n', start - 1);
+    if (newline < 0) { start = 0; break; }
+    start = newline;
+  }
+  return start > 0 ? text.slice(start + 1) : text;
+}
+const MAX_WAIT_OUTPUT_CHARS = RESPONSIVE ? 64 * 1024 : 2 * 1024 * 1024;
+const MAX_ACTIVE_TERMINALS = RESPONSIVE ? 2 : 32;
+const MAX_COMPLETED_TERMINALS = RESPONSIVE ? 8 : 100;
+const MAX_COMPLETED_CHARS = RESPONSIVE ? 256 * 1024 : 100 * MAX_BUFFERED_OUTPUT_CHARS;
 
 // Result type for paginated output reading
 export interface PaginatedOutputResult {
@@ -147,6 +169,7 @@ export function getShellSpawnArgs(shellPath: string, command: string): ShellSpaw
 export class TerminalManager {
   private sessions: Map<number, TerminalSession> = new Map();
   private completedSessions: Map<number, CompletedSession> = new Map();
+  private completedBufferedChars = 0;
   
   /**
    * Send input to a running process
@@ -175,6 +198,12 @@ export class TerminalManager {
   }
   
   async executeCommand(command: string, timeoutMs: number = DEFAULT_COMMAND_TIMEOUT, shell?: string, collectTiming: boolean = false): Promise<CommandExecutionResult> {
+    // start_process returns before long-running builds finish. Without a live
+    // session cap, repeated calls bypass the scheduler and oversubscribe CPU/RAM.
+    if (this.sessions.size >= MAX_ACTIVE_TERMINALS) return {
+      pid:-1, output:'TERMINAL_BUSY: Too many active BRC terminal sessions; wait for an existing process or close it before launching another.',
+      isBlocked:false
+    };
     // Get the shell from config if not specified
     let shellToUse: string | boolean | undefined = shell;
     if (!shellToUse) {
@@ -241,6 +270,17 @@ export class TerminalManager {
       spawnOptions.env.PATHEXT = getRepairedPathExt();
     }
 
+    // Skip shell startup for literal native .exe commands. Quoting, pipelines,
+    // shell built-ins and scripts retain the configured shell unchanged.
+    if (typeof shellToUse === 'string') {
+      const fast = await planFastExec(shellToUse, enhancedCommand, spawnOptions.env);
+      if (fast) {
+        spawnConfig = { executable:fast.executable, args:fast.args, useShellOption:false,
+          windowsVerbatim:fast.windowsVerbatim };
+        spawnOptions.env = fast.env ?? spawnOptions.env;
+      }
+    }
+
     // On Windows, when we invoke cmd.exe directly and pass the user's command as a
     // single argument, Node/libuv applies MSVCRT-style quoting that escapes embedded
     // double quotes as \" . cmd.exe does not understand that escaping, so any command
@@ -254,6 +294,10 @@ export class TerminalManager {
 
     // Spawn the process with appropriate arguments
     const childProcess = spawn(spawnConfig.executable, spawnConfig.args, spawnOptions);
+    if (RESPONSIVE && process.platform === 'win32' && childProcess.pid) {
+      try { os.setPriority(childProcess.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
+      catch { /* best effort; never change unrelated processes */ }
+    }
     let output = '';
 
     // spawn() reports failure asynchronously via an 'error' event; it does not
@@ -312,6 +356,7 @@ export class TerminalManager {
     return new Promise((resolve) => {
       let resolved = false;
       let periodicCheck: NodeJS.Timeout | null = null;
+      let waitTimer: NodeJS.Timeout | null = null;
 
       // Quick prompt patterns for immediate detection
       const quickPromptPatterns = />>>\s*$|>\s*$|\$\s*$|#\s*$/;
@@ -320,6 +365,7 @@ export class TerminalManager {
         if (resolved) return;
         resolved = true;
         if (periodicCheck) clearInterval(periodicCheck);
+        if (waitTimer) clearTimeout(waitTimer);
 
         // Add timing info if requested
         if (collectTiming) {
@@ -355,6 +401,7 @@ export class TerminalManager {
       // land on the next tick) is replayed rather than dropped.
       if (pendingProcessError) {
         forwardProcessError(pendingProcessError);
+        return; // do not arm timers on an already-failed child
       }
 
       childProcess.stdout.on('data', (data: any) => {
@@ -366,17 +413,12 @@ export class TerminalManager {
 
         // `output` only feeds the wait-phase result and prompt/state detection,
         // so stop growing it once resolved and keep only a bounded tail.
-        if (!resolved) {
-          output += text;
-          if (output.length > MAX_WAIT_OUTPUT_CHARS) {
-            output = output.slice(-Math.floor(MAX_WAIT_OUTPUT_CHARS / 2));
-          }
-        }
+        if (!resolved) output = keepRecentTerminalOutput(output, text);
         // Append to line-based buffer
         this.appendToLineBuffer(session, text);
 
         // Record output event if collecting timing
-        if (collectTiming) {
+        if (collectTiming && outputEvents.length < 128) {
           outputEvents.push({
             timestamp: now,
             deltaMs: now - startTime,
@@ -410,17 +452,12 @@ export class TerminalManager {
         if (!firstOutputTime) firstOutputTime = now;
         lastOutputTime = now;
 
-        if (!resolved) {
-          output += text;
-          if (output.length > MAX_WAIT_OUTPUT_CHARS) {
-            output = output.slice(-Math.floor(MAX_WAIT_OUTPUT_CHARS / 2));
-          }
-        }
+        if (!resolved) output = keepRecentTerminalOutput(output, text);
         // Append to line-based buffer
         this.appendToLineBuffer(session, text);
 
         // Record output event if collecting timing
-        if (collectTiming) {
+        if (collectTiming && outputEvents.length < 128) {
           outputEvents.push({
             timestamp: now,
             deltaMs: now - startTime,
@@ -447,8 +484,9 @@ export class TerminalManager {
         }
       }, 100);
 
-      // Timeout fallback
-      setTimeout(() => {
+      // Timeout only controls how long the initial request waits, not how
+      // long the child may run. Clear it on every early resolution.
+      waitTimer = setTimeout(() => {
         session.isBlocked = true;
         exitReason = 'timeout';
         resolveOnce({
@@ -458,22 +496,32 @@ export class TerminalManager {
         });
       }, timeoutMs);
 
-      childProcess.on('exit', (code: any) => {
+      // 'close' means the process has exited AND stdout/stderr pipes have been
+      // drained. Recording on 'exit' could retain a buffer that is still growing.
+      childProcess.on('close', (code: any) => {
         if (childProcess.pid) {
-          // Store completed session before removing active session
+          const previous = this.completedSessions.get(childProcess.pid);
+          if (previous) this.completedBufferedChars = Math.max(0,this.completedBufferedChars-previous.retainedChars);
+          // Store the bounded, final buffer before removing active session
           this.completedSessions.set(childProcess.pid, {
             pid: childProcess.pid,
-            outputLines: [...session.outputLines], // Copy line buffer
+            outputLines: session.outputLines, // transfer ownership, avoid copying up to 1 MiB
             exitCode: code,
             startTime: session.startTime,
             endTime: new Date(),
             evictedLines: session.evictedLines,
-            evictedChars: session.evictedChars
+            evictedChars: session.evictedChars,
+            retainedChars: session.bufferedChars
           });
-
-          // Keep only last 100 completed sessions
-          if (this.completedSessions.size > 100) {
-            const oldestKey = Array.from(this.completedSessions.keys())[0];
+          this.completedBufferedChars += session.bufferedChars;
+          // Cap both total completed-session count and aggregate retained output.
+          // Do not keep old terminal logs in RAM indefinitely.
+          while (this.completedSessions.size > MAX_COMPLETED_TERMINALS ||
+                 this.completedBufferedChars > MAX_COMPLETED_CHARS) {
+            const oldestKey = this.completedSessions.keys().next().value;
+            if (oldestKey === undefined) break;
+            const oldest = this.completedSessions.get(oldestKey)!;
+            this.completedBufferedChars = Math.max(0,this.completedBufferedChars-oldest.retainedChars);
             this.completedSessions.delete(oldestKey);
           }
 
@@ -531,16 +579,23 @@ export class TerminalManager {
       lastIndex++;
     }
 
-    // Enforce the per-session cap by evicting the oldest lines. Keeps the
-    // buffer far below V8's max string length so concatenation and join()
-    // can never throw "Invalid string length" and kill the server.
-    while (session.bufferedChars > MAX_BUFFERED_OUTPUT_CHARS && session.outputLines.length > 1) {
-      const dropped = session.outputLines.shift()!;
-      const droppedJoinedChars = dropped.length + 1; // +1 for its join separator
-      session.bufferedChars -= droppedJoinedChars;
-      session.evictedChars += droppedJoinedChars;
-      session.evictedLines++;
-      if (session.lastReadIndex > 0) session.lastReadIndex--;
+    // Retain only the newest 20 visible lines in responsive mode. These are
+    // actual retained data, not just a view over a large hidden log buffer.
+    // Also enforce a hard byte cap in case a program prints giant lines.
+    // Batch eviction avoids O(n^2) array shifts during noisy compilations.
+    let droppedLines = 0, droppedChars = 0;
+    while ((session.bufferedChars - droppedChars > MAX_BUFFERED_OUTPUT_CHARS ||
+            session.outputLines.length - droppedLines > MAX_VISIBLE_TERMINAL_LINES) &&
+           droppedLines < session.outputLines.length - 1) {
+      droppedChars += session.outputLines[droppedLines].length + 1;
+      droppedLines++;
+    }
+    if (droppedLines) {
+      session.outputLines.splice(0,droppedLines);
+      session.bufferedChars -= droppedChars;
+      session.evictedChars += droppedChars;
+      session.evictedLines += droppedLines;
+      session.lastReadIndex = Math.max(0,session.lastReadIndex-droppedLines);
     }
   }
 

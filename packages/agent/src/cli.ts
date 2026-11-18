@@ -151,6 +151,7 @@ if (isTermuxRuntime()) {
 const terminalInfo: AgentTerminal = { name: creds.name, relay: creds.relayUrl, deviceId: creds.deviceId, version: AGENT_VERSION, coreVersion: CORE_VERSION, tools: tools.length };
 const visualConsole = !!process.stdout.isTTY && !connection.nonInteractive;
 console.log(visualConsole ? consoleBanner(terminalInfo) : `brc-agent ${AGENT_VERSION} (core ${CORE_VERSION}) - ${tools.length} tools - "${creds.name}" [${creds.deviceId}] -> ${creds.relayUrl}`);
+activity.setRollingConsole(visualConsole && process.env.BRC_ROLLING_LOG_UI === '1');
 
 const runningAbort = new AbortController();
 const foregroundControls = !connection.nonInteractive && (connection.interactive || connection.autoConnect);
@@ -170,6 +171,13 @@ function startPluginSetup(): void {
       import('./plugins/installer.js'), import('./plugins/first-run.js'),
     ]);
     registerInstaller();
+    // Installing/repairing packages automatically on reconnect can saturate CPU
+    // and disk while the owner is gaming. Existing installed plugins still work.
+    // Explicit --update-plugins / --add-plugin commands remain available.
+    if (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') {
+      log('info', 'Responsive mode: automatic background plugin installation deferred.');
+      return;
+    }
     const setup = await ensureDefaultPlugins(log);
     if (setup.defined.length) log('info', 'Default plugins added: ' + setup.defined.join(', '));
     if (setup.queued.length) log('info', 'Plugin setup running: ' + setup.queued.join(', '));
@@ -185,7 +193,7 @@ function armShortcuts(): void {
   shortcuts = listenForTerminalShortcuts(process.stdin, choice => {
     if (choice === 'settings') void openSettings();
     else if (choice === 'status') console.log(connectionPanel(client.status(), { ...terminalInfo, name: activeCredentials.name, relay: activeCredentials.relayUrl }));
-    else if (choice === 'activity') console.log(recentActivity(activity.recent(), 10));
+    else if (choice === 'activity') console.log(recentActivity(activity.recent(), 20));
     else if (choice === 'verbose') {
       activity.setConsoleMode(activity.getConsoleMode() === 'compact' ? 'verbose' : 'compact');
       console.log('  Console mode: ' + activity.getConsoleMode() + '. All tool metadata remains in bounded memory.');

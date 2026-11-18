@@ -37,20 +37,24 @@ async function executeNodeCode(code: string, timeout_ms: number = 30000): Promis
         timeout: timeout_ms,
         windowsHide: true  // Prevent visible console windows on Windows
       });
+      if (os.platform() === 'win32' &&
+          (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') && proc.pid) {
+        try { os.setPriority(proc.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch {}
+      }
 
-      let stdout = '';
-      let stderr = '';
-
-      proc.stdout.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      proc.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
+      let stdout = '', stderr = '', omitted = 0;
+      const cap = 128 * 1024;
+      const collect = (prior: string, next: string): string => {
+        const take = Math.min(next.length,Math.max(0,cap-prior.length));
+        omitted += next.length-take;
+        return take ? prior+next.slice(0,take) : prior;
+      };
+      proc.stdout.on('data', data => { stdout = collect(stdout,data.toString()); });
+      proc.stderr.on('data', data => { stderr = collect(stderr,data.toString()); });
 
       proc.on('close', (exitCode) => {
-        resolve({ stdout, stderr, exitCode: exitCode ?? 1 });
+        const trunc = omitted ? '\n[OUTPUT TRUNCATED: '+omitted+' characters omitted; redirect full output to a file when needed.]' : '';
+        resolve({ stdout:stdout+trunc, stderr, exitCode: exitCode ?? 1 });
       });
 
       proc.on('error', (err) => {
@@ -194,12 +198,15 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
   );
 
   if (result.pid === -1) {
+    const busy = result.output.startsWith('TERMINAL_BUSY:');
     return {
-      content: [{type:'text',text:'SHELL_START_FAILED: '+result.output+'\nNEXT ACTION: Check shell executable, command permissions and PATH. No process started.'}],
+      content: [{type:'text',text:(busy ? result.output+'\nNEXT ACTION: Wait for a current session or terminate it using force_terminate; no new process started.' :
+        'SHELL_START_FAILED: '+result.output+'\nNEXT ACTION: Check shell executable, command permissions and PATH. No process started.')}],
       isError:true,
-      structuredContent:{error:{code:'SHELL_START_FAILED',message:result.output.slice(0,1200),retryable:false},
+      structuredContent:{error:{code:busy?'TERMINAL_BUSY':'SHELL_START_FAILED',message:result.output.slice(0,1200),retryable:busy},
         commandExecuted:false,shell:shellUsed,platform:process.platform,
-        recovery:{automaticRetry:false,suggestion:'Check shell, PATH and command permissions; correct the failure before retrying.'}},
+        recovery:{automaticRetry:false,suggestion:busy?'Wait for an existing terminal session or close it; do not launch more heavy processes.':
+          'Check shell, PATH and command permissions; correct the failure before retrying.'}},
     };
   }
 
@@ -221,10 +228,13 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
     timingMessage = formatTimingInfo(result.timingInfo);
   }
 
+  const latestSession = terminalManager.getSession(result.pid);
+  const dropped = latestSession?.evictedLines ??
+    terminalManager.listCompletedSessions().find(s => s.pid === result.pid)?.evictedLines ?? 0;
   return {
     content: [{
       type: "text",
-      text: `Process started with PID ${result.pid} (shell: ${shellUsed})\n${shellChoice.reason?'Shell selection: '+shellChoice.reason+'\n':''}Initial output:\n${result.output}${statusMessage}${timingMessage}`
+      text: `Process started with PID ${result.pid} (shell: ${shellUsed})\n${shellChoice.reason?'Shell selection: '+shellChoice.reason+'\n':''}Initial output:\n${result.output}${dropped>0?'\n[EARLIER OUTPUT DISCARDED: '+dropped+' lines; redirect the command to a file if full logs are needed.]':''}${statusMessage}${timingMessage}`
     }],
   };
 }
@@ -365,8 +375,8 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
   // the full output and that line numbers shifted (matches the truncation
   // markers used by other tools).
   if (result.evictedLines && result.evictedLines > 0) {
-    const capMB = Math.round(MAX_BUFFERED_OUTPUT_CHARS / 1024 / 1024);
-    statusMessage += `\n[WARNING: output exceeded the ${capMB}MB buffer cap; the ${result.evictedLines} earliest lines were evicted and cannot be read. Line numbers and totals refer to the retained buffer only]`;
+    const capKiB = Math.round(MAX_BUFFERED_OUTPUT_CHARS / 1024);
+    statusMessage += `\n[WARNING: rolling log retained only the newest 20 lines (maximum ${capKiB} KiB); ${result.evictedLines} older lines were discarded and cannot be read. To keep complete output, redirect the command to a file. Line totals refer only to retained lines.]`;
   }
 
   // Add process state info

@@ -176,14 +176,11 @@ export class TextFileHandler implements FileHandler {
      * Made static and public for use by other modules (e.g., writeFile telemetry in filesystem.ts)
      */
     static countLines(content: string): number {
-        if (content === '') return 0;
-        // A file with N lines has N-1 newline characters.
-        // If the file ends with a trailing newline, don't count the empty string after it.
-        const lines = content.split('\n');
-        if (lines[lines.length - 1] === '') {
-            return lines.length - 1;
-        }
-        return lines.length;
+        if (content.length === 0) return 0;
+        // Native indexOf avoids allocating an array of every line during writes.
+        let lines = 1;
+        for (let pos = content.indexOf('\n'); pos !== -1; pos = content.indexOf('\n',pos + 1)) lines++;
+        return content.endsWith('\n') ? lines - 1 : lines;
     }
 
     /**
@@ -291,13 +288,15 @@ export class TextFileHandler implements FileHandler {
     ): Promise<FileResult> {
         const stats = await fs.stat(filePath);
         const fileSize = stats.size;
-        const encoding = await this.detectTextEncoding(filePath);
-
-        // BRC fast path: UTF-8 files below the line-count limit are read once as bytes;
-        // the total line count and the requested window both come from that one buffer.
-        if (encoding === 'utf8' && fileSize < FILE_SIZE_LIMITS.LINE_COUNT_LIMIT) {
+        // Fast path: for ordinary small UTF-8 files the same read supplies the
+        // encoding probe, total lines and requested window. Avoid opening and
+        // closing the file a second time just to inspect two BOM bytes.
+        let encoding: 'utf8' | 'utf16le' = 'utf8';
+        if (fileSize < FILE_SIZE_LIMITS.LINE_COUNT_LIMIT) {
             const buf = await fs.readFile(filePath, { signal });
-            if (!hasLoneCR(buf)) {
+            const utf16Bom = buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe;
+            if (utf16Bom) encoding = 'utf16le';
+            if (!utf16Bom && !hasLoneCR(buf)) {
                 const total = countLinesInBuffer(buf);
                 const isNegative = offset < 0;
                 const first = isNegative ? Math.max(0, total - Math.abs(offset)) : offset;
@@ -312,6 +311,10 @@ export class TextFileHandler implements FileHandler {
                 return { content, mimeType, metadata: {} };
             }
         }
+
+        // Only large files require a separate encoding probe.
+        if (fileSize >= FILE_SIZE_LIMITS.LINE_COUNT_LIMIT)
+            encoding = await this.detectTextEncoding(filePath);
 
         // BRC fast path: large UTF-8 files, positive offset. Scan chunks for newline bytes to find the
         // exact window (previously a byte-position estimate that could land on the wrong line).

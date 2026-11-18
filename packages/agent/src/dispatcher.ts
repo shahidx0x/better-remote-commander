@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { WORKER_TOOL_HANDLERS, buildWorkerToolDefinitions } from './tools/worker-tools.js';
 import { workerCoordinator } from './runtime/worker-coordination.js';
 import { DEVELOPER_TOOL_HANDLERS, buildDeveloperToolDefinitions } from './tools/developer-tools.js';
-import { reclaimCaches } from './runtime/resource-limits.js';
+import { reclaimCaches, markToolStarted, markToolFinished } from './runtime/resource-limits.js';
 import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions, runBatch } from './tools/coding-tools.js';
 import { activity } from './runtime/activity.js';
 import { recordToolFailure, failureReason } from './runtime/failure-log.js';
@@ -139,6 +139,8 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   const parent=getCallContext();
   if(!parent)return withCallContext({id:randomUUID(),client:null,remote:false},()=>callTool(name,args));
   reclaimCaches();
+  markToolStarted();
+  try {
   const start=performance.now();
   activity.tool('START',name,parent.id);
   let out:ToolResult;
@@ -204,6 +206,10 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
       ...(exitCode!==undefined?{exitCode,diagnostic:safeCommandDiagnostic(cause)}:{})});
   }
   return {...out,_meta:{...out._meta,callId:parent.id,durationMs}};
+  } finally {
+    // Even unexpected logging/serialization failures must release idle tracking.
+    markToolFinished();
+  }
 }
 
 // Job steps run through the same dispatcher (validation, usage tracking, error wrapping).

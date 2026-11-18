@@ -36,7 +36,10 @@ const text = (t: string, isError = false): ServerResult => ({ content: [{ type: 
 // ---------------------------------------------------------------------------
 export class CappedOutput {
   private head = '';
-  private tail = '';
+  // A capped ring of chunks avoids repeatedly concatenating/copying a 120 KB
+  // string on every stdout event from chatty compilers or test runners.
+  private tailChunks: string[] = [];
+  private tailLength = 0;
   private dropped = 0;
   constructor(private readonly headCap: number, private readonly tailCap: number) {}
   push(chunk: string): void {
@@ -46,17 +49,31 @@ export class CappedOutput {
       chunk = chunk.slice(room);
       if (!chunk) return;
     }
-    this.tail += chunk;
-    if (this.tail.length > this.tailCap) {
-      const excess = this.tail.length - this.tailCap;
-      this.dropped += excess;
-      this.tail = this.tail.slice(excess);
+    if (this.tailCap <= 0) { this.dropped += chunk.length; return; }
+    if (chunk.length >= this.tailCap) {
+      this.dropped += this.tailLength + chunk.length - this.tailCap;
+      this.tailChunks = [chunk.slice(-this.tailCap)];
+      this.tailLength = this.tailCap;
+      return;
     }
+    this.tailChunks.push(chunk);
+    this.tailLength += chunk.length;
+    while (this.tailLength > this.tailCap) {
+      const excess = this.tailLength - this.tailCap;
+      const first = this.tailChunks[0];
+      const removed = Math.min(excess, first.length);
+      this.dropped += removed;
+      this.tailLength -= removed;
+      if (removed === first.length) this.tailChunks.shift();
+      else this.tailChunks[0] = first.slice(removed);
+    }
+    if (this.tailChunks.length > 64) this.tailChunks = [this.tailChunks.join('')];
   }
-  get truncated():boolean { return this.dropped>0; }
+  get truncated(): boolean { return this.dropped > 0; }
   toString(): string {
-    if (!this.dropped) return this.head + this.tail;
-    return `${this.head}\n\n[... ${this.dropped} characters truncated ...]\n\n${this.tail}`;
+    const tail = this.tailChunks.join('');
+    if (!this.dropped) return this.head + tail;
+    return `${this.head}\n\n[... ${this.dropped} characters truncated ...]\n\n${tail}`;
   }
 }
 
@@ -210,33 +227,52 @@ export async function runCommandCore(
       return;
     }
 
-    let timedOut = false;
-    let cancelled = false;
-    const abort = () => { cancelled = true; killTree(child.pid); };
-    abortSignal?.addEventListener('abort', abort, {once:true});
-    if (abortSignal?.aborted) abort();
-    let settled = false;
-    const timer = setTimeout(() => { timedOut = true; killTree(child.pid); }, timeoutMs);
-    const onAbort = () => { cancelled = true; killTree(child.pid); };
-    opts.signal?.addEventListener('abort', onAbort, { once: true });
-
-    child.stdout?.setEncoding('utf8');
-    child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', (d: string) => stdout.push(d));
-    child.stderr?.on('data', (d: string) => stderr.push(d));
-
+    // Only the command spawned by BRC receives reduced scheduling priority.
+    // Never alter system processes or force a CPU core affinity.
+    if (isWindows && (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') && child.pid) {
+      try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
+      catch { /* Windows may deny priority changes; the launcher is already below normal. */ }
+    }
+    let timedOut = false, cancelled = false, settled = false, stopRequested = false;
+    let graceTimer: NodeJS.Timeout | undefined;
+    const abort = () => { cancelled = true; requestStop(); };
+    const onAbort = () => { cancelled = true; requestStop(); };
     const finish = (exitCode: number | null, signal: NodeJS.Signals | null, spawnError?: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(graceTimer);
       abortSignal?.removeEventListener('abort', abort);
-      const ms = Date.now() - started;
       opts.signal?.removeEventListener('abort', onAbort);
       done({ exitCode, signal, spawnError, timedOut, cancelled });
     };
-
+    // A delayed JS timer is not a CPU watchdog. Termination must be requested
+    // only once, then the tool must release its streams/listeners even if a
+    // Windows child fails to emit 'close' after taskkill.
+    const requestStop = () => {
+      if (settled || stopRequested) return;
+      stopRequested = true;
+      killTree(child.pid);
+      graceTimer = setTimeout(() => {
+        if (settled) return;
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref();
+        finish(null, null);
+      }, 3000);
+      graceTimer.unref();
+    };
+    const timer = setTimeout(() => { timedOut = true; requestStop(); }, timeoutMs);
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (d: string) => stdout.push(d));
+    child.stderr?.on('data', (d: string) => stderr.push(d));
     child.on('error', (e) => finish(null, null, e));
     child.on('close', (code, signal) => finish(code, signal));
+    abortSignal?.addEventListener('abort', abort, { once: true });
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    if (abortSignal?.aborted) abort();
+    if (opts.signal?.aborted) onAbort();
   });
 
   const format = (r: Outcome, note?: string): ServerResult => {

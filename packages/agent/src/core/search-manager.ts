@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
+import os from 'node:os';
 import { validatePath } from './tools/filesystem.js';
 import { capture } from './utils/capture.js';
 import { getRipgrepPath } from './utils/ripgrep-resolver.js';
@@ -19,6 +20,10 @@ export interface SearchResult {
 }
 
 const MAX_LINE_TEXT = 400;
+// A search is a separate native process: safe mode limits how many may run.
+const RESPONSIVE_PROFILE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
+const MAX_ACTIVE_SEARCHES = RESPONSIVE_PROFILE ? 1 : 2;
+const SEARCH_RESULT_BYTE_BUDGET = RESPONSIVE_PROFILE ? 768 * 1024 : 2 * 1024 * 1024;
 const capLine = (s: string | undefined): string | undefined => {
   if (s === undefined) return undefined;
   const t = s.replace(/\r?\n$/, '');
@@ -80,6 +85,8 @@ export interface SearchSessionOptions {
   }> {
     checkCancelled();
     options = {...options, maxResults: Math.min(10000, Math.max(1, options.maxResults ?? 1000))};
+    if (this.getActiveSessionCount() >= MAX_ACTIVE_SEARCHES)
+      throw new Error('SEARCH_BUSY: another search is running; wait for completion or stop its session.');
     if (this.sessions.size >= 32) {
       for (const [id, old] of this.sessions) { if (old.isComplete) this.sessions.delete(id); if (this.sessions.size < 32) break; }
       if (this.sessions.size >= 32) throw new Error('SEARCH_BUSY: stop an active search before starting another.');
@@ -105,6 +112,10 @@ export interface SearchSessionOptions {
     
     if (!rgProcess.pid) {
       throw new Error('Failed to start ripgrep process');
+    }
+    if (RESPONSIVE_PROFILE && process.platform === 'win32') {
+      try { os.setPriority(rgProcess.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
+      catch { /* running without permissions is okay: executable still starts */ }
     }
 
     // Create session
@@ -139,7 +150,8 @@ export interface SearchSessionOptions {
 
     // Set up timeout if specified and auto-terminate
     // For exact filename searches, use a shorter default timeout
-    const timeoutMs = options.timeout ?? (this.isExactFilename(options.pattern) ? 1500 : undefined);
+    const timeoutMs = options.timeout ?? (this.isExactFilename(options.pattern) ? 1500 :
+      (RESPONSIVE_PROFILE ? 15000 : undefined));
     
     let killTimer: NodeJS.Timeout | null = null;
     if (timeoutMs) {
@@ -712,7 +724,7 @@ export interface SearchSessionOptions {
    * Clean up completed sessions older than specified time
    * Called automatically by cleanup interval
    */
-  cleanupSessions(maxAge: number = 5 * 60 * 1000): void {
+  cleanupSessions(maxAge: number = RESPONSIVE_PROFILE ? 60_000 : 5 * 60 * 1000): void {
     const cutoffTime = Date.now() - maxAge;
     
     for (const [sessionId, session] of this.sessions) {
@@ -783,11 +795,13 @@ export interface SearchSessionOptions {
   }
 
   private buildRipgrepArgs(options: SearchSessionOptions): string[] {
-    const args: string[] = [];
+    // Even on a machine with many cores, one ripgrep worker keeps CPU usage
+    // predictable. Lower scheduling priority is handled by the local launcher.
+    const args: string[] = ['--threads', '1'];
     
     if (options.searchType === 'content') {
       // Content search mode
-      args.push('--json', '--line-number');
+      args.push('--json', '--line-number', '--max-columns', '2048', '--max-columns-preview');
       
       // Add literal search support for content searches
       if (options.literalSearch) {
@@ -975,7 +989,7 @@ export interface SearchSessionOptions {
     if (match && session.totalMatches >= (session.options.maxResults ?? 1000)) { this.stopLimited(session, 'limit'); return false; }
     if (result.match) result.match = result.match.slice(0,2000);
     const bytes = Buffer.byteLength(JSON.stringify(result));
-    if (session.bytesStored + bytes > 2 * 1024 * 1024 || session.results.length >= 30000) { this.stopLimited(session, 'output_limit'); return false; }
+    if (session.bytesStored + bytes > SEARCH_RESULT_BYTE_BUDGET || session.results.length >= 10000) { this.stopLimited(session, 'output_limit'); return false; }
     session.bytesStored += bytes;
     session.results.push(result);
     if (match) session.totalMatches++; else session.totalContextLines++;
@@ -1088,7 +1102,7 @@ function startCleanupIfNeeded(): void {
   if (!cleanupInterval) {
     cleanupInterval = setInterval(() => {
       searchManager.cleanupSessions();
-    }, 5 * 60 * 1000);
+    }, RESPONSIVE_PROFILE ? 15_000 : 5 * 60 * 1000);
     cleanupInterval.unref();
     
     // Also check immediately after a short delay (let search process finish)

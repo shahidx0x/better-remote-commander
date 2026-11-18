@@ -36,12 +36,17 @@ const MAX_JOB_TIMEOUT_MS = 6 * 60 * 60_000;
 // Bounded even if the environment variable is accidentally set very high.
 const configuredJobs=Number(process.env.BRC_MAX_JOBS);
 const MAX_CONCURRENT_JOBS = Number.isInteger(configuredJobs) && configuredJobs>0 ? Math.min(8,configuredJobs) : 4;
-const MAX_STORED_STEP_OUTPUT = 32_000;
-const KEEP_IN_MEMORY = 64;
+const MAX_STORED_STEP_OUTPUT = (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 16_000 : 32_000;
+const KEEP_IN_MEMORY = (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 32 : 64;
 const MAX_MCP_JOB_OUTPUT = 128_000;
-const KEEP_ON_DISK = 500;
+const KEEP_ON_DISK = (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 100 : 500;
 
 export const JOB_TOOL_NAMES = new Set(['spawn_job', 'wait_jobs', 'get_job', 'list_jobs', 'cancel_job', 'run_parallel']);
+const RESPONSIVE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
+const FAST_PARALLEL_READS = new Set([
+  'read_file','read_code_file','read_multiple_files','list_directory','get_file_info',
+  'git_status','git_diff','git_log','agent_status','list_sessions','get_more_search_results'
+]);
 
 // One enormous combined job report can break an MCP client's message stream.
 const capJobReply=(s:string):string=>s.length<=MAX_MCP_JOB_OUTPUT?s:
@@ -116,7 +121,7 @@ export const CancelJobArgsSchema = z.object({
 });
 
 export const RunParallelArgsSchema = z.object({
-  calls: z.array(StepSchema).min(1).max(50).describe('Items run concurrently: {tool, args} or {command, cwd?, timeout_ms?}.'),
+  calls: z.array(StepSchema).min(1).max((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 24 : 50).describe('Items run concurrently: {tool, args} or {command, cwd?, timeout_ms?}.'),
   max_concurrency: z.number().int().min(1).max(8).optional().default(4),
   timeout_ms: z.number().int().min(1_000).max(MAX_WAIT_MS).optional().default(90_000)
     .describe('How long to wait for results. Calls still running then continue as background jobs.'),
@@ -457,6 +462,8 @@ export async function handleSpawnJob(args: unknown): Promise<ServerResult> {
   const bad = steps.find((s) => 'tool' in s && JOB_TOOL_NAMES.has(s.tool));
   if (bad) return text(`Tool "${(bad as { tool: string }).tool}" cannot be used inside a job.`, true);
   await loadHistory();
+  if ((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') && queue.length >= 8)
+    return text('BUSY: eight jobs are already queued. Wait for earlier work to finish; no new job was started.', true);
   const job = createJob(steps, { label: a.label, group: a.group, continueOnError: a.continue_on_error, timeoutMs: a.timeout_ms });
   enqueue(job);
   const pos = job.status === 'queued' ? ` (queued: ${MAX_CONCURRENT_JOBS} jobs run at once)` : '';
@@ -527,7 +534,10 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
 
   const group = `par-${Date.now().toString(36)}`;
   const batch = a.calls.map((c, i) => createJob([c], { label: c.label ?? `#${i + 1} ${stepName(c)}`, group }));
-  // Own worker pool, separate from spawn_job's slots, so quick reads are never stuck behind long jobs.
+  // Keep file/metadata reads fast even when the system is busy. Mixed and
+  // command batches run one at a time to avoid parallel CPU-heavy processes.
+  const readsOnly = a.calls.every(s => 'tool' in s && FAST_PARALLEL_READS.has(s.tool));
+  const workerLimit = RESPONSIVE ? (readsOnly ? 3 : 1) : 8;
   let next = 0;
   const worker = async () => {
     while (next < batch.length) {
@@ -536,7 +546,7 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
       catch(e) {markInternalJobFailure(job,e);}
     }
   };
-  for (let w = 0; w < Math.min(a.max_concurrency, batch.length); w++)
+  for (let w = 0; w < Math.min(a.max_concurrency, workerLimit, batch.length); w++)
     void worker().catch(()=>{ /* Last resort: job-level exceptions are handled above. */ });
 
   await waitUntil(batch, () => batch.every(isFinished), a.timeout_ms);

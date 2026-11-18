@@ -102,14 +102,14 @@ export class CodeGraph {
         if (g.building)
             await g.building;
         const entry = g;
-        entry.building = this.build(entry, Math.min(1500, Math.max(1, maxFiles)), focus, force).finally(() => { entry.building = undefined; });
+        entry.building = this.build(entry, Math.min((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 160 : 1500, Math.max(1, maxFiles)), focus, force).finally(() => { entry.building = undefined; });
         await entry.building;
         return entry;
     }
     private async build(g: Graph, maxFiles: number, focus: string | undefined, force: boolean) {
         const started = Date.now(), version = g.version;
         if (force || g.dirty || !g.watcher || Date.now() - g.listedAt > 5000) {
-            const list = await listProjectFiles(g.root, 15000);
+            const list = await listProjectFiles(g.root, (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 8000 : 15000);
             g.files = list.files.filter(sourceCandidate);
             g.enumerationTruncated = list.truncated;
             g.listedAt = Date.now();
@@ -128,8 +128,18 @@ export class CodeGraph {
         }[] = [];
         let bytes = 0, metadata = 0, hits = 0, misses = 0, next = 0, partial = g.enumerationTruncated || g.files.length > maxFiles, changed = force;
         const worker = async () => {
+            let lastYield = Date.now();
             while (next < selected.length) {
                 checkCancelled();
+                // Cooperative one-millisecond pauses only after sustained parsing.
+                // This keeps WebSocket pings, cancel requests and other apps responsive
+                // without slowing ordinary small-file operations.
+                if ((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1')
+                    && Date.now() - lastYield >= 12) {
+                    await new Promise<void>(resolve => setTimeout(resolve, 1));
+                    lastYield = Date.now();
+                    checkCancelled();
+                }
                 const file = selected[next++];
                 if (Date.now() - started > 20000 || bytes > 16 * 1024 * 1024 || metadata > 4 * 1024 * 1024) {
                     partial = true;
@@ -179,7 +189,9 @@ export class CodeGraph {
                 }
             }
         };
-        await Promise.all([worker(), worker()]);
+        // Low-resource mode deliberately avoids overlapping CPU-heavy parsers.
+        if ((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1')) await worker();
+        else await Promise.all([worker(), worker()]);
         if (nodes.size !== g.nodes.size || [...nodes.keys()].some(k => !g.nodes.has(k)))
             changed = true;
         // Enforce the final metadata budget even when two parsing tasks finish concurrently.

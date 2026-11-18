@@ -1,5 +1,5 @@
 /**
- * Text file editing via search/replace with fuzzy matching support.
+ * Text file editing via exact search/replace with bounded, safe indentation recovery.
  *
  * TECHNICAL DEBT / ARCHITECTURAL NOTE:
  * This file contains text editing logic that should ideally live in TextFileHandler.editRange()
@@ -15,10 +15,9 @@
  * 3. Unify the editRange() signature to handle both text search/replace and structured edits
  */
 
-import { getDefaultEditorMetadata, readFile, writeFile, readFileInternal, validatePath } from './filesystem.js';
+import { getDefaultEditorMetadata, readFile, writeFile, validatePath } from './filesystem.js';
 import fs from 'fs/promises';
 import { ServerResult } from '../types.js';
-import { runFuzzySearchInWorker, getSimilarityRatio } from './fuzzySearch.js';
 import { capture } from '../utils/capture.js';
 // Edit failures use structured error codes instead of unclassified text.
 import { EditBlockArgsSchema } from "./schemas.js";
@@ -26,7 +25,6 @@ import { atomicWrite, readBounded, sha256 } from "../../runtime/file-safety.js";
 import path from 'path';
 import { detectLineEnding, normalizeLineEndings } from '../utils/lineEndingHandler.js';
 import { configManager } from '../config-manager.js';
-import { fuzzySearchLogger, type FuzzySearchLogEntry } from '../utils/fuzzySearchLogger.js';
 import { resolvePreviewFileType } from '../ui/file-preview/shared/preview-file-types.js';
 import { resolveAbsolutePath } from '../handlers/filesystem-handlers.js';
 
@@ -57,87 +55,36 @@ function editBlockFailure(
 const MISSING_EDIT_GUIDANCE =
     'Provide file_path and either old_string plus new_string, edits:[{old_string,new_string}], or range plus content for supported spreadsheet files. Read the current file first; do not retry unchanged.';
 const NO_MATCH_GUIDANCE =
-    'No text was changed. Re-read the latest file with read_file or read_code_file, copy an exact and unique old_string including indentation/whitespace, then retry. Fuzzy matches are hints only.';
+    'No text was changed. Re-read the latest file with read_file or read_code_file, copy an exact and unique old_string including indentation/whitespace, then retry. Approximate scanning is intentionally disabled to save CPU.';
 const COUNT_GUIDANCE =
     'No text was changed. Add surrounding lines to make old_string unique, or set expected_replacements to the actual count ONLY if all occurrences should change. Read and verify the current file first.';
 
-interface FuzzyMatch {
-    start: number;
-    end: number;
-    value: string;
-    distance: number;
-    similarity: number;
+// A preview needs only a few surrounding lines, not an array containing every
+// line of the edited file. This bounds temporary RAM on large source files.
+function countNewlines(text: string, before = text.length): number {
+    let count = 0;
+    for (let pos = text.indexOf('\n'); pos !== -1 && pos < before; pos = text.indexOf('\n', pos + 1)) count++;
+    return count;
 }
-
-/**
- * Threshold for fuzzy matching - similarity must be at least this value to be considered
- * (0-1 scale where 1 is perfect match and 0 is completely different)
- */
-const FUZZY_THRESHOLD = 0.7;
-
-/**
- * Extract character code data from diff
- * @param expected The string that was searched for
- * @param actual The string that was found
- * @returns Character code statistics
- */
-function getCharacterCodeData(expected: string, actual: string): {
-    report: string;
-    uniqueCount: number;
-    diffLength: number;
-} {
-    // Find common prefix and suffix
-    let prefixLength = 0;
-    const minLength = Math.min(expected.length, actual.length);
-
-    // Determine common prefix length
-    while (prefixLength < minLength &&
-           expected[prefixLength] === actual[prefixLength]) {
-        prefixLength++;
-    }
-
-    // Determine common suffix length
-    let suffixLength = 0;
-    while (suffixLength < minLength - prefixLength &&
-           expected[expected.length - 1 - suffixLength] === actual[actual.length - 1 - suffixLength]) {
-        suffixLength++;
-    }
-    
-    // Extract the different parts
-    const expectedDiff = expected.substring(prefixLength, expected.length - suffixLength);
-    const actualDiff = actual.substring(prefixLength, actual.length - suffixLength);
-    
-    // Count unique character codes in the diff
-    const characterCodes = new Map<number, number>();
-    const fullDiff = expectedDiff + actualDiff;
-    
-    for (let i = 0; i < fullDiff.length; i++) {
-        const charCode = fullDiff.charCodeAt(i);
-        characterCodes.set(charCode, (characterCodes.get(charCode) || 0) + 1);
-    }
-    
-    // Create character codes string report
-    const charCodeReport: string[] = [];
-    characterCodes.forEach((count, code) => {
-        // Include character representation for better readability
-        const char = String.fromCharCode(code);
-        // Make special characters more readable
-        const charDisplay = code < 32 || code > 126 ? `\\x${code.toString(16).padStart(2, '0')}` : char;
-        charCodeReport.push(`${code}:${count}[${charDisplay}]`);
-    });
-    
-    // Sort by character code for consistency
-    charCodeReport.sort((a, b) => {
-        const codeA = parseInt(a.split(':')[0]);
-        const codeB = parseInt(b.split(':')[0]);
-        return codeA - codeB;
-    });
-    
-    return {
-        report: charCodeReport.join(','),
-        uniqueCount: characterCodes.size,
-        diffLength: fullDiff.length
+export function boundedEditPreview(text: string, changeOffset: number, replacement: string): {statusLine:string; previewContent:string} {
+    const totalLines = countNewlines(text) + 1;
+    const changeStartLine = changeOffset < 0 ? 0 : countNewlines(text, changeOffset);
+    const previewStart = Math.max(0, changeStartLine - 10);
+    const previewEnd = Math.min(totalLines, changeStartLine + countNewlines(replacement) + 1 + 10);
+    const lineStart = (line: number): number => {
+        let pos = 0;
+        for (let n = 0; n < line; n++) {
+            const next = text.indexOf('\n', pos);
+            if (next === -1) return text.length;
+            pos = next + 1;
+        }
+        return pos;
     };
+    const from = lineStart(previewStart);
+    const to = previewEnd === totalLines ? text.length : Math.max(from, lineStart(previewEnd) - 1);
+    const previewContent = text.slice(from, to);
+    const statusLine = `[Reading ${previewEnd-previewStart} lines from ${previewStart === 0 ? 'start' : `line ${previewStart}`} (total: ${totalLines} lines, ${totalLines-previewEnd} remaining)]\n\n`;
+    return {statusLine, previewContent};
 }
 
 export async function performSearchReplace(filePath: string, block: SearchReplace, expectedReplacements: number = 1, origin?: 'ui' | 'llm'): Promise<ServerResult> {
@@ -165,8 +112,11 @@ export async function performSearchReplace(filePath: string, block: SearchReplac
 
     // Read file directly to preserve line endings - critical for edit operations
     const validPath = await validatePath(filePath);
-    const originalHash = sha256(await readBounded(validPath, 32 * 1024 * 1024));
-    const content = await readFileInternal(validPath, 0, Number.MAX_SAFE_INTEGER);
+    // One bounded file snapshot supplies both the contents and conflict hash.
+    // Preserve existing UTF-8 text/line endings while avoiding duplicate reads.
+    const snapshot = await readBounded(validPath, 32 * 1024 * 1024);
+    const originalHash = sha256(snapshot);
+    const content = snapshot.toString('utf8');
     
     // Make sure content is a string
     if (typeof content !== 'string') {
@@ -221,19 +171,12 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
         capture('server_edit_block_exact_success', {fileExtension: fileExtension, expectedReplacements, hasWarning: warningMessage !== ""});
         const resolvedEditPath = resolveAbsolutePath(filePath);
 
-        // Show a partial preview centered on the edited area
-        const newLines = newContent.split('\n');
-        const totalLines = newLines.length;
+        // The preview is bounded: do not split large source files into a
+        // million-element array simply to display 20 surrounding lines.
         const changePos = content.indexOf(normalizedSearch);
-        const changeStartLine = changePos >= 0 ? newContent.substring(0, changePos).split('\n').length - 1 : 0;
-        const changeLineCount = block.replace.split('\n').length;
-        const contextLines = 10;
-        const previewStart = Math.max(0, changeStartLine - contextLines);
-        const previewEnd = Math.min(totalLines, changeStartLine + changeLineCount + contextLines);
-        const previewContent = newLines.slice(previewStart, previewEnd).join('\n');
-        const previewLineCount = previewEnd - previewStart;
-        const remaining = totalLines - previewEnd;
-        const statusLine = `[Reading ${previewLineCount} lines from ${previewStart === 0 ? 'start' : `line ${previewStart}`} (total: ${totalLines} lines, ${remaining} remaining)]\n\n`;
+        const { statusLine, previewContent } = boundedEditPreview(
+            newContent, changePos, block.replace
+        );
 
         return {
             content: [{
@@ -290,99 +233,14 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
         };
     }
 
-    // If exact match not found, try fuzzy search
+    // A miss must not consume a CPU core running Levenshtein over the file.
+    // Fuzzy suggestions were advisory only: they never authorized a write.
     if (count === 0) {
-        // Track fuzzy search time
-        const startTime = performance.now();
-
-        // Perform fuzzy search in a worker thread so the main event loop stays
-        // responsive to pings and parallel tool calls during the scan
-        const fuzzyResult = await runFuzzySearchInWorker(content, block.search);
-        const similarity = getSimilarityRatio(block.search, fuzzyResult.value);
-        
-        // Calculate execution time in milliseconds
-        const executionTime = performance.now() - startTime;
-        
-        // Generate diff and gather character code data
-        const diff = highlightDifferences(block.search, fuzzyResult.value);
-        
-        // Count character codes in diff
-        const characterCodeData = getCharacterCodeData(block.search, fuzzyResult.value);
-        
-        // Create comprehensive log entry
-        const logEntry: FuzzySearchLogEntry = {
-            timestamp: new Date(),
-            searchText: block.search,
-            foundText: fuzzyResult.value,
-            similarity: similarity,
-            executionTime: executionTime,
-            exactMatchCount: count,
-            expectedReplacements: expectedReplacements,
-            fuzzyThreshold: FUZZY_THRESHOLD,
-            belowThreshold: similarity < FUZZY_THRESHOLD,
-            diff: diff,
-            searchLength: block.search.length,
-            foundLength: fuzzyResult.value.length,
-            fileExtension: fileExtension,
-            characterCodes: characterCodeData.report,
-            uniqueCharacterCount: characterCodeData.uniqueCount,
-            diffLength: characterCodeData.diffLength
-        };
-        
-        // Log to file
-        await fuzzySearchLogger.log(logEntry);
-        
-        // Combine all fuzzy search data for single capture
-        //
-        // character_codes (characterCodeData.report) is deliberately NOT sent.
-        // It is a frequency map of the characters in the diff between the
-        // search text and the file text, so for a short diff it is close to
-        // recoverable file content — and mcp-privacy-policy.md states that
-        // file contents are not collected. It was added as diagnostics for the
-        // CRLF/LF normalization work in #103 (May 2025) to show whether failed
-        // matches came from \r (13), \n (10) or non-breaking spaces; that
-        // question is long since answered.
-        //
-        // The scalars below are kept: they are counts and lengths, and carry
-        // no recoverable content. The full report still goes to the local
-        // fuzzy-search.log for anyone debugging on their own machine.
-        const fuzzySearchData = {
-            similarity: similarity,
-            execution_time_ms: executionTime,
-            search_length: block.search.length,
-            file_size: content.length,
-            threshold: FUZZY_THRESHOLD,
-            found_text_length: fuzzyResult.value.length,
-            unique_character_count: characterCodeData.uniqueCount,
-            total_diff_length: characterCodeData.diffLength
-        };
-        
-        // Check if the fuzzy match is "close enough"
-        if (similarity >= FUZZY_THRESHOLD) {
-            // Capture the fuzzy search event with all data
-            capture('server_fuzzy_search_performed', fuzzySearchData);
-            
-            // If we allow fuzzy matches, we would make the replacement here
-            // For now, we'll return a detailed message about the fuzzy match
-            return editBlockFailure('EDIT_TEXT_NOT_FOUND',
-                `Exact match not found, but found a similar text with ${Math.round(similarity*100)}% similarity (found in ${executionTime.toFixed(2)}ms):\n\nDifferences:\n${diff.slice(0,1600)}\n\nNo changes were written.`,
-                NO_MATCH_GUIDANCE,{actualReplacements:0,closestSimilarity:Math.round(similarity*100)});
-        } else {
-            // If the fuzzy match isn't close enough
-            // Still capture the fuzzy search event with all data
-            capture('server_fuzzy_search_performed', {
-                ...fuzzySearchData,
-                below_threshold: true
-            });
-            
-            return editBlockFailure('EDIT_TEXT_NOT_FOUND',
-                `Search content not found in ${filePath}. The closest match was "${fuzzyResult.value.slice(0,1500)}" `+
-                `with only ${Math.round(similarity*100)}% similarity, below the ${Math.round(FUZZY_THRESHOLD*100)}% threshold. `+
-                `(Fuzzy search completed in ${executionTime.toFixed(2)}ms). No changes were written.`,
-                NO_MATCH_GUIDANCE,{actualReplacements:0,closestSimilarity:Math.round(similarity*100)});
-        }
+        return editBlockFailure('EDIT_TEXT_NOT_FOUND',
+            'old_string was not found exactly in the current file. No changes were written.',
+            NO_MATCH_GUIDANCE, {actualReplacements:0});
     }
-    
+
     throw new Error("Unexpected error during search and replace operation.");
 }
 
@@ -439,8 +297,11 @@ export async function performMultiEdit(
     displayPath: string,
     edits: Array<{ old_string: string; new_string: string; expected_replacements?: number }>,
 ): Promise<ServerResult> {
-    const originalHash = sha256(await readBounded(validPath, 32 * 1024 * 1024));
-    const content = await readFileInternal(validPath, 0, Number.MAX_SAFE_INTEGER);
+    // One bounded file snapshot supplies both the contents and conflict hash.
+    // Preserve existing UTF-8 text/line endings while avoiding duplicate reads.
+    const snapshot = await readBounded(validPath, 32 * 1024 * 1024);
+    const originalHash = sha256(snapshot);
+    const content = snapshot.toString('utf8');
     if (typeof content !== 'string') {
         return editBlockFailure('EDIT_STRUCTURED_FAILED',
             'The target is not plain UTF-8 text: '+displayPath+'. No changes were written.',
@@ -463,18 +324,9 @@ export async function performMultiEdit(
         const count = countNonOverlapping(next, search);
 
         if (count !== expected) {
-            let hint = '';
-            if (count === 0) {
-                try {
-                    const fuzzy = await runFuzzySearchInWorker(next, e.old_string);
-                    const similarity = getSimilarityRatio(e.old_string, fuzzy.value);
-                    if (similarity >= FUZZY_THRESHOLD) {
-                        hint = `\nClosest match (${Math.round(similarity * 100)}% similar):\n${highlightDifferences(e.old_string, fuzzy.value)}`;
-                    }
-                } catch { /* fuzzy hint is best-effort */ }
-            } else {
-                hint = ` Set expected_replacements to ${count} to replace all, or add surrounding context to make old_string unique.`;
-            }
+            const hint = count > 0
+                ? ' Use a unique old_string, or explicitly set expected_replacements if all occurrences should change.'
+                : ' Re-read the file and use the exact old_string; fuzzy scanning is disabled to conserve CPU.';
             return editBlockFailure(count===0?'EDIT_TEXT_NOT_FOUND':'EDIT_COUNT_MISMATCH',
                 `${label} failed: expected ${expected} occurrence(s) of old_string but found ${count}`+
                 (i>0?' (after evaluating previous edits in memory)':'')+
@@ -507,47 +359,10 @@ export async function performMultiEdit(
 }
 
 /**
- * Generates a character-level diff using standard {-removed-}{+added+} format
- * @param expected The string that was searched for
- * @param actual The string that was found
- * @returns A formatted string showing character-level differences
- */
-function highlightDifferences(expected: string, actual: string): string {
-    // Implementation of a simplified character-level diff
-    
-    // Find common prefix and suffix
-    let prefixLength = 0;
-    const minLength = Math.min(expected.length, actual.length);
-
-    // Determine common prefix length
-    while (prefixLength < minLength &&
-           expected[prefixLength] === actual[prefixLength]) {
-        prefixLength++;
-    }
-
-    // Determine common suffix length
-    let suffixLength = 0;
-    while (suffixLength < minLength - prefixLength &&
-           expected[expected.length - 1 - suffixLength] === actual[actual.length - 1 - suffixLength]) {
-        suffixLength++;
-    }
-    
-    // Extract the common and different parts
-    const commonPrefix = expected.substring(0, prefixLength);
-    const commonSuffix = expected.substring(expected.length - suffixLength);
-
-    const expectedDiff = expected.substring(prefixLength, expected.length - suffixLength);
-    const actualDiff = actual.substring(prefixLength, actual.length - suffixLength);
-
-    // Format the output as a character-level diff
-    return `${commonPrefix}{-${expectedDiff}-}{+${actualDiff}+}${commonSuffix}`;
-}
-
-/**
  * Handle edit_block command
  *
  * 1. Text files: String replacement (old_string/new_string)
- *    - Uses fuzzy matching for resilience
+ *    - Supports a unique indentation-only full-line match; no expensive fuzzy scan
  *    - Handles expected_replacements parameter
  *
  * 2. Structured files (Excel): Range rewrite (range + content)

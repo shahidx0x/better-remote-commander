@@ -71,10 +71,24 @@ test('Windows native launch only bypasses cmd for unquoted literal executable ar
  const {planFastExec}=await import('../dist/tools/fast-exec.js');
  const simple=await planFastExec('powershell.exe','node -v',{...process.env});
  assert.equal(simple?.kind,'native');
+ const fastCmd = await planFastExec('cmd.exe','node -v',{...process.env});
+ assert.equal(fastCmd?.kind,'native','plain native executables skip cmd.exe shell startup');
+ assert.equal(await planFastExec('cmd.exe','node -p "1 + 2"',{...process.env}),null,'quoted commands retain shell semantics');
+ assert.equal(await planFastExec('cmd.exe','dir',{...process.env}),null,'shell built-ins are not rewritten');
  assert.equal(path.extname(simple.executable).toLowerCase(),'.exe');
  assert.deepEqual(simple.args,['-v']);
  const quoted=await planFastExec('powershell.exe','node -p "1 + 2"',{...process.env});
- assert.notEqual(quoted?.kind,'native');
+ assert.equal(quoted,null,'quoted commands retain the configured shell');
+ // A .cmd script must never be silently routed away from PowerShell.
+ const scriptDir = path.join(scratch, 'script-bin');
+ const { mkdirSync } = await import('node:fs');
+ mkdirSync(scriptDir, {recursive: true});
+ writeFileSync(path.join(scriptDir, 'brc-script-only.cmd'), '@echo off\\r\\necho ok\\r\\n');
+ const oldPath = process.env.PATH;
+ try {
+   process.env.PATH = scriptDir + path.delimiter + oldPath;
+   assert.equal(await planFastExec('powershell.exe', 'brc-script-only arg', {...process.env}), null);
+ } finally {process.env.PATH = oldPath;}
  const pipeline=await planFastExec('powershell.exe','node -v | more',{...process.env});
  assert.equal(pipeline,null);
 });
@@ -114,19 +128,15 @@ test('list_directory output matches a sequential walk', async () => {
   assert.ok(t.includes(expected), 'same lines in the same order');
 });
 
-test('edit_block fuzzy fallback gives the same answer inline and in the reused worker', async () => {
-  const { runFuzzySearch } = await import(pathToFileURL(path.join(repo, 'packages/agent/dist/core/tools/fuzzySearchCore.js')).href);
-  const query = 'export function handler77(req, res) { return res.json({ id: 77, ok: false }); }';
-  for (const kb of [10, 300]) { // below and above the inline threshold
-    const p = path.join(scratch, `fuzzy-${kb}.js`);
-    let s = '';
-    for (let i = 0; s.length < kb * 1024; i++) s += `export function handler${i}(req, res) { return res.json({ id: ${i}, ok: true }); }\n`;
-    writeFileSync(p, s);
-    const expected = runFuzzySearch(s, query).result.value; // the matcher run directly on this thread
-    for (let round = 0; round < 2; round++) { // round 2 reuses the idle worker
-      const t = out(await callTool('edit_block', { file_path: p, old_string: query, new_string: 'x' }));
-      assert.match(t, /Search content not found/, `${kb} KB round ${round}`);
-      assert.ok(t.includes(`closest match was "${expected}"`), `${kb} KB round ${round}: ${t.slice(0, 200)}`);
-    }
-  }
+test('missing edit text returns quickly without CPU-heavy fuzzy scanning', async () => {
+  const p = path.join(scratch, 'no-fuzzy.js');
+  const original = 'export const ready = true;\n'.repeat(300);
+  writeFileSync(p, original);
+  const result = await callTool('edit_block', { file_path: p,
+    old_string: 'export const ready = false;', new_string: 'changed' });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent?.error?.code, 'EDIT_TEXT_NOT_FOUND');
+  assert.doesNotMatch(out(result), /closest match|similarity|fuzzy worker/i);
+  const { readFileSync } = await import('node:fs');
+  assert.equal(readFileSync(p, 'utf8'), original);
 });

@@ -59,17 +59,28 @@ if errorlevel 1 (
 title Better Remote Commander - Local Agent
 rem Keep a local, bounded failure-only log unless the owner explicitly opts out.
 if not defined BRC_ERROR_LOG set "BRC_ERROR_LOG=1"
+rem Responsive profile: fast native commands + concurrent I/O, without parallel CPU-heavy jobs.
+set "BRC_RESOURCE_PROFILE=responsive"
+rem Rolling last-20-line BRC console only; no accumulated console transcript.
+if not defined BRC_ROLLING_LOG_UI set "BRC_ROLLING_LOG_UI=1"
+set "BRC_MAX_JOBS=1"
+set "BRC_MAX_CONCURRENCY=3"
+set "BRC_PARSER_WORKERS=1"
+rem Avoid additional proxy/database processes unless explicitly enabled by owner.
+if not defined BRC_RTK set "BRC_RTK=0"
+if not defined BRC_FAST_EXEC set "BRC_FAST_EXEC=1"
 pushd "%BRC_ROOT%" >nul 2>&1
 if errorlevel 1 (
   echo [BRC] Could not enter the registered project directory.
   if "%~1"=="" pause
   exit /b 2
 )
-echo [BRC] Starting agent... (M settings, S status, L activity, V verbose)
+echo [BRC] Starting responsive agent: quick commands, up to 3 I/O calls, 1 heavy job...
+echo [BRC] Controls: M settings, S status, L activity, V verbose
 if "%~1"=="" (
-  node "%BRC_ROOT%packages\agent\dist\cli.js" --auto-connect
+  start "" /b /belownormal /wait node "%BRC_ROOT%packages\agent\dist\cli.js" --auto-connect
 ) else (
-  node "%BRC_ROOT%packages\agent\dist\cli.js" %*
+  start "" /b /belownormal /wait node "%BRC_ROOT%packages\agent\dist\cli.js" %*
 )
 set "BRC_EXIT=%errorlevel%"
 popd

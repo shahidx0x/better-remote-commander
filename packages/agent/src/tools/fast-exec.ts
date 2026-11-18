@@ -7,9 +7,9 @@
  *     often 50-500 ms.
  *
  * Fast paths (each falls back to the normal shell whenever it might change behaviour):
- *   - Windows + PowerShell: a "simple" command (program + plain arguments, no PowerShell syntax)
- *     whose program resolves to a .exe/.com/.cmd/.bat on PATH and is not a PowerShell alias or a
- *     cmd built-in runs through `cmd.exe /d /s /c` (~40 ms) instead.
+ *   - Windows + PowerShell: a simple, unquoted command whose executable resolves to
+ *     .exe/.com and has literal argv can run directly with spawn(), skipping both
+ *     PowerShell and cmd.exe. Quoted commands and .cmd/.bat scripts keep their shell.
  *   - bash/zsh: the login environment is captured once (refreshed every few minutes) and commands
  *     run as `<shell> -c` (no -l) with that environment, as long as the program is found on that
  *     PATH. Commands using shell functions defined in the profile (e.g. `nvm use`) still get a
@@ -29,7 +29,7 @@ export interface FastExecPlan {
   windowsVerbatim?: boolean;
   /** Environment to use instead of the caller's (login env for Unix shells). */
   env?: NodeJS.ProcessEnv;
-  kind: 'native' | 'cmd' | 'cached-login-env';
+  kind: 'native' | 'cached-login-env';
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +59,12 @@ export function findOnPath(program: string, pathVar: string | undefined, exts: s
         if (isFile(p)) { found = p; break outer; }
       }
     }
+  }
+  // Avoid retaining every distinct PATH/program combination indefinitely.
+  if (lookupCache.size >= 128) {
+    const now = Date.now();
+    for (const [k, v] of lookupCache) if (now - v.at >= LOOKUP_TTL_MS) lookupCache.delete(k);
+    if (lookupCache.size >= 128) lookupCache.delete(lookupCache.keys().next().value!);
   }
   lookupCache.set(key, { at: Date.now(), found });
   return found;
@@ -99,7 +105,10 @@ const PS_ALIASES_AND_CMD_BUILTINS = new Set([
 const WIN_EXEC_EXTS = ['.exe', '.com', '.cmd', '.bat'];
 
 function windowsPlan(shellName: string, command: string): FastExecPlan | null {
-  if (shellName !== 'powershell' && shellName !== 'pwsh') return null;
+  // The literal-argv native .exe path is safe for cmd.exe as well as
+  // PowerShell. This avoids spawning a shell for short CLI commands on the
+  // common Windows COMSPEC default without rewriting quoted commands.
+  if (!['powershell','pwsh','cmd'].includes(shellName)) return null;
   if (PS_SPECIAL.test(command)) return null;
   // balanced double quotes only, and no quote inside a word (PowerShell and cmd differ there)
   if ((command.match(/"/g) ?? []).length % 2 !== 0) return null;
@@ -120,9 +129,10 @@ function windowsPlan(shellName: string, command: string): FastExecPlan | null {
       /^[A-Za-z0-9_./:\\-]+(?:[ \t]+[A-Za-z0-9_./:\\-]+)*$/.test(command.trim())) {
     return { executable: resolved, args: command.trim().split(/[ \t]+/).slice(1), kind: 'native' };
   }
-  const comspec = process.env.COMSPEC || 'cmd.exe';
-  // /d: skip AutoRun registry commands; /s: strip exactly the outer quotes we add.
-  return { executable: comspec, args: ['/d', '/s', '/c', `"${command}"`], windowsVerbatim: true, kind: 'cmd' };
+  // Do not substitute cmd.exe for PowerShell merely to save startup time.
+  // .cmd/.bat scripts and quoted arguments may resolve/interpolate differently.
+  // Fall back to the configured shell; only literal .exe/.com argv runs native.
+  return null;
 }
 
 // ---------------------------------------------------------------------------

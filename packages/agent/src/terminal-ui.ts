@@ -1,4 +1,4 @@
-/** Lightweight, readable console view; no curses library, polling or full-screen redraw. */
+/** Lightweight console labels and status screens; the optional 20-line rolling activity view lives in runtime/activity.ts. */
 import type { ActivityEvent } from './runtime/activity.js';
 
 export interface AgentTerminal {

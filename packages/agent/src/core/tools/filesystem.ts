@@ -653,8 +653,15 @@ export async function writeFile(filePath: string, content: string, mode: 'rewrit
     const fileExtension = getFileExtension(validPath);
 
     // Calculate content metrics
-    const contentBytes = Buffer.from(content).length;
-    const lineCount = TextFileHandler.countLines(content);
+    // Compute metadata without creating another full Buffer or an array of
+    // every source line. Writes stay atomic via the existing file handler.
+    const contentBytes = Buffer.byteLength(content, 'utf8');
+    let lineCount = 0;
+    if (content.length) {
+        lineCount = 1;
+        for (let pos = content.indexOf('\n'); pos !== -1; pos = content.indexOf('\n', pos + 1)) lineCount++;
+        if (content.endsWith('\n')) lineCount--;
+    }
 
     // Capture file extension and operation details in telemetry without capturing the file path
     capture('server_write_file', {
