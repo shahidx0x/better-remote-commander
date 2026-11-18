@@ -22,6 +22,15 @@ export interface SearchResult {
 const MAX_LINE_TEXT = 400;
 // Keep search fan-out and retained results bounded in the Normal profile.
 const MAX_ACTIVE_SEARCHES = 2;
+const MAX_QUEUED_SEARCHES = 16;
+const MAX_SEARCH_SLOT_WAIT_MS = 10_000;
+type SearchSlotWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer?: NodeJS.Timeout;
+  signal?: AbortSignal;
+  abort?: () => void;
+};
 const SEARCH_RESULT_BYTE_BUDGET = 1 * 1024 * 1024;
 const capLine = (s: string | undefined): string | undefined => {
   if (s === undefined) return undefined;
@@ -68,6 +77,62 @@ export interface SearchSessionOptions {
  */export class SearchManager {
   private sessions = new Map<string, SearchSession>();
   private sessionCounter = 0;
+  // Reserve capacity before validation/spawn so concurrent starts cannot
+  // race past the two-worker cap. Queued calls don't start any processes.
+  private pendingStarts = 0;
+  private slotWaiters: SearchSlotWaiter[] = [];
+
+  private grantSearchSlots(): void {
+    while (this.slotWaiters.length &&
+        this.getActiveSessionCount() + this.pendingStarts < MAX_ACTIVE_SEARCHES) {
+      const next = this.slotWaiters.shift()!;
+      if (next.timer) clearTimeout(next.timer);
+      if (next.signal && next.abort) next.signal.removeEventListener('abort', next.abort);
+      this.pendingStarts++;
+      next.resolve();
+    }
+  }
+
+  private releaseStartSlot(): void {
+    this.pendingStarts = Math.max(0, this.pendingStarts - 1);
+    this.grantSearchSlots();
+  }
+
+  private async reserveStartSlot(): Promise<() => void> {
+    const signal = getCallContext()?.signal;
+    checkCancelled();
+    if (!this.slotWaiters.length &&
+        this.getActiveSessionCount() + this.pendingStarts < MAX_ACTIVE_SEARCHES) {
+      this.pendingStarts++;
+      return () => this.releaseStartSlot();
+    }
+    if (this.slotWaiters.length >= MAX_QUEUED_SEARCHES) {
+      throw new Error('SEARCH_BUSY: bounded pending search queue is full; retry after an active search completes.');
+    }
+    await new Promise<void>((resolve,reject) => {
+      const pending: SearchSlotWaiter = { resolve, reject, signal };
+      const forget = (): boolean => {
+        const idx = this.slotWaiters.indexOf(pending);
+        if (idx < 0) return false; // already granted the capacity
+        this.slotWaiters.splice(idx,1);
+        if (pending.timer) clearTimeout(pending.timer);
+        if (signal && pending.abort) signal.removeEventListener('abort',pending.abort);
+        return true;
+      };
+      pending.abort = () => {
+        if (forget()) reject(new Error('SEARCH_CANCELLED: cancelled while waiting for a free search worker.'));
+      };
+      pending.timer = setTimeout(() => {
+        if (forget()) reject(new Error('SEARCH_BUSY: no search worker became available within 10 seconds.'));
+      }, MAX_SEARCH_SLOT_WAIT_MS);
+      pending.timer.unref?.();
+      this.slotWaiters.push(pending);
+      signal?.addEventListener('abort',pending.abort,{once:true});
+      if (signal?.aborted) pending.abort();
+      else this.grantSearchSlots();
+    });
+    return () => this.releaseStartSlot();
+  }
 
   /**
    * Start a new search session (like start_process)
@@ -84,8 +149,9 @@ export interface SearchSessionOptions {
   }> {
     checkCancelled();
     options = {...options, maxResults: Math.min(10000, Math.max(1, options.maxResults ?? 1000))};
-    if (this.getActiveSessionCount() >= MAX_ACTIVE_SEARCHES)
-      throw new Error('SEARCH_BUSY: another search is running; wait for completion or stop its session.');
+    const releaseSlot = await this.reserveStartSlot();
+    try {
+    checkCancelled();
     if (this.sessions.size >= 32) {
       for (const [id, old] of this.sessions) { if (old.isComplete) this.sessions.delete(id); if (this.sessions.size < 32) break; }
       if (this.sessions.size >= 32) throw new Error('SEARCH_BUSY: stop an active search before starting another.');
@@ -137,6 +203,10 @@ export interface SearchSessionOptions {
 
     // Set up process event handlers
     this.setupProcessHandlers(session);
+    // The manager's close/error handlers update isComplete first, so waiting
+    // callers are released only after a worker actually exits.
+    rgProcess.once('close', () => this.grantSearchSlots());
+    rgProcess.once('error', () => this.grantSearchSlots());
     const signal = getCallContext()?.signal;
     const abort = () => this.stopLimited(session, 'cancelled');
     signal?.addEventListener('abort', abort, {once:true});
@@ -252,6 +322,10 @@ export interface SearchSessionOptions {
       totalResults: session.totalMatches,
       runtime: Date.now() - session.startTime
     };
+    } finally {
+      // A failed path/regex check or failed spawn must never leak a slot.
+      releaseSlot();
+    }
   }
 
   /**

@@ -9,6 +9,7 @@ import type { ToolResult } from 'brc-shared';
 export function searchErrorCode(error:unknown):string {
   if(error instanceof AgentError)return error.code;
   const message=(error instanceof Error?error.message:String(error)).toLowerCase();
+  if(/search_cancelled|cancelled while waiting for a free search/.test(message))return 'SEARCH_CANCELLED';
   if(/search_busy|too many.*search|search session.*limit/.test(message))return 'SEARCH_BUSY';
   // ripgrep reports invalid filename globs differently from content regexes.
   if(/error parsing glob|invalid glob|glob parse error|error parsing override glob/.test(message))return 'SEARCH_INVALID_GLOB';
@@ -34,7 +35,8 @@ export function structuredSearchFailure(error:unknown,stage:'start'|'results'|'s
       code==='SEARCH_RIPGREP_UNAVAILABLE'?'Install ripgrep (rg), or configure BRC_RG_PATH to its executable and restart the agent.':
       code==='SEARCH_START_FAILED'?'Check local ripgrep binary permissions, architecture and executable path. Do not retry unchanged.':
       code==='SEARCH_ACCESS_DENIED'?'Choose an existing absolute directory inside the agent allowed directories; check permissions.':
-      code==='SEARCH_BUSY'?'Use get_more_search_results or stop_search for existing sessions, or wait until search slots free.':
+      code==='SEARCH_BUSY'?'The bounded queue or its wait limit was reached. Let existing searches finish and retry only if still needed.':
+      code==='SEARCH_CANCELLED'?'The search was cancelled before starting; start a new search only if the original request is still needed.':
       code==='SEARCH_SESSION_NOT_FOUND'?'Start a new search and use its returned sessionId for pagination.':
       code==='SEARCH_TIMEOUT'?'Narrow the directory, regex or filePattern; reduce maxResults, or increase timeout_ms within allowed limits.':
       'Inspect the search failure details and adjust the path/pattern or local ripgrep environment before retrying.'}};

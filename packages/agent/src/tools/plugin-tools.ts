@@ -45,17 +45,20 @@ function oneLine(s: string | undefined, max = 160): string {
 
 export async function handleListPluginTools(args: unknown): Promise<ServerResult> {
   const parsed = ListPluginToolsArgsSchema.safeParse(args);
-  if (!parsed.success) return text(`Invalid arguments for list_plugin_tools: ${parsed.error.message}`, true);
+  if (!parsed.success) return policyError('INVALID_ARGUMENT',
+    'Invalid list_plugin_tools arguments: '+parsed.error.message.slice(0,900),
+    {tool:'list_plugin_tools',args:{}});
   const { plugin, refresh } = parsed.data;
 
   if (!plugin) {
     const records = listPlugins();
-    const all = records.filter((p) => p.source.type !== 'binary');
-    const programs = records.filter((p) => p.source.type === 'binary');
+    const all = records.filter((p) => p.source?.type !== 'binary');
+    const programs = records.filter((p) => p.source?.type === 'binary');
     if (!records.length) return text('No plugins are set up on this device.');
     const lines = all.map((p) => {
       const state = !p.enabled ? 'disabled' : p.status === 'installed' ? 'ready' : p.status;
-      const tools = p.toolsCache?.length ? ` · ${p.toolsCache.length} tools: ${p.toolsCache.slice(0, 12).map((t) => t.name).join(', ')}${p.toolsCache.length > 12 ? ', ...' : ''}` : '';
+      const cached = Array.isArray(p.toolsCache) ? p.toolsCache : [];
+      const tools = cached.length ? ` · ${cached.length} tools: ${cached.slice(0, 12).map((t) => t.name).join(', ')}${cached.length > 12 ? ', ...' : ''}` : '';
       const why = p.status !== 'installed' && (p.error || p.userAction) ? `\n    ${p.userAction ? `needs user: ${p.userAction}` : p.error}` : '';
       return `- ${p.id} [${state}] ${p.name}${p.description ? ` - ${oneLine(p.description, 120)}` : ''}${tools}${why}`;
     });
@@ -68,14 +71,37 @@ export async function handleListPluginTools(args: unknown): Promise<ServerResult
   }
 
   const rec = getPlugin(plugin);
-  if (!rec) return text(`Unknown plugin "${plugin}". Call list_plugin_tools without arguments to see available plugins.`, true);
-  if (rec.source.type === 'binary') return text(`"${plugin}" is a program used by BRC's own tools, not an MCP plugin.`, true);
+  if (!rec) return policyError('PLUGIN_NOT_FOUND',
+    `Unknown plugin "${plugin}". List the available plugin IDs before selecting one.`,
+    {tool:'list_plugin_tools',args:{}});
+  if (rec.source.type === 'binary') return policyError('PLUGIN_NOT_MCP',
+    `"${plugin}" is an installed program used by BRC's built-in tools, not an MCP plugin. Use the corresponding built-in tool or select a listed MCP plugin.`,
+    {tool:'list_plugin_tools',args:{}});
+  if (!rec.enabled || rec.status !== 'installed') return policyError('PLUGIN_NOT_READY',
+    `Plugin "${plugin}" is ${!rec.enabled ? 'disabled' : rec.status}. Its cached tools (if any) must not be reported as ready. Check the plugin status and complete setup before calling its tools.`,
+    {tool:'list_plugin_tools',args:{}});
   try {
     const tools = await getPluginTools(plugin, refresh);
     const body = tools.map((t) => `### ${t.name}\n${t.description ?? ''}\ninput schema: ${JSON.stringify(t.inputSchema ?? {})}`).join('\n\n');
     return text(`Plugin "${plugin}" (${rec.name}) has ${tools.length} tools. Call them with call_plugin_tool {"plugin":"${plugin}","tool":"<name>","args":{...}}.\n\n${isPlaywright(plugin)?'BRC LOCAL PLAYWRIGHT RULES: '+BROWSER_WORKFLOW_TEXT+'\n\n':plugin.toLowerCase()==='serena'?'BRC LOCAL SERENA RULE: Use symbol/navigation tools when appropriate. For ordinary file reads/edits and builds, use core file tools and run_command. No browser required.\n\n':''}${body}`);
   } catch (e) {
-    return text(`Plugin "${plugin}" is not available: ${e instanceof Error ? e.message : String(e)}`, true);
+    // Discovery failures are explicitly classified. The caller can inspect a
+    // previously cached schema without pretending the plugin is currently live.
+    const details = oneLine(e instanceof Error ? e.message : String(e), 600);
+    const cached = Array.isArray(rec.toolsCache) ? rec.toolsCache : [];
+    const isUnavailable = !rec.enabled || rec.status !== 'installed';
+    const code = isUnavailable ? 'PLUGIN_NOT_READY' : 'PLUGIN_DISCOVERY_FAILED';
+    const suggestion = isUnavailable
+      ? 'Check the plugin status and enable/install/repair it before trying its tools.'
+      : 'Check plugin installation, its stderr log, and connection status; retry discovery after the plugin is ready.';
+    const cacheMessage = cached.length
+      ? `\nPreviously cached schemas (${cached.length}, not verified live): ${cached.slice(0,12).map(t=>t.name).join(', ')}${cached.length>12?', ...':''}.`
+      : '';
+    return {isError:true,
+      content:[{type:'text',text:`${code}: Plugin "${plugin}" could not list tools: ${details}.${cacheMessage}\n${suggestion}`}],
+      structuredContent:{error:{code,message:details,retryable:!isUnavailable},
+        pluginId:plugin,pluginStatus:rec.status,cachedToolsAvailable:cached.length>0,
+        recovery:{automaticRetry:false,suggestion,next:{tool:'list_plugin_tools',args:{}}}}};
   }
 }
 

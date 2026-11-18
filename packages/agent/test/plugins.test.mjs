@@ -355,3 +355,44 @@ test('CLI: --add-plugin --command, --list-plugins, --disable-plugin, --remove-pl
   r = run('--list-plugins');
   assert.match(r.stdout, /No plugins/);
 });
+
+
+test('list_plugin_tools classifies invalid, missing, binary, unavailable and startup failures', async () => {
+  freshHome();
+  const invalid = await callTool('list_plugin_tools', {plugin: 42});
+  assert.equal(invalid.isError, true);
+  assert.equal(invalid.structuredContent.error.code, 'INVALID_ARGUMENT');
+  assert.equal(invalid.structuredContent.recovery.next.tool, 'list_plugin_tools');
+
+  const unknown = await callTool('list_plugin_tools', {plugin: 'no-such-plugin'});
+  assert.equal(unknown.isError, true);
+  assert.equal(unknown.structuredContent.error.code, 'PLUGIN_NOT_FOUND');
+  assert.match(out(unknown), /List the available plugin IDs/);
+
+  await manager.definePlugin({id:'test-program',name:'Test binary',status:'installed',
+    enabled:true,origin:'user',source:{type:'binary',binName:'test-program',version:'1'}});
+  const binary = await callTool('list_plugin_tools', {plugin:'test-program'});
+  assert.equal(binary.isError,true);
+  assert.equal(binary.structuredContent.error.code,'PLUGIN_NOT_MCP');
+
+  await manager.definePlugin({id:'test-not-ready',name:'Not ready',status:'failed',
+    enabled:true,origin:'user',source:{type:'command',command:process.execPath},
+    toolsCache:[{name:'previous-tool',inputSchema:{type:'object'}}]});
+  const notReady = await callTool('list_plugin_tools',{plugin:'test-not-ready'});
+  assert.equal(notReady.isError,true);
+  assert.equal(notReady.structuredContent.error.code,'PLUGIN_NOT_READY');
+  assert.doesNotMatch(out(notReady), /### previous-tool/);
+
+  await manager.definePlugin({id:'test-command-missing',name:'Missing executable',status:'installed',
+    enabled:true,origin:'user',
+    source:{type:'command',command:path.join(scratch,'nonexistent-executable-file.exe')}});
+  const startFailed = await callTool('list_plugin_tools',{plugin:'test-command-missing'});
+  assert.equal(startFailed.isError,true);
+  assert.equal(startFailed.structuredContent.error.code,'PLUGIN_DISCOVERY_FAILED');
+  assert.equal(startFailed.structuredContent.error.retryable,true);
+  assert.match(out(startFailed), /plugin tool discovery|could not list tools|PLUGIN_DISCOVERY_FAILED/i);
+
+  const all = await callTool('list_plugin_tools',{});
+  assert.equal(all.isError,undefined);
+  assert.match(out(all), /test-program/);
+});

@@ -64,6 +64,7 @@ test('invalid path and search result session have actionable codes',async()=>{
  assert.match(missing.structuredContent.recovery.suggestion,/Start a new search/);
  assert.equal(searchErrorCode('Failed to locate ripgrep binary'),'SEARCH_RIPGREP_UNAVAILABLE');
  assert.equal(searchErrorCode('SEARCH_BUSY: no slots'),'SEARCH_BUSY');
+ assert.equal(searchErrorCode('SEARCH_CANCELLED: cancelled while waiting for a free search worker.'),'SEARCH_CANCELLED');
  assert.equal(searchErrorCode('rg: error parsing glob "["'),'SEARCH_INVALID_GLOB');
 });
 
