@@ -263,6 +263,33 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
             COUNT_GUIDANCE,{expectedReplacements,actualReplacements:count});
     }
     
+    // An exact multi-line block may have been reindented by a formatter.
+    // Recover only when every line is identical except for leading spaces/tabs
+    // AND exactly one whole-line block matches. Hash-aware atomicWrite still
+    // rejects concurrent changes; ambiguous/semantic edits remain failures.
+    const indentationMatch = count === 0 && expectedReplacements === 1
+        ? findUniqueIndentationMatch(content, normalizedSearch) : null;
+    if (indentationMatch) {
+        const replacement = normalizeLineEndings(block.replace, fileLineEnding);
+        const nextContent = content.slice(0,indentationMatch.start) + replacement +
+            content.slice(indentationMatch.end);
+        await atomicWrite(validPath,nextContent,originalHash);
+        const resolvedEditPath = resolveAbsolutePath(filePath);
+        return {
+            content:[{type:'text',text:
+                'Applied one unique, full-line indentation-only match to '+filePath+
+                '. Verified with an atomic file hash check; no fuzzy replacement was used.'}],
+            structuredContent:{changed:true,autoAlignedIndentation:true,
+                ...(origin === 'ui' ? {
+                    fileName:path.basename(resolvedEditPath),
+                    filePath:resolvedEditPath,
+                    fileType:resolvePreviewFileType(resolvedEditPath),
+                    ...await getDefaultEditorMetadata(resolvedEditPath),
+                }:{}),
+            },
+        };
+    }
+
     // If exact match not found, try fuzzy search
     if (count === 0) {
         // Track fuzzy search time
@@ -357,6 +384,38 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
     }
     
     throw new Error("Unexpected error during search and replace operation.");
+}
+
+/**
+ * Recover only from indentation-only differences on a UNIQUE multi-line,
+ * full-line anchor. Never use fuzzy similarity to decide a write target.
+ * Partial lines, blank lines and ambiguous repeated blocks remain errors.
+ */
+function findUniqueIndentationMatch(
+    content: string, search: string
+): {start:number;end:number}|null {
+    if (search.length < 24 || search.length > 12000 || !search.includes('\n')) return null;
+    const wanted = search.split('\n');
+    if (wanted.length < 2 || wanted.length > 32 || wanted.some(line => !line.trim())) return null;
+    const lines = content.split('\n');
+    if (lines.length > 40000 || wanted.length > lines.length) return null;
+    const plain = (line: string) => line.replace(/^[ \t]*/, '');
+    const normalized = wanted.map(plain);
+    const positions: number[] = [];
+    let offset = 0;
+    for (const line of lines) { positions.push(offset); offset += line.length + 1; }
+    let found: {start:number;end:number}|null = null;
+    for (let i=0; i<=lines.length-wanted.length; i++) {
+        if (plain(lines[i])!==normalized[0]) continue;
+        let matched = true;
+        for (let j=1; j<wanted.length; j++) {
+            if (plain(lines[i+j])!==normalized[j]) { matched=false; break; }
+        }
+        if (!matched) continue;
+        if (found) return null; // ambiguous: fail closed
+        found = {start:positions[i], end:positions[i+wanted.length-1]+lines[i+wanted.length-1].length};
+    }
+    return found;
 }
 
 function countNonOverlapping(haystack: string, needle: string): number {

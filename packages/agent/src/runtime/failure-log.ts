@@ -17,6 +17,7 @@ let scheduled=false;
 
 const explanations:Record<string,string>={
   SEARCH_INVALID_PATTERN:'ripgrep rejected the regex; correct it or set literalSearch=true',
+  SEARCH_INVALID_GLOB:'ripgrep rejected the filename glob; correct the wildcard syntax',
   SEARCH_RIPGREP_UNAVAILABLE:'ripgrep executable unavailable; install rg or configure BRC_RG_PATH',
   SEARCH_START_FAILED:'ripgrep could not start; check executable path and permission',
   SEARCH_ACCESS_DENIED:'search root is inaccessible or outside the agent allowed directories',
@@ -35,12 +36,19 @@ const explanations:Record<string,string>={
   OUTSIDE_ALLOWED_DIRECTORY:'agent denied access outside allowed directories',
   TOOL_FAILED:'tool returned an unclassified failure; inspect its response',
   COMMAND_FAILED:'shell command returned nonzero exit; inspect stderr and exitCode',
-  TIMEOUT:'tool or command exceeded its execution timeout',
+  TIMEOUT:'tool timed out; for long commands use start_process and read_process_output, then verify partial effects',
+  ENOENT:'requested file or path does not exist; verify the absolute path and parent directory',
   BUSY:'agent concurrency queue is full',
   RESULT_TOO_LARGE:'tool output exceeded the bounded transport response limit',
   CANCELLED:'tool was cancelled before completion',
 };
-export function failureReason(tool:string,code:string):string {
+export function failureReason(tool:string,code:string,diagnostic?:string):string {
+  if(tool==='run_command' && code==='COMMAND_FAILED') {
+    if(diagnostic==='MODULE_RESOLUTION')return 'runtime module resolution failed; check cwd, installed dependencies and pnpm workspace links';
+    if(diagnostic==='GIT_NOT_REPOSITORY')return 'Git command used a non-repository cwd; set cwd to a valid repository';
+    if(diagnostic==='EXECUTABLE_NOT_FOUND')return 'command or executable unavailable; check PATH, shell and working directory';
+    if(diagnostic==='SHELL_CHAIN_SYNTAX')return 'PowerShell 5.1 cannot parse && or ||; use cmd.exe for native chains';
+  }
   if(explanations[code])return explanations[code];
   if(tool==='start_search')return 'search failed; inspect its structured error and recovery guidance';
   if(tool==='edit_block')return 'edit failed; check exact text, occurrence count and current SHA-256';
@@ -65,7 +73,7 @@ function newEntry(event:Failure):SafeEntry {
   const diagnostic=safeDiagnostic(event.diagnostic);
   return {timestamp:new Date().toISOString(),tool:clean(event.tool),
     code:clean(event.code),durationMs:Math.max(0,Math.round(event.durationMs)),
-    callId:clean(event.callId,16),reason:failureReason(event.tool,event.code),
+    callId:clean(event.callId,16),reason:failureReason(event.tool,event.code,diagnostic),
     ...(exitCode!==undefined?{exitCode}:{}),...(diagnostic?{diagnostic}:{})};
 }
 function parseEntry(line:string):SafeEntry|null {
@@ -77,7 +85,7 @@ function parseEntry(line:string):SafeEntry|null {
       tool:clean(v.tool),code:clean(v.code),
       durationMs:Number.isFinite(v.durationMs)?Math.max(0,Math.round(v.durationMs!)):0,
       callId:clean(typeof v.callId==='string'?v.callId:'',16),
-      reason:failureReason(v.tool,v.code),
+      reason:failureReason(v.tool,v.code,safeDiagnostic(v.diagnostic)),
       ...(safeExitCode(v.exitCode)!==undefined?{exitCode:safeExitCode(v.exitCode)}:{}),
       ...(safeDiagnostic(v.diagnostic)?{diagnostic:safeDiagnostic(v.diagnostic)}:{})};
   }catch{return null;}

@@ -10,6 +10,8 @@ export function searchErrorCode(error:unknown):string {
   if(error instanceof AgentError)return error.code;
   const message=(error instanceof Error?error.message:String(error)).toLowerCase();
   if(/search_busy|too many.*search|search session.*limit/.test(message))return 'SEARCH_BUSY';
+  // ripgrep reports invalid filename globs differently from content regexes.
+  if(/error parsing glob|invalid glob|glob parse error|error parsing override glob/.test(message))return 'SEARCH_INVALID_GLOB';
   if(/regex parse error|invalid regular expression|unclosed character class|invalid regex|error parsing regex/.test(message))return 'SEARCH_INVALID_PATTERN';
   if(/ripgrep binary not found|failed to locate ripgrep|rg executable not found/.test(message))return 'SEARCH_RIPGREP_UNAVAILABLE';
   if(/process error|failed to start ripgrep|spawn.*enoent|spawn.*eacces|spawn.*eperm/.test(message))return 'SEARCH_START_FAILED';
@@ -28,6 +30,7 @@ export function structuredSearchFailure(error:unknown,stage:'start'|'results'|'s
     searchStage:stage,
     recovery:{automaticRetry:false,suggestion:
       code==='SEARCH_INVALID_PATTERN'?'The expression is invalid. Correct regex syntax or set literalSearch:true to search exact text.':
+      code==='SEARCH_INVALID_GLOB'?'Use a valid filename glob, such as *.ts or **/*.tsx. For exact filenames, remove regex-only punctuation. No search result was silently discarded.':
       code==='SEARCH_RIPGREP_UNAVAILABLE'?'Install ripgrep (rg), or configure BRC_RG_PATH to its executable and restart the agent.':
       code==='SEARCH_START_FAILED'?'Check local ripgrep binary permissions, architecture and executable path. Do not retry unchanged.':
       code==='SEARCH_ACCESS_DENIED'?'Choose an existing absolute directory inside the agent allowed directories; check permissions.':

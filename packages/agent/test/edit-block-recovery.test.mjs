@@ -36,18 +36,15 @@ test('normal exact edit_block replacement succeeds and is observable',async()=>{
  assert.equal(await fs.readFile(p,'utf8'),'  const value = 2;\n');
 });
 
-test('edit_block mismatched whitespace is an explicit non-destructive EDIT_TEXT_NOT_FOUND',async()=>{
+test('edit_block aligns a unique multiline indentation-only difference',async()=>{
  const p=file('whitespace.ts');
- const before='function f() {\n    return true;\n}\n';
- await fs.writeFile(p,before);
- const r=assertFailed(await callTool('edit_block',{
+ await fs.writeFile(p,'function f() {\n    return true;\n}\n');
+ const r=await callTool('edit_block',{
    file_path:p,old_string:'function f() {\n  return true;\n}',new_string:'changed'
- }), 'EDIT_TEXT_NOT_FOUND');
- assert.equal(r.structuredContent.changed,false);
- assert.equal(r.structuredContent.actualReplacements,0);
- assert.match(text(r),/exact|Exact|not found/);
- assert.match(text(r),/read_file|read_code_file/);
- assert.equal(await fs.readFile(p,'utf8'),before);
+ });
+ assert.notEqual(r.isError,true,text(r));
+ assert.equal(r.structuredContent.autoAlignedIndentation,true);
+ assert.equal(await fs.readFile(p,'utf8'),'changed\n');
 });
 
 test('multiple occurrences report actual count and require an explicit decision',async()=>{
@@ -185,4 +182,32 @@ test('agent_status exposes recent edit error category without storing source tex
  assert.equal(s.structuredContent.logging.failedToolLog.maxEntries,100);
  assert.equal(s.structuredContent.logging.failedToolLog.rotation,false);
  assert.equal(s.structuredContent.logging.failedToolLog.enabled,false);
+});
+
+test('indent-only recovery refuses ambiguous duplicate blocks and leaves file unchanged',async()=>{
+ const p=file('ambiguous-indentation.ts');
+ const body='function f() {\n    return true;\n}\n';
+ await fs.writeFile(p,body+body);
+ const r=assertFailed(await callTool('edit_block',{
+   file_path:p,old_string:'function f() {\n  return true;\n}',new_string:'changed'
+ }), 'EDIT_TEXT_NOT_FOUND');
+ assert.equal(r.structuredContent.changed,false);
+ assert.equal(await fs.readFile(p,'utf8'),body+body);
+});
+
+test('indent-only recovery never accepts semantic changes',async()=>{
+ const p=file('semantic-difference.ts');
+ const before='function f() {\n    return false;\n}\n';
+ await fs.writeFile(p,before);
+ const r=assertFailed(await callTool('edit_block',{
+   file_path:p,old_string:'function f() {\n  return true;\n}',new_string:'changed'
+ }), 'EDIT_TEXT_NOT_FOUND');
+ assert.equal(await fs.readFile(p,'utf8'),before);
+});
+
+test('write_file creates missing parent folders under the allowed project',async()=>{
+ const p=file(path.join('new-folder','nested','created.ts'));
+ const r=await callTool('write_file',{path:p,content:'export const ok = true;\n',mode:'rewrite'});
+ assert.notEqual(r.isError,true,text(r));
+ assert.equal(await fs.readFile(p,'utf8'),'export const ok = true;\n');
 });

@@ -64,6 +64,7 @@ test('invalid path and search result session have actionable codes',async()=>{
  assert.match(missing.structuredContent.recovery.suggestion,/Start a new search/);
  assert.equal(searchErrorCode('Failed to locate ripgrep binary'),'SEARCH_RIPGREP_UNAVAILABLE');
  assert.equal(searchErrorCode('SEARCH_BUSY: no slots'),'SEARCH_BUSY');
+ assert.equal(searchErrorCode('rg: error parsing glob "["'),'SEARCH_INVALID_GLOB');
 });
 
 test('large searches have a 48K budget, session ID and correct continuation',async()=>{
@@ -134,4 +135,19 @@ test('failure logger retains metadata only, is bounded, and can be disabled',asy
   if(enabled===undefined)delete process.env.BRC_ERROR_LOG;
   else process.env.BRC_ERROR_LOG=enabled;
  }
+});
+
+test('invalid filename glob errors are classified rather than returned as opaque failures',async()=>{
+ const r=await callTool('start_search',{path:root,pattern:'[',searchType:'files',wait:true,maxResults:10});
+ assert.equal(r.isError,true,txt(r));
+ assert.equal(r.structuredContent?.error?.code,'SEARCH_INVALID_GLOB',txt(r));
+ assert.match(r.structuredContent.recovery.suggestion,/glob/);
+});
+
+test('failure metadata gives safe actionable diagnosis without recording shell content',async()=>{
+ const {failureReason}=await import('../dist/runtime/failure-log.js');
+ assert.match(failureReason('run_command','COMMAND_FAILED','MODULE_RESOLUTION'),/cwd/);
+ assert.match(failureReason('run_command','COMMAND_FAILED','GIT_NOT_REPOSITORY'),/repository/);
+ assert.match(failureReason('read_code_file','ENOENT'),/does not exist/);
+ assert.match(failureReason('run_command','TIMEOUT'),/start_process/);
 });

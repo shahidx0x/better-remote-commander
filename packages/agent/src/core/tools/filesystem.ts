@@ -641,6 +641,13 @@ export async function readFileInternal(filePath: string, offset: number = 0, len
 
 export async function writeFile(filePath: string, content: string, mode: 'rewrite' | 'append' = 'rewrite'): Promise<void> {
     const validPath = await validatePath(filePath);
+    // A write to a NEW nested file should not fail with ENOENT solely because
+    // its intended parent folder does not exist. Revalidate after mkdir to
+    // detect a concurrently changed symlink/allowed-directory boundary.
+    await fs.mkdir(path.dirname(validPath), { recursive: true });
+    if (await validatePath(filePath) !== validPath) {
+        throw new Error('File parent path changed while preparing the write; nothing was written.');
+    }
 
     // Get file extension for telemetry
     const fileExtension = getFileExtension(validPath);
