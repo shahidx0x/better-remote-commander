@@ -47,16 +47,25 @@ export function controlHint(tty = !!process.stdin.isTTY, color = terminalColors(
 }
 
 export function connectionPanel(
-  status: { online: boolean; connecting: boolean; inFlight: number },
+  status: { online: boolean; connecting: boolean; inFlight: number; health?: {
+    reconnects:number;lastDisconnectCode:string|null;heartbeatAgeMs:number|null;
+    missedHeartbeats:number;socketErrors:number;droppedToolResults:number;
+  } },
   a: AgentTerminal,
   color = terminalColors(),
 ): string {
   const state = status.online ? c('ONLINE', '1;92', color)
     : status.connecting ? c('CONNECTING', '1;93', color) : c('RECONNECTING / OFFLINE', '1;93', color);
+  const h=status.health;
+  const seconds=(ms:number|null)=>ms===null?'not yet observed':Math.max(0,Math.round(ms/1000))+'s ago';
   return '\n  STATUS  ' + state
     + '\n  Device   ' + plain(a.name, 64)
     + '\n  Relay    ' + plain(a.relay, 120)
     + '\n  Running  ' + status.inFlight + ' tool call(s)'
+    + (h ? '\n  Link     '+h.reconnects+' reconnect(s), '+h.socketErrors+' socket error(s), '+h.missedHeartbeats+' missed heartbeat(s)'
+      + '\n  Ping     '+seconds(h.heartbeatAgeMs)
+      + '\n  Last close '+(h.lastDisconnectCode??'none')
+      + '\n  Results  '+h.droppedToolResults+' dropped/replaced result(s)' : '')
     + '\n  Storage  Only bounded in-memory activity, no saved transcripts\n';
 }
 

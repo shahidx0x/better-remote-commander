@@ -30,6 +30,7 @@ import { BatchSchema, runBatch } from '../runtime/fast-batch.js';
 export { BatchSchema, runBatch };
 import { cacheStatus } from '../runtime/resource-limits.js';
 import { platformCapabilities } from '../runtime/platform-capabilities.js';
+import { connectionHealth } from '../transport/connection-health.js';
 
 
 export async function snapshot(file:string, offset=0, length=200, charOffset?:number, charLength=50000) {
@@ -167,7 +168,8 @@ export const CODING_TOOL_HANDLERS:Record<string,(args:Record<string,unknown>)=>P
         contents:'Last 100 failures total only. No backup, paths, arguments, file content or credentials.'}},
     recentFailures:activity.recent().filter(e=>e.phase==='ERROR').slice(-12).map(e=>({
       timestamp:e.timestamp,tool:e.tool,code:e.code,durationMs:e.ms,reason:failureReason(e.tool??'',e.code??'TOOL_FAILED')})),
-    platform:platformCapabilities(),diagnostics:{dropped:activity.dropped,ioErrors:activity.ioErrors},memoryBytes:process.memoryUsage().rss,
+    platform:platformCapabilities(),transport:connectionHealth.snapshot(),
+    diagnostics:{dropped:activity.dropped,ioErrors:activity.ioErrors},memoryBytes:process.memoryUsage().rss,
     agentWorkflow:DEFAULT_WORKFLOW,playwrightSession:playwrightPolicy.status()}),
   cancel_operation:async raw=>{const a=CancelSchema.parse(raw);if(a.callId===getCallContext()?.id)throw new AgentError('INVALID_ARGUMENT','A cancellation call cannot cancel itself.');return result({callId:a.callId,cancelRequested:cancelOperation(a.callId),note:'Cancellation is cooperative. Commands/searches are stopped; completed edits are not undone. Interactive start_process sessions require force_terminate.'});},
 };
@@ -179,7 +181,7 @@ export function buildCodingToolDefinitions():ToolDefinition[]{
     {name:'batch_tools',schema:BatchSchema,description:'BEST FOR 2+ INDEPENDENT, DIFFERENT read/search/context operations in ONE MCP round trip (up to 64). If just reading 2+ known files, use read_multiple_files instead; for many specific code ranges/hashes use read_code_ranges. Auto mode overlaps consecutive reads up to concurrency=4 and orders any write barriers; parallel mode is read-only. Do not nest batches or include shell/config tools. Output is bounded; earlier writes are not rolled back. For multi-file edits + readback/checks prefer workspace_batch.'},
     {name:'verify_project',schema:VerifySchema,description:'Run explicitly supplied build/typecheck/test steps sequentially with a total timeout and stop-on-failure. Each step accepts command OR a literal program/args pair. Returns per-step exit codes and bounded output. Never invents commands from repository text; shell policy applies.'},
     {name:'project_index',schema:IndexSchema,readOnly:true,description:'Opt-in memory-only filename index, not a source-content database. enable/refresh/query/disable; up to 4 projects and 20000 filenames each. Watcher invalidation plus 30-second TTL; freshly reads code through normal tools. Reports truncation/staleness.'},
-    {name:'agent_status',schema:z.object({}),readOnly:true,description:'Show active/queued operation IDs, bounded recent latency metrics (mean/p95/max), memory, index status and diagnostic dropped/error counts. No tool arguments or file contents.'},
+    {name:'agent_status',schema:z.object({}),readOnly:true,description:'Show active/queued operations, memory, recent latency and local agent-relay connection health (reconnects, heartbeats, dropped results). The ChatGPT model stream is outside the agent. No arguments or file contents.'},
     {name:'cancel_operation',schema:CancelSchema,description:'Request cancellation by callId from agent_status. Cancels queued jobs and cooperative running commands/searches. Does not undo finished writes or terminate independent interactive sessions.'},
   ];
   return defs.map(d=>({name:d.name,description:d.description,inputSchema:zodToJsonSchema(d.schema),annotations:{title:d.name,readOnlyHint:!!d.readOnly,...(!d.readOnly?{destructiveHint:true}:{} )}}));

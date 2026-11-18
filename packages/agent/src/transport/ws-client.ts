@@ -7,6 +7,7 @@ import { AgentError,failure } from '../runtime/errors.js';
 import { PluginAdmin } from './plugin-admin.js';
 import { isTermuxRuntime } from '../runtime/platform-capabilities.js';
 import { boundedAgentFrame } from './result-budget.js';
+import { connectionHealth } from './connection-health.js';
 export interface WsClientOptions {
  relayUrl:string;token:string;deviceId:string;name:string;agentVersion:string;coreVersion:string;tools:ToolDefinition[];
  callTool:(name:string,args:Record<string,unknown>)=>Promise<unknown>;
@@ -40,27 +41,30 @@ export class WsClient {
  }
  start():void{if(this.ws)return;this.stopped=false;this.welcomed=false;this.plugins.start();this.connect();}
  /** O(1) live console status; no heartbeat poll or network request. */
- status(){return {online:this.welcomed && this.ws?.readyState===WebSocket.OPEN,connecting:!!this.ws&&this.ws.readyState===WebSocket.CONNECTING,inFlight:this.callsInFlight};}
+ status(){return {online:this.welcomed && this.ws?.readyState===WebSocket.OPEN,connecting:!!this.ws&&this.ws.readyState===WebSocket.CONNECTING,inFlight:this.callsInFlight,health:connectionHealth.snapshot()};}
  stop():void{this.stopped=true;this.welcomed=false;this.plugins.stop();clearTimeout(this.pongTimer);clearTimeout(this.reconnectTimer);this.scheduler.cancelAll('Agent stopping.');const ws=this.ws;this.ws=null;ws?.close(1000,'agent stopped');}
  /** Pause only when idle: opening settings never cancels an in-flight tool call. */
  pauseForSettings():boolean{if(this.callsInFlight>0)return false;this.settingsPaused=true;return true;}
  resumeAfterSettings():void{this.settingsPaused=false;}
  private connect():void{
   if(this.stopped)return;
+  connectionHealth.record('connecting');
   this.log('info',`Connecting to ${this.wsUrl}`);
   const ws=new WebSocket(this.wsUrl,{headers:{Authorization:`Bearer ${this.opts.token}`,'X-BRC-Protocol':String(BRC_PROTOCOL_VERSION)},handshakeTimeout:15000,maxPayload:16*1024*1024});
   this.ws=ws;let unauthorized=false;
-  ws.on('open',()=>{this.send({type:'hello',protocol:BRC_PROTOCOL_VERSION,device:this.deviceInfo(),tools:this.opts.tools},ws);this.armHeartbeat();this.log('info','Connected; waiting for relay welcome');});
-  ws.on('message',data=>{if(this.ws===ws)void this.onMessage(data as Buffer,ws).catch(()=>this.log('error','Invalid relay message rejected'));});
-  ws.on('unexpected-response',(_req,res)=>{unauthorized=res.statusCode===401||res.statusCode===403;this.log('error',`Relay refused connection: HTTP ${res.statusCode}`);res.resume();ws.terminate();});
+  ws.on('open',()=>{this.send({type:'hello',protocol:BRC_PROTOCOL_VERSION,device:this.deviceInfo(),tools:this.opts.tools},ws);this.armHeartbeat(ws);this.log('info','Connected; waiting for relay welcome');});
+  ws.on('message',data=>{if(this.ws===ws)void this.onMessage(data as Buffer,ws).catch(()=>{connectionHealth.record('relay_error','INVALID_MESSAGE');this.log('error','Invalid relay message rejected');});});
+  ws.on('unexpected-response',(_req,res)=>{unauthorized=res.statusCode===401||res.statusCode===403;connectionHealth.record('socket_error',`HTTP_${res.statusCode??'UNKNOWN'}`);this.log('error',`Relay refused connection: HTTP ${res.statusCode}`);res.resume();ws.terminate();});
   ws.on('close',(code)=>{
    if(this.ws!==ws)return;
-   clearTimeout(this.pongTimer);this.ws=null;this.welcomed=false;this.scheduler.cancelAll('Relay disconnected; active operations are not automatically retried.');
+   clearTimeout(this.pongTimer);this.ws=null;this.welcomed=false;
+   connectionHealth.record('disconnected',code,this.callsInFlight);
+   this.scheduler.cancelAll('Relay disconnected; active operations are not automatically retried.');
    if(this.stopped)return;
    if(code===4401||code===4403||unauthorized){void this.handleUnauthorized();return;}
    this.log('warn',`Disconnected (${code}); reconnecting`);this.retry();
   });
-  ws.on('error',()=>this.log('warn','WebSocket connection error; waiting for reconnect'));
+  ws.on('error',(error:Error & {code?:string})=>{connectionHealth.record('socket_error',error.code??'SOCKET_ERROR');this.log('warn','WebSocket '+(error.code??'connection error')+'; waiting for reconnect');});
  }
  private retry(delay=this.backoff):void{clearTimeout(this.reconnectTimer);this.reconnectTimer=setTimeout(()=>this.connect(),Math.round(delay*(.8+Math.random()*.4)));this.backoff=Math.min(this.backoff*2,DEFAULTS.reconnectMaxMs);}
  private async handleUnauthorized():Promise<void>{
@@ -75,12 +79,12 @@ export class WsClient {
  private async onMessage(raw:Buffer,ws:WebSocket):Promise<void>{
   const msg=parseMessage<RelayMessage>(raw);if(!msg)return;
   switch(msg.type){
-   case 'welcome':if(msg.protocol!==BRC_PROTOCOL_VERSION){this.stop();return;}this.welcomed=true;this.backoff=DEFAULTS.reconnectMinMs;this.unauthorizedCount=0;this.log('info',`Ready: relay ${msg.relayVersion}; ${this.opts.tools.length} tools`);this.plugins.sendStatus();try{this.opts.onConnected?.();}catch{}return;
-   case 'ping':this.armHeartbeat();this.send({type:'pong',ts:msg.ts},ws);return;
+   case 'welcome':if(msg.protocol!==BRC_PROTOCOL_VERSION){connectionHealth.record('relay_error','PROTOCOL_MISMATCH');this.stop();return;}this.welcomed=true;connectionHealth.record('connected');this.backoff=DEFAULTS.reconnectMinMs;this.unauthorizedCount=0;this.log('info',`Ready: relay ${msg.relayVersion}; ${this.opts.tools.length} tools`);this.plugins.sendStatus();try{this.opts.onConnected?.();}catch{}return;
+   case 'ping':connectionHealth.ping();this.armHeartbeat(ws);this.send({type:'pong',ts:msg.ts},ws);return;
    case 'cancel':if(typeof msg.id==='string')cancelOperation(msg.id);return;
    case 'call':await this.handleCall(msg,ws);return;
    case 'plugin_admin':await this.plugins.handle(msg);return;
-   case 'error':this.log('error',`Relay error ${msg.code}`);if(msg.fatal)this.stop();return;
+   case 'error':connectionHealth.record('relay_error',msg.code);this.log('error',`Relay error ${msg.code}`);if(msg.fatal)this.stop();return;
   }
  }
  private async handleCall(msg:CallMessage,ws:WebSocket):Promise<void>{
@@ -105,23 +109,29 @@ export class WsClient {
   out={...out,_meta:{...out._meta,agentQueueMs:Math.max(0,Math.round(executionStarted-received)),agentTotalMs:Math.round(performance.now()-received)}};
   // Never route an old connection's result onto a new connection.
   if(this.ws===ws)this.send({type:'result',id:msg.id,result:out},ws);
+  else connectionHealth.record('result_dropped','STALE_CONNECTION',this.callsInFlight);
   } finally {this.callsInFlight--;}
  }
  private send(msg:AgentMessage,ws=this.ws):void{
-  if(ws?.readyState!==WebSocket.OPEN)return;
+  if(ws?.readyState!==WebSocket.OPEN){if(msg.type==='result')connectionHealth.record('result_dropped','NOT_CONNECTED',this.callsInFlight);return;}
   let encoded:string;
   try {
     const frame=boundedAgentFrame(msg);
     encoded=frame.encoded;
-    if(frame.replaced)this.log('warn','Oversized/invalid result replaced with bounded recovery error; call '+(msg.type==='result'?msg.id:'?'));
+    if(frame.replaced){connectionHealth.record('result_dropped','OVERSIZED_RESULT',this.callsInFlight);this.log('warn','Oversized/invalid result replaced with bounded recovery error; call '+(msg.type==='result'?msg.id:'?'));}
   } catch(e) {
     this.log('warn','Unable to encode non-result WebSocket frame: '+(e instanceof Error?e.message:'unknown'));
     ws.terminate();
     return;
   }
-  if(ws.bufferedAmount>8*1024*1024){ws.terminate();return;}
-  try{ws.send(encoded);}catch{ws.terminate();}
+  if(ws.bufferedAmount>8*1024*1024){connectionHealth.record('send_backpressure','BUFFER_LIMIT',this.callsInFlight);ws.terminate();return;}
+  try{ws.send(encoded);}catch{connectionHealth.record('socket_error','SEND_FAILED');ws.terminate();}
  }
  private deviceInfo():DeviceInfo{return{deviceId:this.opts.deviceId,name:this.opts.name,platform:isTermuxRuntime()?'android':process.platform,arch:process.arch,hostname:os.hostname(),agentVersion:this.opts.agentVersion,coreVersion:this.opts.coreVersion};}
- private armHeartbeat():void{clearTimeout(this.pongTimer);this.pongTimer=setTimeout(()=>{this.log('warn','Relay heartbeat missing; reconnecting');this.ws?.terminate();},DEFAULTS.pongTimeoutMs);}
+ private armHeartbeat(ws:WebSocket):void{clearTimeout(this.pongTimer);this.pongTimer=setTimeout(()=>{
+   // A timer from a replaced socket must not terminate the new connection.
+   if(this.ws!==ws || this.stopped || ws.readyState!==WebSocket.OPEN)return;
+   connectionHealth.record('heartbeat_missed','PONG_TIMEOUT',this.callsInFlight);
+   this.log('warn','Relay heartbeat missing; reconnecting');ws.terminate();
+  },DEFAULTS.pongTimeoutMs);}
 }
