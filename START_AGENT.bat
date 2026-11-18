@@ -61,7 +61,7 @@ rem Keep a local, bounded failure-only log unless the owner explicitly opts out.
 if not defined BRC_ERROR_LOG set "BRC_ERROR_LOG=1"
 rem Responsive profile: fast native commands + concurrent I/O, without parallel CPU-heavy jobs.
 set "BRC_RESOURCE_PROFILE=responsive"
-rem Rolling last-20-line BRC console only; no accumulated console transcript.
+rem Rolling newest 100 KiB of BRC activity in the local console; no disk transcript.
 if not defined BRC_ROLLING_LOG_UI set "BRC_ROLLING_LOG_UI=1"
 set "BRC_MAX_JOBS=1"
 set "BRC_MAX_CONCURRENCY=3"

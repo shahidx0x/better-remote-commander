@@ -1,11 +1,12 @@
-/** Live-only metadata diagnostics. Bounded 20-line history and throttled TTY redraw, no transcript written to disk. */
+/** Live-only activity diagnostics: bounded rolling text, no disk transcript. */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 export const RETENTION_MS = 0;
 const RESPONSIVE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
-export const MAX_VISIBLE_ACTIVITY_LINES = RESPONSIVE ? 20 : 1000;
-const MAX_QUEUED_ACTIVITY_LINES = RESPONSIVE ? 20 : 200;
+/** The BRC console uses a 100-KiB log budget, independent of start_process's 500-KiB buffer. */
+export const MAX_ACTIVITY_LOG_BYTES = RESPONSIVE ? 100 * 1024 : 256 * 1024;
+const MAX_QUEUED_ACTIVITY_LINES = RESPONSIVE ? Number.POSITIVE_INFINITY : 200;
 let stdoutAvailable = true;
 process.stdout.on('error', () => { stdoutAvailable = false; });
 export type ConsoleMode = 'compact' | 'verbose';
@@ -29,8 +30,11 @@ export function compactLine(s: string, limit = 180): string {
 const safeId = (v: string) => v.replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 80);
 export class ActivityLog {
     private events: ActivityEvent[] = [];
+    private eventsBytes = 0;
     private consoleQueue: string[] = [];
+    private queuedBytes = 0;
     private rollingLines: string[] = [];
+    private rollingBytes = 0;
     private rollingTimer: NodeJS.Timeout | null = null;
     private rollingConsole = false;
     private blocked = false;
@@ -49,11 +53,13 @@ export class ActivityLog {
         this.rollingConsole = !!enabled && !!process.stdout.isTTY && process.env.TERM !== 'dumb';
         if (this.rollingConsole) {
             this.consoleQueue.length = 0;
+            this.queuedBytes = 0;
             this.scheduleRolling();
         } else {
             if (this.rollingTimer) clearTimeout(this.rollingTimer);
             this.rollingTimer = null;
             this.rollingLines.length = 0;
+            this.rollingBytes = 0;
         }
     }
     async start(): Promise<void> { if (this.started)
@@ -71,9 +77,16 @@ export class ActivityLog {
             message: `${phase.padEnd(5)} ${tool} [${id.slice(0, 8)}]${ms === undefined ? '' : ` ${Math.round(ms)}ms`}${code ? ` ${code}` : ''}` });
     }
     private record(event: ActivityEvent): void {
+        // Cap by UTF-8 text size instead of 20 entries; no log is persisted.
+        const bytes = Buffer.byteLength(JSON.stringify(event), 'utf8');
         this.events.push(event);
-        if (this.events.length > MAX_VISIBLE_ACTIVITY_LINES)
-            this.events.splice(0, this.events.length - MAX_VISIBLE_ACTIVITY_LINES);
+        this.eventsBytes += bytes;
+        while (this.eventsBytes > MAX_ACTIVITY_LOG_BYTES || (!RESPONSIVE && this.events.length > 1000)) {
+            const old = this.events.shift();
+            if (!old) break;
+            this.eventsBytes -= Buffer.byteLength(JSON.stringify(old), 'utf8');
+            this.dropped++;
+        }
         if (this.quiet)
             return;
         // Compact mode halves successful tool chatter by displaying the
@@ -97,15 +110,24 @@ export class ActivityLog {
         }
         if (this.rollingConsole) {
             this.rollingLines.push(line);
-            if (this.rollingLines.length > 20) this.rollingLines.splice(0,this.rollingLines.length-20);
+            this.rollingBytes += Buffer.byteLength(line + '\n', 'utf8');
+            while (this.rollingBytes > MAX_ACTIVITY_LOG_BYTES && this.rollingLines.length > 1) {
+                const old = this.rollingLines.shift()!;
+                this.rollingBytes -= Buffer.byteLength(old + '\n', 'utf8');
+                this.dropped++;
+            }
             this.scheduleRolling();
             return;
         }
-        if (this.consoleQueue.length >= MAX_QUEUED_ACTIVITY_LINES) {
-            this.consoleQueue.shift();
+        const queuedLine = line + '\n';
+        this.consoleQueue.push(queuedLine);
+        this.queuedBytes += Buffer.byteLength(queuedLine, 'utf8');
+        while (this.consoleQueue.length > MAX_QUEUED_ACTIVITY_LINES || this.queuedBytes > MAX_ACTIVITY_LOG_BYTES) {
+            const old = this.consoleQueue.shift();
+            if (!old) break;
+            this.queuedBytes -= Buffer.byteLength(old, 'utf8');
             this.dropped++;
         }
-        this.consoleQueue.push(line + '\n');
         this.drainConsole();
     }
     /** Keep a settings prompt readable; queued live lines remain bounded and are never written to disk. */
@@ -122,14 +144,16 @@ export class ActivityLog {
     private scheduleRolling(): void {
         if (!this.rollingConsole || this.rollingTimer || this.blocked || this.consolePauses ||
             !stdoutAvailable || process.stdout.destroyed) return;
-        // Coalesce bursts instead of redrawing 20 lines for each tool message.
+        // Coalesce bursts: rendering up to 100 KiB after EVERY log line would
+        // waste CPU. Repaint only on new data, at most about three times/sec.
         this.rollingTimer = setTimeout(() => {
             this.rollingTimer = null;
             if (!this.rollingConsole || this.consolePauses || this.blocked || process.stdout.destroyed) return;
             // ANSI erase-screen is limited to the BRC agent's own TTY window.
             // No interaction with user shell commands, relay or other consoles.
             const frame = '\x1b[H\x1b[2J\x1b[3J'
-                + '  BRC LIVE ACTIVITY  |  newest 20 lines only  |  no disk transcript\n'
+                + '  BRC LIVE ACTIVITY  |  latest ' + Math.ceil(this.rollingBytes / 1024)
+                + ' / 100 KiB  |  no disk transcript\n'
                 + '  [M] settings  [S] status  [L] activity  [V] verbose  [?] help  [Ctrl+C] stop\n'
                 + '-'.repeat(68) + '\n'
                 + this.rollingLines.join('\n') + '\n';
@@ -139,20 +163,23 @@ export class ActivityLog {
                     process.stdout.once('drain', () => { this.blocked = false; this.scheduleRolling(); });
                 }
             } catch { this.rollingConsole = false; }
-        }, 100);
+        }, 350);
         this.rollingTimer.unref();
     }
     private drainConsole(): void {
         if (this.rollingConsole) { this.scheduleRolling(); return; }
         if (!stdoutAvailable || process.stdout.destroyed) {
             this.consoleQueue.length = 0;
+            this.queuedBytes = 0;
             return;
         }
         if (this.blocked || this.consolePauses > 0)
             return;
         while (this.consoleQueue.length) {
             try {
-                if (!process.stdout.write(this.consoleQueue.shift()!)) {
+                const next = this.consoleQueue.shift()!;
+                this.queuedBytes = Math.max(0, this.queuedBytes - Buffer.byteLength(next, 'utf8'));
+                if (!process.stdout.write(next)) {
                     this.blocked = true;
                     process.stdout.once('drain', () => { this.blocked = false; this.drainConsole(); });
                     return;
@@ -160,6 +187,7 @@ export class ActivityLog {
             }
             catch {
                 this.consoleQueue.length = 0;
+                this.queuedBytes = 0;
                 return;
             }
         }
@@ -197,7 +225,11 @@ export class ActivityLog {
         this.rollingConsole = false;
         this.drainConsole();
         this.events = [];
+        this.eventsBytes = 0;
         this.rollingLines = [];
+        this.rollingBytes = 0;
+        this.consoleQueue = [];
+        this.queuedBytes = 0;
     }
 }
 export const activity = new ActivityLog();

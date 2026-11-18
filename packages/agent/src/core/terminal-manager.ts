@@ -57,27 +57,28 @@ interface CompletedSession {
  * process-state scan, both of which are O(total output).
  */
 const RESPONSIVE = process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1';
-export const MAX_BUFFERED_OUTPUT_CHARS = RESPONSIVE ? 64 * 1024 : 50 * 1024 * 1024;
+// Budget for retained command text (measured in JS characters, not total process RSS).
+// Capping stored output prevents unbounded RAM while preserving substantial logs.
+export const MAX_BUFFERED_OUTPUT_CHARS = RESPONSIVE ? 500 * 1024 : 50 * 1024 * 1024;
 const MAX_LINE_CHARS = RESPONSIVE ? 8 * 1024 : 1024 * 1024;
-export const MAX_VISIBLE_TERMINAL_LINES = RESPONSIVE ? 20 : Number.POSITIVE_INFINITY;
-/** Initial start_process output is also a tail, not a hidden multi-MB buffer. */
+// No line-count truncation: lots of short build lines can fit inside 500 KiB.
+// Agent's interactive activity console separately retains up to 100 KiB of log text.
+export const MAX_VISIBLE_TERMINAL_LINES = Number.POSITIVE_INFINITY;
+/** Keep the latest bounded text for the initial start_process response. */
 export function keepRecentTerminalOutput(previous:string, chunk:string):string {
-  let text = previous + chunk;
-  if (text.length > MAX_WAIT_OUTPUT_CHARS)
-    text = text.slice(-MAX_WAIT_OUTPUT_CHARS);
-  if (!RESPONSIVE) return text;
-  let start = text.length;
-  for (let i = 0; i < MAX_VISIBLE_TERMINAL_LINES; i++) {
-    const newline = text.lastIndexOf('\n', start - 1);
-    if (newline < 0) { start = 0; break; }
-    start = newline;
-  }
-  return start > 0 ? text.slice(start + 1) : text;
+  // Slice first, then append: avoid allocating an oversized intermediate
+  // string whenever a busy command exceeds the rolling output budget.
+  const budget = MAX_WAIT_OUTPUT_CHARS;
+  if (chunk.length >= budget) return chunk.slice(-budget);
+  const keep = budget - chunk.length;
+  return previous.length > keep ? previous.slice(-keep) + chunk : previous + chunk;
 }
-const MAX_WAIT_OUTPUT_CHARS = RESPONSIVE ? 64 * 1024 : 2 * 1024 * 1024;
+const MAX_WAIT_OUTPUT_CHARS = RESPONSIVE ? 500 * 1024 : 2 * 1024 * 1024;
 const MAX_ACTIVE_TERMINALS = RESPONSIVE ? 2 : 32;
-const MAX_COMPLETED_TERMINALS = RESPONSIVE ? 8 : 100;
-const MAX_COMPLETED_CHARS = RESPONSIVE ? 256 * 1024 : 100 * MAX_BUFFERED_OUTPUT_CHARS;
+// A finished 500-KiB command must remain readable: the old 256-KiB aggregate
+// budget evicted it immediately. Keep at most four completed sessions / 2 MiB.
+const MAX_COMPLETED_TERMINALS = RESPONSIVE ? 4 : 100;
+const MAX_COMPLETED_CHARS = RESPONSIVE ? 2 * 1024 * 1024 : 100 * MAX_BUFFERED_OUTPUT_CHARS;
 
 // Result type for paginated output reading
 export interface PaginatedOutputResult {
@@ -505,7 +506,7 @@ export class TerminalManager {
           // Store the bounded, final buffer before removing active session
           this.completedSessions.set(childProcess.pid, {
             pid: childProcess.pid,
-            outputLines: session.outputLines, // transfer ownership, avoid copying up to 1 MiB
+            outputLines: session.outputLines, // transfer ownership without copying the retained command text
             exitCode: code,
             startTime: session.startTime,
             endTime: new Date(),
@@ -579,13 +580,11 @@ export class TerminalManager {
       lastIndex++;
     }
 
-    // Retain only the newest 20 visible lines in responsive mode. These are
-    // actual retained data, not just a view over a large hidden log buffer.
-    // Also enforce a hard byte cap in case a program prints giant lines.
-    // Batch eviction avoids O(n^2) array shifts during noisy compilations.
+    // Retain as many lines as fit within the 500-KiB responsive text budget;
+    // do not silently discard useful compiler/build lines just to show 20.
+    // Evict old lines in one batch, avoiding O(n^2) shifts on chatty output.
     let droppedLines = 0, droppedChars = 0;
-    while ((session.bufferedChars - droppedChars > MAX_BUFFERED_OUTPUT_CHARS ||
-            session.outputLines.length - droppedLines > MAX_VISIBLE_TERMINAL_LINES) &&
+    while (session.bufferedChars - droppedChars > MAX_BUFFERED_OUTPUT_CHARS &&
            droppedLines < session.outputLines.length - 1) {
       droppedChars += session.outputLines[droppedLines].length + 1;
       droppedLines++;

@@ -376,7 +376,7 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
   // markers used by other tools).
   if (result.evictedLines && result.evictedLines > 0) {
     const capKiB = Math.round(MAX_BUFFERED_OUTPUT_CHARS / 1024);
-    statusMessage += `\n[WARNING: rolling log retained only the newest 20 lines (maximum ${capKiB} KiB); ${result.evictedLines} older lines were discarded and cannot be read. To keep complete output, redirect the command to a file. Line totals refer only to retained lines.]`;
+    statusMessage += `\n[WARNING: command output exceeded the ${capKiB} KiB rolling buffer; ${result.evictedLines} oldest lines were discarded. No line-count limit is applied. To preserve full logs, redirect the command to a file. Line totals refer only to retained lines.]`;
   }
 
   // Add process state info

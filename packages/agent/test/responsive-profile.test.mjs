@@ -128,18 +128,18 @@ test('safe rewrite remains atomic and preserves source bytes', async () => {
   assert.equal(await fs.readFile(file,'utf8'),'replacement\r\n');
 });
 
-test('terminal session keeps only last 20 lines and at most 64 KiB', async () => {
+test('terminal session keeps all lines up to 500 KiB, then evicts only by size', async () => {
   const {TerminalManager, MAX_BUFFERED_OUTPUT_CHARS, MAX_VISIBLE_TERMINAL_LINES} = await import('../dist/core/terminal-manager.js');
-  assert.equal(MAX_BUFFERED_OUTPUT_CHARS,64*1024);
-  assert.equal(MAX_VISIBLE_TERMINAL_LINES,20);
+  assert.equal(MAX_BUFFERED_OUTPUT_CHARS,500*1024);
+  assert.equal(MAX_VISIBLE_TERMINAL_LINES,Number.POSITIVE_INFINITY);
   const mgr = new TerminalManager();
   const session = {
     outputLines:[], bufferedChars:0, evictedChars:0, evictedLines:0,
     lastReadIndex:0, pid:1,
   };
-  for(let i=0;i<7;i++) mgr.appendToLineBuffer(session,('record-'+i+':'+('x'.repeat(80))+'\n').repeat(5000));
+  for(let i=0;i<7;i++) mgr.appendToLineBuffer(session,('record-'+i+':'+('x'.repeat(80))+'\n').repeat(1400));
   assert.ok(session.bufferedChars<=MAX_BUFFERED_OUTPUT_CHARS,session.bufferedChars);
-  assert.ok(session.outputLines.length<=20, session.outputLines.length);
+  assert.ok(session.outputLines.length>20, session.outputLines.length);
   assert.ok(session.outputLines.some(line=>line.startsWith('record-6:')));
   assert.ok(session.outputLines.every(line=>!line.startsWith('record-0:')));
   assert.ok(session.evictedChars>0);
@@ -165,26 +165,35 @@ test('start_process path completes a simple native command without shell persist
   assert.equal(mgr.listActiveSessions().length,0);
 });
 
-test('agent activity keeps only latest 20 entries, without retaining old text', async () => {
-  const {ActivityLog,MAX_VISIBLE_ACTIVITY_LINES} = await import('../dist/runtime/activity.js');
-  assert.equal(MAX_VISIBLE_ACTIVITY_LINES,20);
+test('responsive activity retains up to 100 KiB without a 20-message limit', async () => {
+  const {ActivityLog,MAX_ACTIVITY_LOG_BYTES} = await import('../dist/runtime/activity.js');
+  const {recentActivity} = await import('../dist/terminal-ui.js');
+  assert.equal(MAX_ACTIVITY_LOG_BYTES, 100 * 1024);
   const log = new ActivityLog(path.join(scratch,'quiet-activity'),true);
-  for(let i=0;i<65;i++) log.tool('OK','read_file',String(i),i);
+  for (let i=0;i<3000;i++) log.tool('OK','read_file',String(i),i);
   const recent=log.recent();
-  assert.equal(recent.length,20);
-  assert.equal(recent[0].id,'45');
-  assert.equal(recent.at(-1).id,'64');
+  assert.ok(recent.length>20, 'no arbitrary 20-entry truncation');
+  assert.ok(recent.length<3000, 'older activity must be released when the byte cap is exceeded');
+  assert.equal(recent.at(-1).id,'2999');
+  assert.notEqual(recent[0].id,'0');
+  assert.ok(recent.reduce((n,e)=>n+Buffer.byteLength(JSON.stringify(e),'utf8'),0)<=MAX_ACTIVITY_LOG_BYTES);
+  const screen=recentActivity(recent,10000);
+  assert.ok(screen.split('\n').length>20, 'L activity view should show more than 20 entries');
+  assert.ok(Buffer.byteLength(screen,'utf8')<MAX_ACTIVITY_LOG_BYTES+256);
   await log.close();
 });
 
-test('streaming command output retains the last 20 lines, not 1 MB', async () => {
+test('initial command output keeps every line until its 500-KiB text cap', async () => {
   const {keepRecentTerminalOutput} = await import('../dist/core/terminal-manager.js');
   let tail='';
   for(let i=0;i<160;i++) tail=keepRecentTerminalOutput(tail,'line-'+i+'\n');
-  assert.ok(tail.length<64*1024,tail.length);
-  assert.ok(tail.split('\n').length<=20,tail.split('\n').length);
-  assert.ok(tail.includes('line-159'));
-  assert.ok(!tail.includes('line-0\n'));
+  assert.ok(tail.split('\n').length>20);
+  assert.ok(tail.includes('line-0\n'));
+  assert.ok(tail.includes('line-159\n'));
+  const large=keepRecentTerminalOutput(tail, 'x'.repeat(520*1024)+'END');
+  assert.equal(large.length,500*1024);
+  assert.ok(large.endsWith('END'));
+  assert.ok(!large.includes('line-0\n'));
 });
 
 test('text line-count optimization matches prior semantics without splitting source', async () => {
@@ -209,16 +218,59 @@ test('fast reading preserves CRLF and UTF-16 BOM for small files', async () => {
   assert.match(String(c.content),/world/);
 });
 
-test('completed terminal session exposes only 20 newest lines and records discarded output', async () => {
+test('completed terminal session keeps all 65 lines when below the 500-KiB cap', async () => {
   const {TerminalManager} = await import('../dist/core/terminal-manager.js');
   const mgr = new TerminalManager();
   const command = 'node -e "for(let i=0;i<65;i++)console.log(\'entry-\'+i)"';
   const finished = await mgr.executeCommand(command,2000,process.platform==='win32'?'cmd.exe':'/bin/sh');
   assert.ok(finished.pid>0,finished.output);
-  const result = mgr.readOutputPaginated(finished.pid,-20,50);
+  const result = mgr.readOutputPaginated(finished.pid,-100,100);
   assert.ok(result);
-  assert.ok(result.lines.length<=20);
-  assert.ok(result.evictedLines>0,result.evictedLines);
+  assert.ok(result.lines.length>=65, result.lines.length);
+  assert.equal(result.evictedLines,0);
+  assert.match(result.lines.join('\n'),/entry-0\n/);
   assert.match(result.lines.join('\n'),/entry-64/);
-  assert.doesNotMatch(result.lines.join('\n'),/entry-0\n/);
+});
+
+test('completed 350-KiB command output survives in memory for read_process_output', async () => {
+  const {TerminalManager} = await import('../dist/core/terminal-manager.js');
+  const mgr = new TerminalManager();
+  const command = 'node -e "process.stdout.write(\'x\'.repeat(350000))"';
+  const finished = await mgr.executeCommand(command,2000,process.platform==='win32'?'cmd.exe':'/bin/sh');
+  assert.ok(finished.pid>0,finished.output.slice(0,200));
+  const result = mgr.readOutputPaginated(finished.pid,-100,100);
+  assert.ok(result,'completed output should still exist');
+  assert.equal(result.evictedLines,0);
+  assert.ok(result.lines.join('').length>=350000,'output should not be lost on completion');
+});
+
+test('rolling BRC console retains 100 KiB of text, not just 20 messages', async () => {
+  const {ActivityLog,MAX_ACTIVITY_LOG_BYTES} = await import('../dist/runtime/activity.js');
+  const log = new ActivityLog(path.join(scratch, 'rolling-activity'),false);
+  // Exercise the console buffer without drawing terminal screens during tests.
+  log.rollingConsole = true;
+  log.scheduleRolling = () => {};
+  for(let i=0;i<3200;i++) log.tool('OK','read_file',String(i),i);
+  assert.ok(log.rollingLines.length>20, log.rollingLines.length);
+  assert.ok(log.rollingBytes<=MAX_ACTIVITY_LOG_BYTES, log.rollingBytes);
+  assert.ok(log.rollingBytes>60*1024, 'the ring should make useful use of its budget');
+  assert.equal(log.rollingBytes, log.rollingLines.reduce((n,s)=>n+Buffer.byteLength(s+'\n','utf8'),0));
+  assert.ok(log.rollingLines.at(-1).includes('read_file'));
+  assert.ok(!log.rollingLines.some(s=>s.includes('[0]')));
+  await log.close();
+});
+
+test('paused console queue has a 100-KiB byte budget even without TTY rendering', async () => {
+  const {ActivityLog,MAX_ACTIVITY_LOG_BYTES} = await import('../dist/runtime/activity.js');
+  const log = new ActivityLog(path.join(scratch, 'queue-activity'),false);
+  const resume = log.pauseConsole();
+  for(let i=0;i<3200;i++) log.tool('OK','read_file',String(i),i);
+  assert.ok(log.consoleQueue.length>20);
+  assert.ok(log.queuedBytes<=MAX_ACTIVITY_LOG_BYTES,log.queuedBytes);
+  assert.equal(log.queuedBytes,log.consoleQueue.reduce((n,s)=>n+Buffer.byteLength(s,'utf8'),0));
+  // Do not dump test data to the real console on resume.
+  log.consoleQueue.length=0;
+  log.queuedBytes=0;
+  resume();
+  await log.close();
 });

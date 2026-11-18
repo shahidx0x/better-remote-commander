@@ -193,7 +193,7 @@ function armShortcuts(): void {
   shortcuts = listenForTerminalShortcuts(process.stdin, choice => {
     if (choice === 'settings') void openSettings();
     else if (choice === 'status') console.log(connectionPanel(client.status(), { ...terminalInfo, name: activeCredentials.name, relay: activeCredentials.relayUrl }));
-    else if (choice === 'activity') console.log(recentActivity(activity.recent(), 20));
+    else if (choice === 'activity') console.log(recentActivity(activity.recent(), Number.MAX_SAFE_INTEGER));
     else if (choice === 'verbose') {
       activity.setConsoleMode(activity.getConsoleMode() === 'compact' ? 'verbose' : 'compact');
       console.log('  Console mode: ' + activity.getConsoleMode() + '. All tool metadata remains in bounded memory.');
