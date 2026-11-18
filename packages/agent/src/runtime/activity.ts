@@ -5,9 +5,8 @@ import os from 'node:os';
 export const RETENTION_MS = 0;
 /** Combined live-log text budget: structured history plus one console ring/queue. */
 export const MAX_ACTIVITY_LOG_BYTES = 500 * 1024;
-export const MAX_ACTIVITY_EVENT_BYTES = 384 * 1024;
+export const MAX_ACTIVITY_EVENT_BYTES = 244 * 1024; // retained searchable events
 export const MAX_ACTIVITY_CONSOLE_BYTES = MAX_ACTIVITY_LOG_BYTES - MAX_ACTIVITY_EVENT_BYTES;
-const MAX_QUEUED_ACTIVITY_LINES = 200;
 let stdoutAvailable = true;
 process.stdout.on('error', () => { stdoutAvailable = false; });
 export type ConsoleMode = 'compact' | 'verbose';
@@ -20,6 +19,7 @@ export interface ActivityEvent {
     phase?: 'START' | 'OK' | 'ERROR' | 'PENDING';
     action?: string;
     note?: string;
+    trace?: string;
     ms?: number;
     code?: string;
 }
@@ -76,7 +76,7 @@ export function activityAction(tool: string, args: Record<string,unknown> | unde
         return typeof args.pid==='number'&&Number.isSafeInteger(args.pid)?'PID '+args.pid:'';
     return at.trim();
 }
-/** Render a small readable operation card in 1-3 terminal lines. */
+/** Render human-readable live events. Verbose mode preserves bounded multi-line details. */
 export function formatActivityEvent(event: ActivityEvent, mode: ConsoleMode, width=120): string {
     const time = new Date(event.timestamp).toLocaleTimeString('en-GB',{hour12:false});
     const max = Math.min(160,Math.max(40,width));
@@ -88,11 +88,29 @@ export function formatActivityEvent(event: ActivityEvent, mode: ConsoleMode, wid
         ? (event.ms / 1000).toFixed(1)+'s' : Math.round(event.ms)+'ms');
     const legacyTool = /^\s*(?:START|OK|ERROR|PENDING)\s+([a-z][a-z0-9_]*)\b/i.exec(event.message)?.[1];
     const label = '['+time+'] ['+state+'] '+(event.tool??legacyTool??'operation')+duration;
-    const lines = [label];
-    if (event.action) lines.push('           Task: '+event.action);
-    if (event.note) lines.push('           '+event.note);
-    else if (event.code) lines.push('           '+event.code);
-    return lines.slice(0,3).map(line=>compactLine(line,max)).join('\n');
+    if (mode === 'compact') {
+        const lines=[label];
+        if(event.action) lines.push('           Task: '+event.action);
+        if(event.note) lines.push('           '+event.note);
+        else if(event.code) lines.push('           '+event.code);
+        return lines.slice(0,3).map(line=>compactLine(line,max)).join('\n');
+    }
+    const parts=[label+(event.id?'  (call '+event.id.slice(0,16)+')':'')];
+    if(event.action)parts.push('  Task: '+event.action);
+    if(event.trace)parts.push(event.trace);
+    if(event.note)parts.push('  Note: '+event.note);
+    else if(event.code)parts.push('  Code: '+event.code);
+    // Wrap instead of discarding text after column 160. Every input trace was
+    // already clipped and redacted before being retained in activity history.
+    const lines: string[]=[];
+    for(const piece of parts.join('\n').split('\n')){
+        if(!piece){lines.push('');continue;}
+        for(let pos=0;pos<piece.length;pos+=max){
+            const fragment=piece.slice(pos,pos+max);
+            lines.push(compactLine(fragment,max));
+        }
+    }
+    return lines.join('\n');
 }
 export class ActivityLog {
     private events: ActivityEvent[] = [];
@@ -106,7 +124,7 @@ export class ActivityLog {
     private blocked = false;
     private started = false;
     private consolePauses = 0;
-    private consoleMode: ConsoleMode = process.env.BRC_CONSOLE_MODE === 'verbose' || !process.stdout.isTTY ? 'verbose' : 'compact';
+    private consoleMode: ConsoleMode = process.env.BRC_CONSOLE_MODE === 'compact' ? 'compact' : 'verbose';
     dropped = 0;
     ioErrors = 0;
     // The legacy third argument is deliberately ignored: disk logging cannot be enabled.
@@ -135,12 +153,13 @@ export class ActivityLog {
             return;
         this.record({ timestamp: new Date().toISOString(), level, message: compactLine(message) });
     }
-    tool(phase: 'START' | 'OK' | 'ERROR' | 'PENDING', tool: string, id: string, ms?: number, code?: string, action?: string, note?: string): void {
+    tool(phase: 'START' | 'OK' | 'ERROR' | 'PENDING', tool: string, id: string, ms?: number, code?: string, action?: string, note?: string, trace?: string): void {
         tool = safeId(tool);
         id = safeId(id);
         code = code ? safeId(code) : undefined;
         note = note ? compactLine(note,155) : undefined;
-        this.record({ timestamp: new Date().toISOString(), level: phase === 'ERROR' ? 'error' : 'info', phase, tool, id, ms, code, action, note,
+        trace = trace ? trace.slice(0,12_000) : undefined;
+        this.record({ timestamp: new Date().toISOString(), level: phase === 'ERROR' ? 'error' : 'info', phase, tool, id, ms, code, action, note, trace,
             message: `${phase.padEnd(5)} ${tool} [${id.slice(0, 8)}]${ms === undefined ? '' : ` ${Math.round(ms)}ms`}${code ? ` ${code}` : ''}` });
     }
     private record(event: ActivityEvent): void {
@@ -150,7 +169,7 @@ export class ActivityLog {
         const bytes = Buffer.byteLength(JSON.stringify(event), 'utf8');
         this.events.push(event);
         this.eventsBytes += bytes;
-        while (this.eventsBytes > MAX_ACTIVITY_EVENT_BYTES || this.events.length > 5000) {
+        while (this.eventsBytes > MAX_ACTIVITY_EVENT_BYTES) {
             const old = this.events.shift();
             if (!old) break;
             this.eventsBytes -= Buffer.byteLength(JSON.stringify(old), 'utf8');
@@ -192,7 +211,7 @@ export class ActivityLog {
         const queuedLine = line + '\n';
         this.consoleQueue.push(queuedLine);
         this.queuedBytes += Buffer.byteLength(queuedLine, 'utf8');
-        while (this.consoleQueue.length > MAX_QUEUED_ACTIVITY_LINES || this.queuedBytes > MAX_ACTIVITY_CONSOLE_BYTES) {
+        while (this.queuedBytes > MAX_ACTIVITY_CONSOLE_BYTES) {
             const old = this.consoleQueue.shift();
             if (!old) break;
             this.queuedBytes -= Buffer.byteLength(old, 'utf8');

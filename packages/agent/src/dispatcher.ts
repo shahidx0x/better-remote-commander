@@ -20,6 +20,7 @@ import { DEVELOPER_TOOL_HANDLERS, buildDeveloperToolDefinitions } from './tools/
 import { reclaimCaches, markToolStarted, markToolFinished } from './runtime/resource-limits.js';
 import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions, runBatch } from './tools/coding-tools.js';
 import { activity, activityAction } from './runtime/activity.js';
+import { traceToolArguments, traceToolResult } from './runtime/tool-trace.js';
 import { summarizeCommandActivity } from './runtime/command-log-summary.js';
 import { recordToolFailure, failureReason } from './runtime/failure-log.js';
 import { POLYGLOT_TOOL_HANDLERS, buildPolyglotToolDefinitions } from './tools/polyglot-tools.js';
@@ -144,7 +145,7 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   try {
   const start=performance.now();
    const action=activityAction(name,args);
-  activity.tool('START',name,parent.id,undefined,undefined,action);
+  activity.tool('START',name,parent.id,undefined,undefined,action,undefined,traceToolArguments(name,args));
   let out:ToolResult;
   try{
     checkCancelled();
@@ -202,7 +203,7 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     : name==='run_command' ? summarizeCommandActivity(out).detail
     : name==='start_process' && phase==='OK' ? 'Process started; it may still be running'
     : phase==='ERROR' ? ((error?.code??'TOOL_FAILED')+': '+failureReason(name,error?.code??'TOOL_FAILED')) : undefined;
-  activity.tool(phase,name,parent.id,durationMs,error?.code,action,note);
+  activity.tool(phase,name,parent.id,durationMs,error?.code,action,note,traceToolResult(name,out));
   if(out.isError){
     const code=error?.code??'TOOL_FAILED';
     // Preserve classified failures in the bounded diagnostic records.

@@ -60,7 +60,7 @@ export function connectionPanel(
     + '\n  Storage  Only bounded in-memory activity, no saved transcripts\n';
 }
 
-export function recentActivity(events: ActivityEvent[], max = 8, byteBudget = MAX_ACTIVITY_LOG_BYTES): string {
+export function recentActivity(events: ActivityEvent[], max = Number.MAX_SAFE_INTEGER, byteBudget = MAX_ACTIVITY_LOG_BYTES): string {
   // The L shortcut shows as much useful activity as fits its text budget,
   // rather than silently imposing the old 20-message limit.
   const recent: string[] = [];
@@ -68,8 +68,7 @@ export function recentActivity(events: ActivityEvent[], max = 8, byteBudget = MA
   const limit = Math.max(1, Math.min(events.length, Math.floor(max)));
   for (let i = events.length - 1; i >= 0 && recent.length < limit; i--) {
     const e = events[i];
-    if (e.phase === 'START') continue;
-    const line = formatActivityEvent(e,'compact',120).split('\n')
+    const line = formatActivityEvent(e,'verbose',120).split('\n')
       .map(part=>'  '+part).join('\n');
     const size = Buffer.byteLength(line + '\n', 'utf8');
     if (bytes + size > byteBudget) break;
@@ -77,6 +76,6 @@ export function recentActivity(events: ActivityEvent[], max = 8, byteBudget = MA
     bytes += size;
   }
   if (!recent.length) return '\n  RECENT ACTIVITY\n  No completed tool calls or connection changes yet.\n';
-  return '\n  RECENT ACTIVITY (' + recent.length + ' operations, up to ' + Math.floor(byteBudget/1024) + ' KiB)\n'
+  return '\n  RECENT ACTIVITY (' + recent.length + ' events, up to ' + Math.floor(byteBudget/1024) + ' KiB requested)\n'
     + recent.reverse().join('\n') + '\n';
 }

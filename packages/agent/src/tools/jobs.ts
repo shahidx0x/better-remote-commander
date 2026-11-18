@@ -24,6 +24,7 @@ import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { runCommandCore, RunCommandArgsSchema } from './brc-tools.js';
 import { activity, activityAction } from '../runtime/activity.js';
+import { traceToolResult } from '../runtime/tool-trace.js';
 import { summarizeCommandActivity } from '../runtime/command-log-summary.js';
 import type { CommandActivityResult } from '../runtime/command-log-summary.js';
 import { getCallContext } from '../context.js';
@@ -226,6 +227,7 @@ interface Job {
   quickReturnPending?: boolean;
   quickResult?: ServerResult;
   consoleOutcome?: CommandActivityResult;
+  consoleTrace?: string;
   progress?: CommandProgress;
   abort?: AbortController;
   cancelRequested?: boolean;
@@ -331,7 +333,10 @@ async function runJob(job: Job): Promise<void> {
         res = text(`Error: ${e instanceof Error ? e.message : String(e)}`, true);
       }
       if (job.quickReturnPending) job.quickResult = res;
-      if (job.label === 'run_command') job.consoleOutcome = summarizeCommandActivity(res);
+      if (job.label === 'run_command') {
+        job.consoleOutcome = summarizeCommandActivity(res);
+        job.consoleTrace = traceToolResult('run_command',res);
+      }
       const ok = !res.isError;
       job.results.push({ index: i, name: stepName(step), ok, ms: Date.now() - t0, output: resultText(res) });
       if (!ok) {
@@ -359,9 +364,10 @@ async function runJob(job: Job): Promise<void> {
       const note = 'Job '+job.id+' | '+(job.consoleOutcome?.detail ??
         (ok ? 'finished' : job.status.toUpperCase()));
       activity.tool(ok ? 'OK' : 'ERROR','run_command',job.id,
-        job.endedAt - (job.startedAt ?? job.createdAt),code,action,note);
+        job.endedAt - (job.startedAt ?? job.createdAt),code,action,note,job.consoleTrace);
     }
     job.consoleOutcome=undefined;
+    job.consoleTrace=undefined;
     job.resolveDone!();
     void persist(job);
     prune();
@@ -479,7 +485,7 @@ function cancel(job: Job): boolean {
 // ---------------------------------------------------------------------------
 function serialisable(job: Job) {
   const { abort, done, resolveDone, cancelRequested, timedOut, quickReturnPending, quickResult,
-    progress, consoleOutcome, ...rest } = job;
+    progress, consoleOutcome, consoleTrace, ...rest } = job;
   return rest;
 }
 

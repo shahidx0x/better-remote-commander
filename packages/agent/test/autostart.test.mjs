@@ -85,8 +85,8 @@ test('settings temporarily holds only bounded live log output and never persists
   try {
     const resume = log.pauseConsole();
     for (let i = 0; i < 250; i++) log.tool('OK', 'autostart_test', String(i), 1);
-    assert.equal(chunks.length, 0); assert.equal(log.consoleQueue.length, 200); assert.equal(log.dropped, 50);
-    resume(); resume(); assert.equal(chunks.length, 200); await log.close();
+    assert.equal(chunks.length, 0); assert.equal(log.consoleQueue.length, 250); assert.equal(log.dropped, 0);
+    resume(); resume(); assert.equal(chunks.length, 250); await log.close();
   } finally { process.stdout.write = original; }
   assert.equal(await fs.stat(path.join(scratch, 'logging')).catch(() => null), null);
 });
