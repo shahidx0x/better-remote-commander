@@ -4,12 +4,16 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {mkdtempSync,realpathSync} from 'node:fs';
-import {CommandCpuAdmission,commandCpuAdmission} from '../dist/runtime/resource-admission.js';
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const home=mkdtempSync(path.join(realpathSync.native(os.tmpdir()),'brc-cpu-gate-'));
 const project=path.join(home,'fixture');
 await fs.mkdir(project);
+// Isolate BRC_HOME before importing any agent runtime module. The previous
+// static import could resolve CONFIG_FILE to the real ~/.brc/config.json.
+process.env.BRC_HOME=path.join(home,'agent-home');
+process.env.BRC_ERROR_LOG='0';
 const existing=process.env.BRC_SHARED_CPU_BUDGET;
+const {CommandCpuAdmission,commandCpuAdmission}=await import('../dist/runtime/resource-admission.js');
 const {configManager}=await import('../dist/core/config-manager.js');
 await configManager.setValue('allowedDirectories',[project]);
 const {runProgram}=await import('../dist/runtime/program-runner.js');

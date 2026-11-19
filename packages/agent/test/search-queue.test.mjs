@@ -46,8 +46,16 @@ test('bursts wait in a FIFO queue rather than getting SEARCH_BUSY at two workers
   assert.ok(startedTwo.sessionId.startsWith('search_'));
   assert.notEqual(startedOne.sessionId,startedTwo.sessionId);
   manager.sessions.delete('occupied-b');
-  const ready=manager.readSearchResults(startedOne.sessionId,0,40);
-  assert.ok(ready.results.length>=1);
+  // startSearch(skipInitialWait=true) returns once rg is spawned, not once it
+  // has produced output. Under parallel CI load the second search may start
+  // before the first produces its first result; wait for a real search event.
+  let ready=manager.readSearchResults(startedOne.sessionId,0,40);
+  for(let n=0;n<40&&ready.results.length===0&&!ready.isComplete;n++){
+    await manager.waitForActivity(startedOne.sessionId,100);
+    ready=manager.readSearchResults(startedOne.sessionId,0,40);
+  }
+  assert.ok(ready.results.length>=1,
+    'Expected ripgrep match after waiting for activity: '+String(ready.error??''));
 });
 
 test('cancelling an awaiting request removes the waiter without claiming success',async()=>{
