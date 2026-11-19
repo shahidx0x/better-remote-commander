@@ -26,7 +26,7 @@ export const sourceObservationStatus=()=>({
  automaticPreconditionBytes:MAX_AUTO_BYTES,
  strictRequiresCallerHash:true,
  newFilesCanBeCreated:true,
- note:'Default automatic current-file SHA-256 protects against changes between preflight and mutation without manual hashes. BRC_REQUIRE_SOURCE_HASH=1 enforces caller hashes; =0 disables. Auto mode does not prove prior user observation; large-file fallback and shell/git/specialized mutation paths use existing semantics.'
+ note:'Default automatic current-file SHA-256 protects against races. Explicit stale hashes on simple edit_block calls may be rebased only if every exact anchor is unique and atomic revalidation passes; ambiguous edits and whole-file writes still fail. BRC_REQUIRE_SOURCE_HASH=1 strictly rejects stale hashes; =0 is legacy. Auto mode does not prove prior user observation; shell/git and specialized mutation paths have their own semantics.'
 });
 export async function automaticSourcePrecondition(tool:string,args:Record<string,unknown>):Promise<string|undefined>{
  if(sourceObservationMode()!=='auto'||!['write_file','edit_block'].includes(tool)||args.expected_sha256!==undefined)

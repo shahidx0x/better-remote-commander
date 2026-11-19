@@ -156,6 +156,65 @@ async function rebaseUnambiguousEditBlock(file:string,args:Args):Promise<string|
   return sha256(bytes);
 }
 
+/** A rejected stale edit is a read-only operation: return an actual current
+ * SHA-256 and a bounded, actionable read window, not a generic retry hint.
+ * No text is logged or guessed into a new mutation.
+ */
+async function staleEditFailure(file:string,args:Args,err:AgentError):Promise<ToolResult>{
+  const base=failure(err);
+  let currentSha256:string|undefined;
+  let exactAnchorMatches:number|undefined;
+  const candidateLines:number[]=[];
+  let nextOffset=0;
+  try{
+    const data=await readBounded(file,8*1024*1024);
+    currentSha256=sha256(data);
+    const content=decodeCode(data);
+    const steps=Array.isArray(args.edits)?args.edits:[args];
+    const first=steps[0] as {old_string?:unknown}|undefined;
+    if(typeof first?.old_string==='string'&&first.old_string.length){
+      const newline=content.includes('\r\n')?'\r\n':'\n';
+      const needle=first.old_string.replace(/\r?\n/g,newline);
+      let pos=0,count=0;
+      while(count<2){
+        const at=content.indexOf(needle,pos);
+        if(at<0)break;
+        count++;pos=at+Math.max(1,needle.length);
+      }
+      exactAnchorMatches=count;
+      const probe=first.old_string.split(/\r?\n/).map(s=>s.trim()).find(s=>s.length>=6)?.slice(0,80);
+      if(probe){
+        let pos=0;
+        while(candidateLines.length<5){
+          const at=content.indexOf(probe,pos);
+          if(at<0)break;
+          let line=1,from=0;
+          while(true){const e=content.indexOf('\n',from);if(e<0||e>=at)break;line++;from=e+1;}
+          candidateLines.push(line);
+          pos=at+probe.length;
+        }
+      }
+      if(candidateLines.length)nextOffset=Math.max(0,candidateLines[0]-5);
+    }
+  }catch{/* Path/encoding was changed or became too large; a read tool remains the safe remedy. */}
+  const next={tool:'read_code_file',args:{path:file,offset:nextOffset,length:24}};
+  const suggestion='The source changed since the supplied SHA-256. Read the current version and examine the exact target before resubmitting; do not replay the unchanged edit. '+
+    (exactAnchorMatches===0?'The original text is no longer present. ':
+      exactAnchorMatches===2?'The original anchor is not unique. ':'')+
+    'Use read_code_file at the suggested offset, then use the returned SHA-256.';
+  const modelText='FILE_CONFLICT: no edit was committed.\n'+
+    (currentSha256?'CURRENT_SHA256: '+currentSha256+'\n':'')+
+    (exactAnchorMatches!==undefined?'EXACT_ANCHOR_MATCHES: '+(exactAnchorMatches===2?'2 or more':exactAnchorMatches)+'\n':'')+
+    (candidateLines.length?'CANDIDATE_LINES: '+candidateLines.join(', ')+'\n':'')+
+    'NEXT: read_code_file('+JSON.stringify(next.args)+')\n'+suggestion;
+  return {...base,content:[{type:'text',text:modelText}],
+    structuredContent:{...base.structuredContent,changed:false,
+      ...(currentSha256?{currentSha256}:{}),
+      ...(exactAnchorMatches!==undefined?{exactAnchorMatches}:{}),
+      candidateLines,next,
+      recovery:{suggestion,automaticRetry:false,next,hasSafeAutomaticRebase:false}}};
+}
+
 function safeCommandDiagnostic(cause:unknown):string{
   if(typeof cause!=='string')return 'NONZERO_EXIT';
   if(cause==='Git was executed outside a repository.')return 'GIT_NOT_REPOSITORY';
@@ -219,9 +278,13 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
         try {
           await assertHash(validated,checkedHash);
         } catch (err) {
-          if(name!=='edit_block' || sourceObservationMode()!=='off' || !(err instanceof AgentError) || err.code!=='FILE_CONFLICT')throw err;
+          if(!(err instanceof AgentError) || err.code!=='FILE_CONFLICT')throw err;
+          // Only exact, unique, short text edits may be safely rebased in auto
+          // and legacy modes. Strict mode never overrides a caller's stale hash.
+          if(name!=='edit_block')throw err;
+          if(sourceObservationMode()==='strict')return await staleEditFailure(validated,args,err);
           const latestHash=await rebaseUnambiguousEditBlock(validated,args);
-          if(!latestHash)throw err;
+          if(!latestHash)return await staleEditFailure(validated,args,err);
           checkedHash=latestHash;
           rebased=true;
         }

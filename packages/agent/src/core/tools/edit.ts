@@ -41,9 +41,19 @@ function editBlockFailure(
     details: Record<string, unknown> = {},
 ): ServerResult {
     const body = message.slice(0, 3500);
+    // Models frequently see text results without structuredContent. Put
+    // bounded, exact recovery metadata in that text so they can re-read the
+    // right line instead of repeating the same failed edit.
+    const latestHash=typeof details.sourceSha256==='string'?details.sourceSha256:null;
+    const candidates=Array.isArray(details.candidateLines)?details.candidateLines.slice(0,5):[];
+    const next=details.next&&typeof details.next==='object'?details.next:null;
+    const repairText=(latestHash?'\nCURRENT_SHA256: '+latestHash:'')+
+      (typeof details.actualReplacements==='number'?'\nACTUAL_MATCHES: '+details.actualReplacements:'')+
+      (candidates.length?'\nCANDIDATE_LINES: '+candidates.join(', '):'')+
+      (next?'\nNEXT_READ: '+JSON.stringify(next):'');
     return {
         isError: true,
-        content: [{type:'text',text:code+': '+body+'\nNEXT ACTION: '+suggestion}],
+        content: [{type:'text',text:code+': '+body+repairText+'\nNEXT ACTION: '+suggestion}],
         structuredContent: {
             error:{code,message:body,retryable:false},
             recovery:{automaticRetry:false,suggestion},

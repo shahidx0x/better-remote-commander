@@ -72,7 +72,7 @@ test('replacement counts use actual non-overlapping matches',async()=>{
  assert.equal(await fs.readFile(p,'utf8'),'bb');
 });
 
-test('legacy stale hash rebases only when explicitly requested; the new default rejects it',async()=>{
+test('legacy source mode still rebases uniquely anchored stale hashes',async()=>{
  process.env.BRC_REQUIRE_SOURCE_HASH='0';
  try{
  const p=file('safe-rebase.ts');

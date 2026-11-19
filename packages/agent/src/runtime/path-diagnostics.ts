@@ -68,7 +68,13 @@ export async function missingFileResponse(input:string):Promise<ToolResult>{
  const hints=await diagnoseMissingPath(input);
  const base=failure(new AgentError('ENOENT',
   'The requested path does not exist. No file was created or modified. Inspect the nearest permitted directory or search for the filename.'));
- return {...base,structuredContent:{...base.structuredContent,
-  ...(hints?{pathRecovery:hints,next:{tool:'list_directory',args:{
-    path:hints.nearestExistingDirectory??input,depth:1,limit:200}}}:{})}};
+ const next=hints?{tool:'list_directory',args:{path:hints.nearestExistingDirectory??input,depth:1,limit:200}}:null;
+ const readable=hints?('\nNEAREST_ALLOWED_DIRECTORY: '+hints.nearestExistingDirectory+
+  (hints.suggestions.length?'\nPOSSIBLE_FILENAMES: '+hints.suggestions.map(s=>JSON.stringify(s)).join(', '):'\nNO_CLOSE_FILENAME_FOUND')+
+  '\nNEXT: list_directory('+JSON.stringify(next!.args)+')'+
+  (hints.limited?'\nNOTE: filename suggestions cover only the first 256 entries; use start_search for wider discovery.':'')):
+  '\nNEXT: Use list_directory or start_search(searchType:"files") with an authorized existing root.';
+ return {...base,content:[{type:'text',text:base.content.map(c=>c.type==='text'?c.text:'').join('\n')+readable}],
+  structuredContent:{...base.structuredContent,
+  ...(hints?{pathRecovery:hints,next}:{})}};
 }
