@@ -16,11 +16,12 @@ import {readBounded,decodeCode,sha256} from '../runtime/file-safety.js';
 import {CODING_TOOL_HANDLERS} from './coding-tools.js';
 import {checkCancelled} from '../context.js';
 import {workerCoordinator} from '../runtime/worker-coordination.js';
+import {applyExtendedPatch} from './extended-patch.js';
 
 const MAX_PATCH_CHARS=256*1024,MAX_FILES=16,MAX_HUNKS=80;
 const PatchSchema=z.object({
- cwd:z.string().min(1).describe('Absolute project root with the existing files to modify.'),
- input:z.string().min(1).max(MAX_PATCH_CHARS).describe('*** Begin Patch / *** Update File / @@ / context (- and +) / *** End Patch. Paths are relative to cwd.'),
+ cwd:z.string().min(1).describe('Absolute root containing current code and planned Add/Delete/Move/Update paths.'),
+ input:z.string().min(1).max(MAX_PATCH_CHARS).describe('*** Begin Patch / Update File + @@ context, Add File + lines, Delete File, Move File source -> destination / *** End Patch. Paths relative to cwd.'),
  dryRun:z.boolean().optional().default(false).describe('Validate contexts and preview edits without writing.')
 }).strict();
 
@@ -97,7 +98,10 @@ function lineBoundedMatches(content:string,old:string,endOfFile:boolean):number[
  return matches;
 }
 export async function applyPatch(raw:unknown):Promise<ToolResult>{
- const a=PatchSchema.parse(raw),root=await rootPath(a.cwd),targets=parsePatch(a.input);
+ const a=PatchSchema.parse(raw);
+ if(/^\*\*\* (?:Add|Delete|Move) File:/m.test(a.input)||/^\*\*\* Move to:/m.test(a.input))
+  return applyExtendedPatch(a);
+ const root=await rootPath(a.cwd),targets=parsePatch(a.input);
  const files: Array<{path:string;expected_sha256:string;edits:Array<{old_string:string;new_string:string;expected_replacements:number}>}>=[];
  let budget=0;
  for(const target of targets){
@@ -140,7 +144,7 @@ export const PATCH_TOOL_HANDLERS:Record<string,(args:Record<string,unknown>)=>Pr
 };
 export function buildPatchToolDefinitions():ToolDefinition[]{
  return [{name:'apply_patch',
-  description:'Apply a DeepSeek/Codex-style *** Begin Patch with one or more *** Update File: relative/path and @@ hunks. Requires explicit context lines (space prefix), removed lines (-), added lines (+). Entire multi-file patch is syntax-checked, every hunk must match one unique whole-line context in a current saved UTF-8 file, and all source SHA-256 hashes are checked again under locks before any writes. Per-file atomic replacement; best-effort rollback on later commit failure; not crash-atomic. Only existing-file Update operations are supported; use write_file, delete_file or move_file for other operations. dryRun previews without mutations. No fuzzy replacements, model calls, shell execution, or new external dependencies.',
+  description:'Apply a bounded *** Begin Patch / *** End Patch to code. Supports *** Update File: path with @@ exact unique context hunks; *** Add File: path with + lines; *** Delete File: path; *** Move File: source -> destination; and *** Move to: destination within an Update File section. Preflights all source hashes and destinations before any mutation; context matches must be unique. DryRun previews. Uses guarded per-file commits, verified no-overwrite moves and best-effort rollback. Never claims cross-file crash atomicity. Does not execute shell commands or accept fuzzy edits.',
   inputSchema:zodToJsonSchema(PatchSchema),
   annotations:{title:'Context-checked code patch',readOnlyHint:false,destructiveHint:true}}];
 }

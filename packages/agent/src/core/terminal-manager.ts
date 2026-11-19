@@ -1,4 +1,6 @@
 import { spawn } from 'child_process';
+import {randomUUID} from 'node:crypto';
+import {saveTerminalSnapshot} from '../runtime/terminal-journal.js';
 import path from 'path';
 import { TerminalSession, CommandExecutionResult, ActiveSession, TimingInfo, OutputEvent } from './types.js';
 import { DEFAULT_COMMAND_TIMEOUT } from './config.js';
@@ -44,6 +46,7 @@ export function getRepairedPathExt(): string {
 
 interface CompletedSession {
   pid: number;
+  sessionId:string;
   outputLines: string[];       // Line-based buffer (consistent with active sessions)
   exitCode: number | null;
   startTime: Date;
@@ -388,6 +391,7 @@ export class TerminalManager {
 
     const session: TerminalSession = {
       pid: childProcess.pid,
+      sessionId:randomUUID(),
       process: childProcess,
       outputLines: [],           // Line-based buffer
       lastReadIndex: 0,          // Track where "new" output starts
@@ -400,6 +404,7 @@ export class TerminalManager {
     };
 
     this.sessions.set(childProcess.pid, session);
+    this.snapshot(session,'running',null);
 
     // Timing telemetry
     const startTime = Date.now();
@@ -444,6 +449,7 @@ export class TerminalManager {
       // a successful spawn means the process is gone, so the caller must not sit
       // waiting for output that will never arrive.
       forwardProcessError = (err: Error) => {
+        this.snapshot(session,'interrupted',null);
         this.sessions.delete(childProcess.pid!);
         exitReason = 'process_exit';
         resolveOnce({
@@ -471,6 +477,7 @@ export class TerminalManager {
         if (!resolved) output = keepRecentTerminalOutput(output, text);
         // Append to line-based buffer
         this.appendToLineBuffer(session, text);
+        this.snapshotIfDue(session);
 
         // Record output event if collecting timing
         if (collectTiming && outputEvents.length < 128) {
@@ -510,6 +517,7 @@ export class TerminalManager {
         if (!resolved) output = keepRecentTerminalOutput(output, text);
         // Append to line-based buffer
         this.appendToLineBuffer(session, text);
+        this.snapshotIfDue(session);
 
         // Record output event if collecting timing
         if (collectTiming && outputEvents.length < 128) {
@@ -560,6 +568,7 @@ export class TerminalManager {
           // Store the bounded, final buffer before removing active session
           this.completedSessions.set(childProcess.pid, {
             pid: childProcess.pid,
+            sessionId:session.sessionId,
             outputLines: session.outputLines, // transfer ownership without copying the retained command text
             exitCode: code,
             startTime: session.startTime,
@@ -581,6 +590,7 @@ export class TerminalManager {
           }
 
           this.sessions.delete(childProcess.pid);
+          this.snapshot(session,'completed',code===null?null:Number(code));
         }
         exitReason = 'process_exit';
         resolveOnce({
@@ -665,6 +675,49 @@ export class TerminalManager {
       session.evictedLines += droppedLines;
       session.lastReadIndex = Math.max(0,session.lastReadIndex-droppedLines);
     }
+  }
+
+  /** Encrypted terminal snapshots are written at most every two seconds,
+   * preserving the 500-KiB in-memory rolling tail and the process-count caps.
+   */
+  private snapshot(session:TerminalSession,state:'running'|'completed'|'interrupted',
+   exitCode:number|null):void{
+    session.lastJournalAt=Date.now();
+    void saveTerminalSnapshot({sessionId:session.sessionId,pid:session.pid,
+      startedAt:session.startTime.getTime(),endedAt:state==='running'?undefined:Date.now(),
+      state,exitCode,evictedLines:session.evictedLines,lines:session.outputLines.slice()});
+  }
+  private snapshotIfDue(session:TerminalSession):void{
+    if(Date.now()-(session.lastJournalAt??0)>=2000)this.snapshot(session,'running',null);
+  }
+  getSessionId(pid:number):string|null{
+    return this.sessions.get(pid)?.sessionId??this.completedSessions.get(pid)?.sessionId??null;
+  }
+  resolvePidBySessionId(sessionId:string):number|null{
+    for(const s of this.sessions.values())if(s.sessionId===sessionId)return s.pid;
+    for(const s of this.completedSessions.values())if(s.sessionId===sessionId)return s.pid;
+    return null;
+  }
+  /** Stateless absolute line cursor; independent callers do not move each
+   * other's legacy offset=0 read pointer. Lost history is reported explicitly.
+   */
+  readOutputByCursor(pid:number,cursor:number,length:number){
+    const active=this.sessions.get(pid),completed=this.completedSessions.get(pid);
+    const s=active??completed;
+    if(!s||!Number.isSafeInteger(cursor)||cursor<0)return null;
+    const oldest=s.evictedLines,from=Math.max(cursor,oldest);
+    const index=Math.max(0,from-oldest),take=Math.max(1,Math.min(length,2000));
+    const lines=s.outputLines.slice(index,index+take);
+    const nextCursor=from+lines.length;
+    return {sessionId:s.sessionId,pid,
+      lines,readFrom:index,readCount:lines.length,totalLines:s.outputLines.length,
+      remaining:Math.max(0,s.outputLines.length-index-lines.length),
+      isComplete:!active,exitCode:completed?.exitCode??null,
+      runtimeMs:completed?completed.endTime.getTime()-completed.startTime.getTime():undefined,
+      evictedLines:oldest,lostOutput:cursor<oldest,oldestAvailableCursor:oldest,
+      nextCursor,hasMore:nextCursor<oldest+s.outputLines.length,
+      inMemoryBytes:active?.bufferedBytes??(completed?.retainedChars??0),
+      bufferCapBytes:MAX_BUFFERED_OUTPUT_BYTES};
   }
 
   /**

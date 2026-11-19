@@ -399,6 +399,10 @@ export async function runCommandCore(
       ...text(body,failed),
       structuredContent:{
         exitCode,signal,durationMs:r.ms,timedOut,cancelled,commandExecuted:true,
+        executionCompleted:!terminationUnconfirmed&&!cancelled&&!timedOut,
+        commandSucceeded:exitCode===0&&!terminationUnconfirmed&&!cancelled&&!timedOut,
+        toolInfrastructureSucceeded:!terminationUnconfirmed,
+        processOutcome:terminationUnconfirmed?'uncertain':cancelled?'cancelled':timedOut?'timed_out':exitCode===0?'success':'nonzero_exit',
         terminationState:managedTerminationState(cancelled||timedOut,!terminationUnconfirmed),
         environmentPolicy:commandEnvironmentPolicy(),
         platform:process.platform,shell:shellPath,configuredShell,

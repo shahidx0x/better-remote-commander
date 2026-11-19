@@ -123,9 +123,24 @@ test('list_directory output matches a sequential walk', async () => {
     return out;
   }
   const target = path.join(repo, 'packages');
-  const expected = (await ref(target, 3)).join('\n');
-  const t = out(await callTool('list_directory', { path: target, depth: 3 }));
-  assert.ok(t.includes(expected), 'same lines in the same order');
+  // Streaming directory pages are live filesystem views, not one giant
+  // snapshot or a guaranteed sorted order. Check complete top-level coverage
+  // without assuming a fixed OS enumeration order.
+  const expected = (await ref(target,1)).sort();
+  const actual = [];
+  let offset=0,pages=0;
+  for(;;){
+    const result=await callTool('list_directory',{path:target,depth:1,offset,limit:50});
+    assert.notEqual(result.isError,true,out(result));
+    const page=result.structuredContent?.directory;
+    assert.ok(page);
+    actual.push(...page.entries);
+    assert.ok(++pages<100,'pagination cursor must make progress');
+    if(!page.hasMore)break;
+    assert.ok(page.nextOffset>offset);
+    offset=page.nextOffset;
+  }
+  assert.deepEqual(actual.sort(),expected,'paginated listings include each top-level entry');
 });
 
 test('missing edit text returns quickly without CPU-heavy fuzzy scanning', async () => {

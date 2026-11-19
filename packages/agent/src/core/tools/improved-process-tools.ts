@@ -1,4 +1,5 @@
 import { terminalManager, MAX_BUFFERED_OUTPUT_CHARS } from '../terminal-manager.js';
+import {loadTerminalSnapshot,terminalJournalStatus} from '../../runtime/terminal-journal.js';
 import { commandManager } from '../command-manager.js';
 import { StartProcessArgsSchema, ReadProcessOutputArgsSchema, InteractWithProcessArgsSchema, ForceTerminateArgsSchema, ListSessionsArgsSchema } from './schemas.js';
 import { capture } from "../utils/capture.js";
@@ -229,13 +230,17 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
   }
 
   const latestSession = terminalManager.getSession(result.pid);
+  const stableSessionId=terminalManager.getSessionId(result.pid);
   const dropped = latestSession?.evictedLines ??
     terminalManager.listCompletedSessions().find(s => s.pid === result.pid)?.evictedLines ?? 0;
   return {
     content: [{
       type: "text",
-      text: `Process started with PID ${result.pid} (shell: ${shellUsed})\n${shellChoice.reason?'Shell selection: '+shellChoice.reason+'\n':''}Initial output:\n${result.output}${dropped>0?'\n[EARLIER OUTPUT DISCARDED: '+dropped+' lines; redirect the command to a file if full logs are needed.]':''}${statusMessage}${timingMessage}`
+      text: `Process started with PID ${result.pid} (session: ${stableSessionId??'unavailable'}, shell: ${shellUsed})\n${shellChoice.reason?'Shell selection: '+shellChoice.reason+'\n':''}Initial output:\n${result.output}${dropped>0?'\n[EARLIER OUTPUT DISCARDED: '+dropped+' lines; redirect the command to a file if full logs are needed.]':''}${statusMessage}${timingMessage}`
     }],
+    structuredContent:{pid:result.pid,sessionId:stableSessionId,
+      outputBufferBytes:500*1024,terminalJournal:terminalJournalStatus(),
+      processStarted:true,processMayStillBeRunning:result.isBlocked}
   };
 }
 
@@ -270,6 +275,28 @@ function formatTimingInfo(timing: any): string {
  * Read output from a running process with file-like pagination
  * Supports offset/length parameters for controlled reading
  */
+/** Restart-aware terminal output. Encrypted snapshots carry no command or
+ * arguments, never reattach by reused PID and never replay a process.
+ */
+async function recoveredTerminalOutput(sessionId:string,cursor:number|undefined,length:number):Promise<ServerResult>{
+ const saved=await loadTerminalSnapshot(sessionId);
+ if(!saved)return {isError:true,content:[{type:'text',text:'PROCESS_SESSION_NOT_FOUND: no readable encrypted session snapshot. The process may have expired, been unpaired, or journaling was disabled. Do not replay commands automatically.'}],
+  structuredContent:{error:{code:'PROCESS_SESSION_NOT_FOUND',retryable:false},sessionId,recoveredFromDisk:false}};
+ const oldest=saved.evictedLines,requested=cursor??oldest;
+ const start=Math.max(requested,oldest),index=start-oldest;
+ const selected=saved.lines.slice(index,index+Math.max(1,Math.min(length,2000)));
+ const nextCursor=start+selected.length,hasMore=nextCursor<oldest+saved.lines.length;
+ const state=saved.state==='completed'?'completed':'outcome_uncertain';
+ const warning=state==='completed'?'[RESTORED SESSION: historical command output; the process is no longer active in this agent.]':
+  '[OUTCOME UNCERTAIN: the previous agent recorded a running/failed process, but no clean completion was confirmed. Inspect actual side effects; never automatically re-execute.]';
+ return {content:[{type:'text',text:warning+'\n'+selected.join('\n')+
+   (hasMore?'\n[MORE RESTORED OUTPUT: read_process_output({session_id:'+JSON.stringify(sessionId)+',cursor:'+nextCursor+',length:'+length+'})]':'')}],
+  structuredContent:{sessionId,pid:saved.pid,recoveredFromDisk:true,processRunning:false,
+   processState:state,exitConfirmed:state==='completed',exitCode:saved.exitCode,
+   requestedCursor:requested,oldestAvailableCursor:oldest,nextCursor,hasMore,
+   lostOutput:requested<oldest,evictedLines:oldest,
+   readCount:selected.length,bufferCapBytes:500*1024,automaticProcessRetry:false}};
+}
 export async function readProcessOutput(args: unknown): Promise<ServerResult> {
   const parsed = ReadProcessOutputArgsSchema.safeParse(args);
   if (!parsed.success) {
@@ -284,12 +311,18 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
   const defaultLength = config.fileReadLineLimit ?? 1000;
 
   const { 
-    pid, 
+    pid:requestedPid,session_id,cursor,
     timeout_ms = 5000, 
     offset = 0,                    // 0 = from last read, positive = absolute, negative = tail
     length = defaultLength,        // Default from config, same as file reading
     verbose_timing = false 
   } = parsed.data;
+  const resolvedPid=session_id?terminalManager.resolvePidBySessionId(session_id):null;
+  if(session_id && resolvedPid===null)return recoveredTerminalOutput(session_id,cursor,length);
+  if(requestedPid!==undefined&&resolvedPid!==null&&requestedPid!==resolvedPid)
+    return {isError:true,content:[{type:'text',text:'PROCESS_SESSION_MISMATCH: PID does not match the stable session ID. No output from another process was returned.'}],
+      structuredContent:{error:{code:'PROCESS_SESSION_MISMATCH',retryable:false},sessionId:session_id}};
+  const pid=resolvedPid??requestedPid??-1;
 
   // This is only the wait window for new output. It never terminates the process;
   // long builds remain alive and can be read repeatedly with offset=0 or tail reads.
@@ -300,13 +333,15 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
 
   // For active sessions with no new output yet, optionally wait for output
   const session = terminalManager.getSession(pid);
-  if (session && offset === 0) {
+  if (session && (cursor!==undefined?
+      cursor>=session.evictedLines+session.outputLines.length:offset===0)) {
     // Wait for new output to arrive (only for "new output" reads, not absolute/tail)
     const waitForOutput = (): Promise<void> => {
       return new Promise((resolve) => {
         // Check if there's already new output
         const currentLines = terminalManager.getOutputLineCount(pid) || 0;
-        if (currentLines > session.lastReadIndex) {
+        if (currentLines > (cursor===undefined?session.lastReadIndex:
+            cursor-session.evictedLines)) {
           resolve();
           return;
         }
@@ -330,7 +365,8 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
         // Poll at a modest cadence; process output is already buffered by the terminal manager.
         interval = setInterval(() => {
           const newLineCount = terminalManager.getOutputLineCount(pid) || 0;
-          if (newLineCount > session.lastReadIndex) {
+          if (newLineCount > (cursor===undefined?session.lastReadIndex:
+              cursor-session.evictedLines)) {
             resolveOnce();
           }
         }, 100);
@@ -344,7 +380,9 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
   }
 
   // Read output with pagination
-  const result = terminalManager.readOutputPaginated(pid, offset, length);
+  const result = cursor===undefined?
+    terminalManager.readOutputPaginated(pid, offset, length):
+    terminalManager.readOutputByCursor(pid,cursor,length);
   
   if (!result) {
     return {
@@ -353,8 +391,13 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
     };
   }
 
-  // Join lines back into string
+  // Join lines back into string. New cursor reads never move another reader's
+  // legacy offset=0 pointer, even after in-memory output eviction.
   const output = result.lines.join('\n');
+  const currentSessionId=terminalManager.getSessionId(pid);
+  const nextCursor=(result.evictedLines??0)+result.readFrom+result.readCount;
+  const oldestAvailableCursor=result.evictedLines??0;
+  const lostOutput=cursor!==undefined&&cursor<oldestAvailableCursor;
 
   // Generate status message similar to file reading
   let statusMessage = '';
@@ -376,6 +419,8 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
   // Surface buffer-cap eviction so the model knows the retained output is not
   // the full output and that line numbers shifted (matches the truncation
   // markers used by other tools).
+  if (lostOutput)statusMessage+='\n[LOST OUTPUT: requested cursor '+cursor+
+    ' precedes the oldest retained cursor '+oldestAvailableCursor+'. Earlier lines were evicted. No implicit replay.]';
   if (result.evictedLines && result.evictedLines > 0) {
     const capKiB = Math.round(MAX_BUFFERED_OUTPUT_CHARS / 1024);
     statusMessage += `\n[WARNING: command output exceeded the ${capKiB} KiB rolling buffer; ${result.evictedLines} oldest lines were discarded. No line-count limit is applied. To preserve full logs, redirect the command to a file. Line totals refer only to retained lines.]`;
@@ -411,6 +456,12 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
       type: "text",
       text: `${statusMessage}\n\n${responseText}${processStateMessage}${timingMessage}`
     }],
+    structuredContent:{pid,sessionId:currentSessionId,recoveredFromDisk:false,
+      processRunning:!result.isComplete,exitConfirmed:result.isComplete,
+      exitCode:result.exitCode??null,requestedCursor:cursor??null,
+      oldestAvailableCursor,nextCursor,lostOutput,evictedLines:result.evictedLines??0,
+      readCount:result.readCount,hasMore:result.remaining>0,
+      bufferCapBytes:500*1024,automaticProcessRetry:false}
   };
 }
 

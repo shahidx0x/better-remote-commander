@@ -58,7 +58,7 @@ test('bad ripgrep executable returns a classified startup failure without crashi
 test('cancelled blocking search always terminates its session before returning CANCELLED',async()=>{
   const actualRead=searchManager.readSearchResults;
   const actualWait=searchManager.waitForActivity;
-  const actualStop=searchManager.terminateSearch;
+  const actualStop=searchManager.releaseSearch;
   const controller=new AbortController();
   let forced=false,waitCalls=0,stopped=0;
   try{
@@ -76,7 +76,7 @@ test('cancelled blocking search always terminates its session before returning C
       waitCalls++;
       controller.abort(new DOMException('Cancelled by test','AbortError'));
     };
-    searchManager.terminateSearch=function(id){
+    searchManager.releaseSearch=function(id){
       stopped++;
       return actualStop.call(this,id);
     };
@@ -87,11 +87,13 @@ test('cancelled blocking search always terminates its session before returning C
     assert.equal(result.isError,true,text(result));
     assert.equal(result.structuredContent?.error?.code,'CANCELLED',text(result));
     assert.ok(waitCalls>=1,'must reach blocking wait');
-    assert.ok(stopped>=1,'must terminate the search on cancellation');
+    assert.ok(stopped>=1,'must release the cancelled search subscription');
+    await new Promise(resolve=>setTimeout(resolve,65));
+    assert.equal(searchManager.getActiveSessionCount(),0,'last subscriber cancellation stops the ripgrep worker');
   }finally{
     searchManager.readSearchResults=actualRead;
     searchManager.waitForActivity=actualWait;
-    searchManager.terminateSearch=actualStop;
+    searchManager.releaseSearch=actualStop;
   }
 });
 

@@ -45,6 +45,8 @@ import {sourceObservationStatus} from '../runtime/source-observations.js';
 import {resultPresentationStatus} from '../runtime/result-presentation.js';
 import {commandCpuAdmission,searchIoAdmission,pluginStartupAdmission} from '../runtime/resource-admission.js';
 import {terminalManager} from '../core/terminal-manager.js';
+import {missingFileResponse} from '../runtime/path-diagnostics.js';
+import {terminalJournalStatus} from '../runtime/terminal-journal.js';
 import {runningPluginIds} from '../plugins/host.js';
 import {semanticTsManager} from '../runtime/semantic-ts-host.js';
 import {lazyLanguageServer} from '../runtime/lazy-lsp.js';
@@ -73,7 +75,11 @@ export async function snapshot(file:string, offset=0, length=200, charOffset?:nu
       note:'This line range exceeded the character budget. Use charOffset/charLength and nextCharOffset to retrieve it completely.'}:
       hasMore?{tool:'read_code_file',args:{path:file,offset:offset+length,length}}:null};
 }
-async function readCodeFile(raw:unknown):Promise<ToolResult> { const a=SnapshotSchema.parse(raw);return result(await snapshot(a.path,a.offset,a.length,a.charOffset,a.charLength)); }
+async function readCodeFile(raw:unknown):Promise<ToolResult> {
+ const a=SnapshotSchema.parse(raw);
+ try{return result(await snapshot(a.path,a.offset,a.length,a.charOffset,a.charLength));}
+ catch(e){if((e as NodeJS.ErrnoException)?.code==='ENOENT')return missingFileResponse(a.path);throw e;}
+}
 
 async function readCodeContext(raw:unknown):Promise<ToolResult> {
   const a=ContextSchema.parse(raw);
@@ -110,7 +116,7 @@ async function readCodeContext(raw:unknown):Promise<ToolResult> {
       if(budget<=0)break;
     }
     return result({files,matches:found.totalMatches,incomplete:found.wasIncomplete || !found.isComplete,truncated:fileCapReached || budget<=0 || grouped.size>files.length,note:'Line numbers are one-based. Files are read fresh after searching; hashes describe returned file snapshots, not an atomic project snapshot.'});
-  } finally { searchManager.terminateSearch(started.sessionId); }
+  } finally { searchManager.releaseSearch(started.sessionId); }
 }
 
 async function editFiles(raw:unknown):Promise<ToolResult> {
@@ -191,7 +197,9 @@ export const CODING_TOOL_HANDLERS:Record<string,(args:Record<string,unknown>)=>P
     if(a.lookupCallId)return result({...await lookupCallOutcome(a.lookupCallId)});
     return result({callOutcomes:callOutcomeStatus(),operations:operationStatus(),latency:activity.metrics(),executionKernel:executionKernelStatus(),loopGuard:repeatFailureGuard.status(),workerPlanCheckpoints:workerPlanCheckpointStatus(),commandEnvironment:commandEnvironmentStatus(),sourceObservations:sourceObservationStatus(),resultPresentation:resultPresentationStatus(),responseWire:resultFrameTelemetry(),resourceLanes:{cpu:commandCpuAdmission.status(),searchIo:searchIoAdmission.status(),pluginStartup:pluginStartupAdmission.status()},commandCpuBudget:commandCpuAdmission.status(),
     managedActivity:{terminalSessions:terminalManager.listActiveSessions().length,
-      ripgrepProcesses:searchManager.getActiveSessionCount(),parserWorkers:codeCacheStatus().parser.workers,
+      ripgrepProcesses:searchManager.getActiveSessionCount(),
+      searchDedup:searchManager.dedupStatus(),
+      terminalJournal:terminalJournalStatus(),parserWorkers:codeCacheStatus().parser.workers,
       semanticWorker:semanticTsManager.status().activeProcess?1:0,
       polyglotLanguageServer:lazyLanguageServer.status(),pluginConnections:runningPluginIds().length,
       ownedChildLifecycle:managedChildStatus(),managedSpawn:managedSpawnStatus(),operationalRetention:operationalRetentionStatus(),

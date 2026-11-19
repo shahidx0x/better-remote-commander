@@ -72,13 +72,14 @@ test('queued searches never spawn more than the configured two workers',async()=
   const pending=Array.from({length:6},(_,i)=>
     manager.startSearch({...args,pattern:i%2?'two':'needle'}));
   await new Promise(resolve=>setTimeout(resolve,25));
-  assert.equal(manager.slotWaiters.length,6);
+  assert.equal(manager.slotWaiters.length,2,'six equal searches coalesce into two queued ripgrep workers');
   assert.equal(manager.getActiveSessionCount(),2);
   manager.sessions.delete('occupied1');
   manager.sessions.delete('occupied2');
   manager.grantSearchSlots();
   const sessions=await Promise.all(pending);
   assert.equal(sessions.length,6);
-  assert.equal(new Set(sessions.map(s=>s.sessionId)).size,6);
+  assert.equal(new Set(sessions.map(s=>s.sessionId)).size,2);
+  assert.ok(manager.dedupStatus().coalescedRequests>=4);
   assert.ok(manager.getActiveSessionCount()<=2);
 });

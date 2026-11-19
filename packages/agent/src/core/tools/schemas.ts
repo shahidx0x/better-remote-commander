@@ -35,12 +35,15 @@ export const StartProcessArgsSchema = z.object({
 });
 
 export const ReadProcessOutputArgsSchema = z.object({
-  pid: z.number(),
+  pid: z.number().int().optional(),
+  session_id:z.string().uuid().optional().describe('Stable start_process session ID, recoverable across agent restarts when paired encrypted journaling is enabled.'),
+  cursor:z.number().int().min(0).optional().describe('Absolute output line cursor, independent of the legacy offset=0 read pointer. Reports lostOutput when older lines were evicted.'),
   timeout_ms: z.number().optional(),
   offset: z.number().optional(),   // Line offset: 0=from last read, positive=absolute, negative=tail
   length: z.number().optional(),   // Max lines to return (default from config.fileReadLineLimit)
   verbose_timing: z.boolean().optional(),
-});
+}).refine(a=>a.pid!==undefined||!!a.session_id,
+  {message:'Specify pid or session_id to read process output.'});
 
 export const ForceTerminateArgsSchema = z.object({
   pid: z.number(),
@@ -87,6 +90,7 @@ export const WriteFileArgsSchema = z.object({
   path: z.string(),
   content: z.string(),
   mode: z.enum(['rewrite', 'append']).default('rewrite'),
+  append_id:z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/).optional().describe('Stable 16-128 character operation ID for crash-reconciled, idempotent append. Requires mode=append; bounded to an 8 MiB resulting file.'),
   // 'ui' when fired by the file-preview UI, else 'llm'. 'ui' calls are
   // excluded from tool-call telemetry; see isUiOriginCall in server.ts.
   origin: z.enum(['ui', 'llm']).optional(),
@@ -137,7 +141,9 @@ export const CreateDirectoryArgsSchema = z.object({
 
 export const ListDirectoryArgsSchema = z.object({
   path: z.string(),
-  depth: z.number().optional().default(2),
+  depth: z.number().int().min(1).max(5).optional().default(2),
+  offset:z.number().int().min(0).max(50000).optional().default(0),
+  limit:z.number().int().min(1).max(500).optional().default(200),
   // 'ui' when fired by the file-preview UI, else 'llm'. 'ui' calls are
   // excluded from tool-call telemetry; see isUiOriginCall in server.ts.
   origin: z.enum(['ui', 'llm']).optional(),

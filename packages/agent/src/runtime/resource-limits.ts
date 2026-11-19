@@ -1,5 +1,6 @@
 /** Idle cache and bounded owned-state maintenance. Never scans/deletes user projects, plugin installs, pairing credentials or relay data. */
 import { codeGraph } from './code-graph.js';
+import os from 'node:os';
 import { workerCoordinator } from './worker-coordination.js';
 import { projectIndex } from './project-index.js';
 import { codeCacheStatus, pruneCodeCache } from './code-structure.js';
@@ -12,7 +13,9 @@ import {sharedProjectManifest} from './project-manifest.js';
 import {sweepOperationalRetention,operationalRetentionStatus} from './operational-retention.js';
 export const CONTEXT_CACHE_BUDGET = 128 * 1024 * 1024;
 let timer: NodeJS.Timeout | undefined, idleTimer: NodeJS.Timeout | undefined;
-let lastCheck = 0, evictions = 0, cleanupErrors = 0, activeCalls = 0;
+let lastCheck = 0, evictions = 0, pressureEvictions=0, cleanupErrors = 0, activeCalls = 0;
+const PRESSURE_RSS=320*1024*1024,LOW_FREE_BYTES=256*1024*1024;
+const inMemoryPressure=()=>process.memoryUsage().rss>PRESSURE_RSS || os.freemem()<LOW_FREE_BYTES;
 // Keep a short-lived working set for fast repeated edits/navigation. Release
 // idle worker/cache references after a minute; under memory pressure prune sooner.
 const IDLE_RELEASE_MS = 60_000;
@@ -52,7 +55,9 @@ export function cacheStatus() {
         resourceProfile: hardware.profile, resourceProfileSelection: hardware.selection, resourceProfileReason: hardware.reason,
         hardware: { cpuParallelism: hardware.cpuParallelism, totalMemoryBytes: hardware.totalMemoryBytes, freeMemoryBytesAtStartup: hardware.freeMemoryBytes,
             maxConcurrentJobs: hardware.maxConcurrentJobs, maxToolConcurrency: hardware.maxToolConcurrency, parserWorkers: hardware.parserWorkers },
-        lowResourceMode: false, activeToolCalls: activeCalls,
+        lowResourceMode:inMemoryPressure(),physicalFreeBytesNow:os.freemem(),
+        memoryPressureRssBytes:PRESSURE_RSS,lowFreeMemoryThresholdBytes:LOW_FREE_BYTES,
+        pressureEvictions,activeToolCalls: activeCalls,
         semanticNavigation:semanticTsManager.status(),
         sharedProjectManifest:sharedProjectManifest.status(),
         operationalRetention:operationalRetentionStatus(),
@@ -72,7 +77,13 @@ export function reclaimCaches(now = Date.now(), force = false) {
         releaseIdleParserWorkers();
     }
     // Soft pressure response is not a promise that RSS equals the sum of cache sizes.
-    if (process.memoryUsage().rss > 192 * 1024 * 1024) {
+    if(inMemoryPressure()&&activeCalls===0){
+        pressureEvictions++;
+        evictions += codeGraph.pruneIdle(now,true)+projectIndex.pruneIdle(now,true)+
+            pruneCodeCache(now,true)+sharedProjectManifest.pruneIdle(now,true);
+        releaseIdleParserWorkers();
+        semanticTsManager.releaseIdle(now);
+    }else if (process.memoryUsage().rss > 192 * 1024 * 1024) {
         evictions += codeGraph.pruneIdle(now, false, 60000) + projectIndex.pruneIdle(now, false, 60000) + pruneCodeCache(now, false, 60000);
         releaseIdleParserWorkers();
     }

@@ -176,8 +176,8 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   },
   apply_patch: {
     use: 'Apply a multi-hunk context patch to existing source files when exact old_string edits are error-prone or span several lines.',
-    instead: 'For simple one-file substitutions use edit_block; for explicit hash-based replacements use edit_files. To create/delete/move use write_file/delete_file/move_file.',
-    caveat: 'Update File + @@ hunks only. Every whole-line context must match uniquely before any file is written; atomic per-file commit with best-effort rollback, not crash-atomic.',
+    instead: 'For simple one-file substitutions use edit_block; for strict per-file hashes use edit_files. apply_patch handles Add/Delete/Move and existing-source Update with exact context.',
+    caveat: 'Add/Delete/Move/Update patches preflight all paths and source hashes. Update requires exact unique context. Per-file commit with best-effort rollback, not crash-atomic across files.',
   },
   edit_files: {
     use: 'Make hash-checked exact replacements in several UTF-8 files, validating all before publication.',
@@ -417,14 +417,14 @@ export const TOOL_WORKFLOWS: Record<string,string> = {
   read_multiple_files: 'START: paths[] for known files, or files[{path,offset,length}] for precise ranges. NEXT: batch.continuations, or smaller batches if the shared reply budget is reached. Do not treat a truncated batch as the complete files.',
   read_code_file: 'START: path,offset,length for code + SHA-256; if a single line is oversized use charOffset/charLength, then follow nextCharOffset. Keep the full-file hash for edits.',
   read_code_ranges: 'START: multiple exact known line ranges; check returned hashes. NEXT: narrow or paginate if snippets are truncated.',
-  write_file: 'START: mode=rewrite for a new file; explicit mode=append for subsequent chunks (or mode=rewrite for deliberate replacement). NEXT: if WRITE_*_LIMIT, nothing changed: split. If SUCCESS, only that chunk completed. If transport outcome is uncertain, inspect file/hash BEFORE retrying. Never append the same chunk twice. Optional strict source mode requires expected_sha256 for existing code/config files.',
+  write_file: 'START: mode=rewrite for new files; mode=append for chunks. For durable duplicate-safe append provide a stable append_id (16-128 chars), optionally expected_sha256; max 8 MiB resulting file. Replaying the SAME ID safely reports alreadyApplied, but a changed file returns APPEND_OUTCOME_UNCERTAIN, never blind replay. Ordinary legacy append without append_id is NOT idempotent. Chunk limit 1 MiB / 2000 lines. Strict source mode uses expected_sha256 for other source mutations.',
   edit_block: 'START: read the file and provide exact unique old_string/new_string; replace_all:true explicitly authorizes all exact occurrences. On EDIT_TEXT_NOT_FOUND inspect candidateLines/sourceSha256/next read range. Prefer expected_sha256 or expected replacement counts. NEXT: inspect changed content/diff; on conflict reread source, never force an uncertain edit.',
   workspace_batch: 'START: hash-checked changes with dryRun=true; inspect validation. APPLY: dryRun=false only with user authorization. NEXT: inspect per-file hashes and actual check results. Rollback is best effort; never replay an uncertain commit.',
   batch_tools: 'START: group INDEPENDENT reads in mode=auto; use maxChars. Writes are ordered barriers; a prior successful write is not rolled back if a later step fails. NEXT: read skipped/truncated results separately.',
-  apply_patch: 'START: cwd (project root) + *** Begin Patch/Update File/@@ context hunks. Preview with dryRun=true when uncertain. NEXT: inspect validated hashes and run actual checks; creates/deletes/moves are deliberately separate tools.',
+  apply_patch: 'START: cwd root + *** Begin Patch and Update/Add/Delete/Move File sections. Update uses @@ unique whole-line context; Add has + lines, Move uses source -> destination or Update File + Move to. Preview dryRun=true. All paths and hashes preflighted; rollback best-effort, no cross-file crash atomicity.',
   run_command: 'START: prefer program + literal args + absolute cwd for Git/Node/Python/dotnet/rg (no shell quoting); command + shell is for scripts/pipelines. Windows uses the configured shell (often cmd.exe); PowerShell 5.1 cannot parse &&/||. Safe native chains auto-select cmd.exe when PowerShell 5.1 was selected implicitly; for CMD syntax pass shell:"cmd.exe", and raw:true for diagnostics. NEXT: inspect structuredContent.exitCode/error.code/recovery; COMMAND_FAILED is a real nonzero exit, TIMEOUT exceeded execution time, SHELL_SYNTAX changed nothing. Never retry identically without correction. Use start_process for interactive/long-running work.',
-  start_process: 'START: long-running/interactive command. Returned PID means STARTED, not successful. NEXT: read_process_output, then interact_with_process if waiting for input; inspect final exit code.',
-  read_process_output: 'START: known PID, offset=0 for new output; positive absolute offset or negative tail. NEXT: follow remaining output, or stop polling when process has exited.',
+  start_process: 'START: long-running/interactive command. Returned PID + stable sessionId means STARTED, not successful. A paired device encrypts bounded output snapshots locally for 24h; no automatic process replay after restart. NEXT: read_process_output using session_id + cursor or PID, then interact_with_process only for a still-active PID.',
+  read_process_output: 'START: use session_id and absolute cursor=0 for independent resumable line output; follow returned nextCursor. Older lines over 500 KiB are evicted with lostOutput=true, and restored snapshots are historical (never reattach/execute). Legacy PID with offset=0/negative tail remains compatible; inspect exitConfirmed and uncertainty after restart.',
   run_parallel: 'START: independent operations with max_concurrency=3, or add depends_on:[0,1] using earlier zero-based call indices. A dependent step runs only after predecessors succeed. NEXT: wait_jobs({group}) or get_job(id); never replay a completed mutation to retrieve output.',
   spawn_job: 'START: lengthy job returning an ID immediately. NEXT: wait_jobs({ids}) or get_job({id}); do not confuse started with succeeded.',
   wait_jobs: 'START: known group or IDs. NEXT: for omitted output call again on the same group or get_job(id); never spawn duplicate jobs because output is truncated.',
@@ -437,7 +437,7 @@ export const TOOL_WORKFLOWS: Record<string,string> = {
 };
 // Tool schemas remain available in full; route text stays complete, while
 // verbose details receive a smaller bounded token/metadata budget.
-export const MAX_DISCOVERY_DESCRIPTION_CHARS=912;
+export const MAX_DISCOVERY_DESCRIPTION_CHARS=870;
 /** Prefix use / avoid / next-step rules. Never mutate tool schemas, names or permissions. */
 export function addToolChoice<T extends { name: string; description: string }>(tool: T): T {
   const rule = TOOL_CHOICES[tool.name];

@@ -44,7 +44,7 @@ test('second-file context mismatch fails whole patch before writing any file',as
  assert.equal(await fs.readFile(a,'utf8'),'alpha\n');
  assert.equal(await fs.readFile(b,'utf8'),'beta\n');
 });
-test('ambiguous same-line context fails closed, and traversal/deletion are rejected',async()=>{
+test('ambiguous whole-line context and traversal fail closed, while explicit deletion works',async()=>{
  const a=file('ambiguous.txt');
  await fs.writeFile(a,'same\nsame\n');
  const ambiguous=await callTool('apply_patch',{cwd:root,input:patch(
@@ -58,10 +58,9 @@ test('ambiguous same-line context fails closed, and traversal/deletion are rejec
  )});
  assert.equal(traversal.isError,true);
  assert.equal(traversal.structuredContent.error.code,'PATCH_SYNTAX');
- const unsupported=await callTool('apply_patch',{cwd:root,input:patch('*** Delete File: ambiguous.txt')});
- assert.equal(unsupported.isError,true);
- assert.equal(unsupported.structuredContent.error.code,'PATCH_SYNTAX');
- assert.equal(await fs.readFile(a,'utf8'),'same\nsame\n');
+ const deletion=await callTool('apply_patch',{cwd:root,input:patch('*** Delete File: ambiguous.txt')});
+ assert.notEqual(deletion.isError,true,JSON.stringify(deletion));
+ await assert.rejects(fs.stat(a),/ENOENT/);
 });
 test('CRLF edits retain line endings and exact whole-line matching',async()=>{
  const p=file('windows.cs');await fs.writeFile(p,'class A {\r\n  int Value = 5;\r\n}\r\n');

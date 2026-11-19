@@ -6,7 +6,7 @@ import { validatePath } from './tools/filesystem.js';
 import { capture } from './utils/capture.js';
 import { getRipgrepPath } from './utils/ripgrep-resolver.js';
 import { isExcelFile } from './utils/files/index.js';
-import { getCallContext, checkCancelled } from '../context.js';
+import { getCallContext, checkCancelled, withCallContext } from '../context.js';
 import {searchIoAdmission} from '../runtime/resource-admission.js';
 import {observeManagedChild,stopManagedChild} from '../runtime/process-termination.js';
 import {spawnManaged} from '../runtime/managed-spawn.js';
@@ -25,6 +25,9 @@ export interface SearchResult {
 const MAX_LINE_TEXT = 400;
 // Keep search fan-out and retained results bounded in the Normal profile.
 const MAX_ACTIVE_SEARCHES = 2;
+// Under severe process RSS pressure, admit only one NEW ripgrep worker;
+// never terminate an already running search merely due to memory telemetry.
+const activeSearchLimit=()=>process.memoryUsage().rss>384*1024*1024?1:MAX_ACTIVE_SEARCHES;
 const MAX_QUEUED_SEARCHES = 16;
 const MAX_SEARCH_SLOT_WAIT_MS = 10_000;
 type SearchSlotWaiter = {
@@ -84,10 +87,18 @@ export interface SearchSessionOptions {
   // race past the two-worker cap. Queued calls don't start any processes.
   private pendingStarts = 0;
   private slotWaiters: SearchSlotWaiter[] = [];
+  private readonly shared=new Map<string,{
+    controller:AbortController;promise:Promise<Awaited<ReturnType<SearchManager['startSearchUnshared']>>>;
+    sessionId?:string;subscribers:Set<{signal?:AbortSignal;onAbort?:()=>void}>;
+  }>();
+  private sharedHits=0;
+  dedupStatus(){return {coalescedRequests:this.sharedHits,activeKeys:this.shared.size,
+    maxActiveSearches:MAX_ACTIVE_SEARCHES,currentlyAdmittedSearchLimit:activeSearchLimit(),
+    ramPressureReducesNewConcurrency:true};}
 
   private grantSearchSlots(): void {
     while (this.slotWaiters.length &&
-        this.getActiveSessionCount() + this.pendingStarts < MAX_ACTIVE_SEARCHES) {
+        this.getActiveSessionCount() + this.pendingStarts < activeSearchLimit()) {
       const next = this.slotWaiters.shift()!;
       if (next.timer) clearTimeout(next.timer);
       if (next.signal && next.abort) next.signal.removeEventListener('abort', next.abort);
@@ -105,7 +116,7 @@ export interface SearchSessionOptions {
     const signal = getCallContext()?.signal;
     checkCancelled();
     if (!this.slotWaiters.length &&
-        this.getActiveSessionCount() + this.pendingStarts < MAX_ACTIVE_SEARCHES) {
+        this.getActiveSessionCount() + this.pendingStarts < activeSearchLimit()) {
       this.pendingStarts++;
       return () => this.releaseStartSlot();
     }
@@ -142,7 +153,75 @@ export interface SearchSessionOptions {
    * Returns immediately with initial state and results
    */
 
-  async startSearch(options: SearchSessionOptions): Promise<{
+  /** Identical searches share one bounded ripgrep worker, including while it
+   * is waiting for an admission permit. Result sharing is read-only.
+   * Independent caller cancellations are reference-counted: cancelling one
+   * subscriber never terminates a search still needed by another.
+   */
+  async startSearch(options:SearchSessionOptions){
+    checkCancelled();
+    const root=await validatePath(options.rootPath);
+    const norm={...options,rootPath:root,maxResults:Math.min(10000,Math.max(1,options.maxResults??1000))};
+    const key=JSON.stringify([root,norm.pattern,norm.searchType,norm.filePattern??null,
+      norm.ignoreCase??null,norm.maxResults,norm.includeHidden??false,
+      norm.contextLines??null,norm.timeout??null,norm.earlyTermination??false,
+      norm.literalSearch??false,norm.skipInitialWait??false]);
+    type Shared=NonNullable<ReturnType<typeof this.shared.get>>;
+    const cleanup=(entry:Shared)=>{
+      if(this.shared.get(key)===entry)this.shared.delete(key);
+      for(const sub of entry.subscribers)
+        if(sub.signal&&sub.onAbort)sub.signal.removeEventListener('abort',sub.onAbort);
+      entry.subscribers.clear();
+    };
+    const subscribe=(entry:Shared)=>{
+      const signal=getCallContext()?.signal;
+      const sub:{signal?:AbortSignal;onAbort?:()=>void}={signal};
+      entry.subscribers.add(sub);
+      if(signal){
+        const abort=()=>{
+          entry.subscribers.delete(sub);
+          signal.removeEventListener('abort',abort);
+          if(!entry.subscribers.size)entry.controller.abort(signal.reason);
+        };
+        sub.onAbort=abort;
+        signal.addEventListener('abort',abort,{once:true});
+        if(signal.aborted)abort();
+      }
+    };
+    let entry=this.shared.get(key);
+    if(entry&&!entry.controller.signal.aborted){
+      const live=entry.sessionId?this.sessions.get(entry.sessionId):undefined;
+      if(!entry.sessionId||live&&!live.isComplete){
+        this.sharedHits++;
+        subscribe(entry);
+        if(live)return {sessionId:live.id,isComplete:false,isError:live.isError,
+          results:live.results.slice(0,Math.min(norm.maxResults,100)),
+          totalResults:live.totalMatches,runtime:Date.now()-live.startTime,coalesced:true};
+        return {...await entry.promise,coalesced:true};
+      }
+      cleanup(entry);
+    }
+    const controller=new AbortController(),ctx=getCallContext();
+    entry={controller,promise:null as unknown as Shared['promise'],
+      sessionId:undefined,subscribers:new Set()};
+    const current=entry;
+    subscribe(current);
+    const start=()=>this.startSearchUnshared(norm);
+    const promise=ctx?withCallContext({...ctx,signal:controller.signal},start):start();
+    current.promise=promise;
+    this.shared.set(key,current);
+    void promise.then(value=>{
+      current.sessionId=value.sessionId;
+      const session=this.sessions.get(value.sessionId);
+      if(session&&!session.isComplete){
+        session.process.once('close',()=>cleanup(current));
+        session.process.once('error',()=>cleanup(current));
+      }else cleanup(current);
+    }).catch(()=>cleanup(current));
+    return promise;
+  }
+
+  private async startSearchUnshared(options: SearchSessionOptions): Promise<{
     sessionId: string;
     isComplete: boolean;
     isError: boolean;
@@ -445,6 +524,27 @@ export interface SearchSessionOptions {
       stopReason: session.stopReason,
       wasIncomplete: session.wasIncomplete
     };
+  }
+
+  /** Release an internal search consumer. Unlike force termination, the
+   * final consumer's release stops the worker, but releasing one of multiple
+   * coalesced readers must not cancel the other readers' work.
+   */
+  releaseSearch(sessionId:string):boolean{
+    for(const entry of this.shared.values()){
+      if(entry.sessionId!==sessionId)continue;
+      const signal=getCallContext()?.signal;
+      let selected=[...entry.subscribers].find(sub=>sub.signal===signal);
+      if(!selected)selected=[...entry.subscribers][0];
+      if(selected){
+        if(selected.signal&&selected.onAbort)selected.signal.removeEventListener('abort',selected.onAbort);
+        entry.subscribers.delete(selected);
+      }
+      if(entry.subscribers.size>0)return true;
+      entry.controller.abort(signal?.reason);
+      return true;
+    }
+    return this.terminateSearch(sessionId);
   }
 
   /**

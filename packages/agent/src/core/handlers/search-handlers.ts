@@ -161,17 +161,17 @@ async function runBlockingSearch(args: StartSearchArgs,allowLiteralFallback=fals
   } catch (error) {
     // A cancelled/failed blocking request must release its ripgrep process.
     // Previously this path bypassed terminateSearch and could hold a worker.
-    searchManager.terminateSearch(sessionId);
+    searchManager.releaseSearch(sessionId);
     throw error;
   }
-  if (stoppedReason !== 'complete') searchManager.terminateSearch(sessionId);
+  if (stoppedReason !== 'complete') searchManager.releaseSearch(sessionId);
 
   const all = searchManager.readSearchResults(sessionId, 0, Number.MAX_SAFE_INTEGER);
   if (all.stopReason === 'limit') stoppedReason = 'cap';
   if (all.stopReason === 'timeout') stoppedReason = 'timeout';
   if (all.isError && all.totalResults === 0 && all.error?.trim()) {
     if(allowLiteralFallback && !args.literalSearch && searchErrorCode(all.error)==='SEARCH_INVALID_PATTERN'){
-      searchManager.terminateSearch(sessionId);
+      searchManager.releaseSearch(sessionId);
       return retryMalformedRegex();
     }
     return structuredSearchFailure(new AgentError(searchErrorCode(all.error),all.error),'results') as ServerResult;

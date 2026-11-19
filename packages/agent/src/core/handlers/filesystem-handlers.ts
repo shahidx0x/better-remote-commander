@@ -19,6 +19,10 @@ import { withTimeout } from '../utils/withTimeout.js';
 import { createErrorResponse } from '../error-handlers.js';
 import { configManager } from '../config-manager.js';
 import { AgentError, failure } from '../../runtime/errors.js';
+import {idempotentAppend} from '../../runtime/idempotent-append.js';
+import {listDirectoryPage} from '../../runtime/directory-page.js';
+import {missingFileResponse} from '../../runtime/path-diagnostics.js';
+import {moveFileSafely} from '../../runtime/safe-move.js';
 
 import {
     ReadFileArgsSchema,
@@ -267,12 +271,18 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
     };
 
     // Execute with timeout at the handler level
-    const result = await withTimeout(
+    let result:ServerResult|null;
+    try{result = await withTimeout(
         readFileOperation(),
         HANDLER_TIMEOUT,
         'Read file handler operation',
         null
-    );
+    );}catch(e){
+      const code=(e as NodeJS.ErrnoException)?.code;
+      const input=(args as {path?:unknown})?.path;
+      if(code==='ENOENT'&&typeof input==='string')return missingFileResponse(input);
+      throw e;
+    }
     if (result == null) {
         // Handles the impossible case where withTimeout resolves to null instead of throwing
         throw new Error('Failed to read the file');
@@ -405,6 +415,8 @@ export async function handleWriteFile(args: unknown): Promise<ServerResult> {
         const modeProvided = !!(args && typeof args === 'object' && 'mode' in args);
         const parsed = WriteFileArgsSchema.parse(args);
         const config = await configManager.getConfig();
+        if(parsed.append_id&&parsed.mode!=='append')throw new AgentError('INVALID_ARGUMENT',
+            'append_id requires mode=append. Nothing was written.');
         // Configurable per-call line limit, with a universal hard ceiling. A
         // trailing newline is not another line. Nothing is written on failure.
         const maxLines = Math.min(2000, Math.max(1, Math.trunc(config.fileWriteLineLimit ?? 1000)));
@@ -432,14 +444,21 @@ export async function handleWriteFile(args: unknown): Promise<ServerResult> {
                     ' bytes. Explicitly set mode=append or mode=rewrite. For precise edits, use edit_block or workspace_batch.');
         }
 
-        await writeFile(parsed.path, parsed.content, parsed.mode);
-        const modeMessage = parsed.mode === 'append' ? 'appended to' : 'wrote to';
+        const receipt=parsed.mode==='append'&&parsed.append_id
+            ?await idempotentAppend(parsed.path,parsed.content,parsed.append_id,parsed.expected_sha256)
+            :null;
+        if(!receipt)await writeFile(parsed.path, parsed.content, parsed.mode);
+        const modeMessage = receipt?.alreadyApplied?'previously appended to':
+            parsed.mode === 'append' ? 'appended to' : 'wrote to';
         // No duplicated file-content preview. The UI retrieves it separately.
         return { content: [{type:'text',
             text:'Successfully ' + modeMessage + ' ' + parsed.path + ' (' +
                 lineCount + ' lines, ' + bytes + ' bytes).'}],
             structuredContent:{write:{
-                path:parsed.path,mode:parsed.mode,linesWritten:lineCount,bytesWritten:bytes,
+                path:parsed.path,mode:parsed.mode,linesWritten:receipt?.alreadyApplied?0:lineCount,
+                bytesWritten:receipt?.bytesWritten??bytes,
+                ...(receipt?{appendReceipt:receipt,appendId:receipt.appendId,
+                  alreadyApplied:receipt.alreadyApplied,writeCommitted:true}:{writeCommitted:true}),
                 thisChunkComplete:true,moreChunksUnknown:true,
                 continueOnlyIfNeeded:'If more intended content remains, use mode=append with ONLY the next chunk. Do not replay this successful chunk. For existing code, verify hash/readback and use hash-checked changes. The caller decides when the complete file is finished.'
             }}
@@ -472,25 +491,27 @@ export async function handleListDirectory(args: unknown): Promise<ServerResult> 
     try {
         const startTime = Date.now();
         const parsed = ListDirectoryArgsSchema.parse(args);
-        const entries = await listDirectory(parsed.path, parsed.depth);
+        const page = await listDirectoryPage(parsed);
         const duration = Date.now() - startTime;
 
-        const resultText = entries.join('\n');
+        const resultText = page.entries.join('\n')+(page.hasMore?
+           '\n[MORE DIRECTORY ENTRIES: call list_directory({path:'+JSON.stringify(parsed.path)+
+           ',depth:'+page.depth+',offset:'+page.nextOffset+',limit:'+page.limit+'}). Directory pages are live filesystem views, not snapshots.]':'');
         const resolvedPath = resolveAbsolutePath(parsed.path);
 
         return {
             content: [{ type: "text", text: resultText }],
-            ...(parsed.origin === 'ui' ? {
-                structuredContent: {
-                    fileName: path.basename(resolvedPath),
-                    filePath: resolvedPath,
-                    fileType: 'directory' as const,
-                },
-            } : {}),
+            structuredContent:{
+                ...(parsed.origin==='ui'?{
+                   fileName:path.basename(resolvedPath),filePath:resolvedPath,fileType:'directory' as const
+                }:{}),
+                directory:{...page,durationMs:duration,
+                   next:page.hasMore?{tool:'list_directory',args:{path:parsed.path,
+                      depth:page.depth,offset:page.nextOffset,limit:page.limit}}:null}
+            },
         };
     } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        return createErrorResponse(errorMessage);
+        return failure(error);
     }
 }
 
@@ -500,13 +521,15 @@ export async function handleListDirectory(args: unknown): Promise<ServerResult> 
 export async function handleMoveFile(args: unknown): Promise<ServerResult> {
     try {
         const parsed = MoveFileArgsSchema.parse(args);
-        await moveFile(parsed.source, parsed.destination);
+        const moved=await moveFileSafely(parsed.source,parsed.destination);
         return {
-            content: [{ type: "text", text: `Successfully moved ${parsed.source} to ${parsed.destination}` }],
+            content:[{type:'text',text:'Successfully moved '+moved.source+' to '+moved.destination+
+              ' ('+moved.method+', destination verified, source removed).'}],
+            structuredContent:{move:moved,existingDestinationOverwritten:false,
+              automaticRetry:false}
         };
     } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        return createErrorResponse(errorMessage);
+        return failure(error);
     }
 }
 

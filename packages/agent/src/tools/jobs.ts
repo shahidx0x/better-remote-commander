@@ -933,7 +933,17 @@ export async function handleGetJob(args: unknown): Promise<ServerResult> {
   }
   const out = detail(j, parsed.data.output_chars,parsed.data.step_offset,parsed.data.step_limit);
   if (isFinished(j) && !out.includes('[MORE JOB STEPS:')) j.reported = true;
-  return text(out);
+  const answer=text(out);
+  const retention={enabled:spillEnabled(j.retainOutput),optInRequiredByDefault:true,
+    storedStepCount:j.results.filter(x=>!!x.spill).length,
+    retainedSteps:j.results.filter(x=>!!x.spill).map(x=>({step:x.index,bytes:x.spill!.bytes,
+      partial:x.spill!.partial})),
+    storeCommandArguments:false,automaticJobReplay:false,
+    note:'Large output retention is disabled by default unless explicitly requested or enabled in the local environment. Redaction is best effort; retained output can still contain sensitive data.'};
+  return {...answer,structuredContent:{jobId:j.id,status:j.status,steps:j.steps.length,
+    results:j.results.length,stepOffset:parsed.data.step_offset,
+    hasMoreSteps:parsed.data.step_offset+parsed.data.step_limit<j.results.length,
+    outputRetention:retention}};
 }
 
 export async function handleListJobs(args: unknown): Promise<ServerResult> {

@@ -140,16 +140,14 @@ hunk returns `sourceSha256`, bounded `candidateLines` and a
 These candidates do not authorize fuzzy writes. Office/structured-file
 handlers reject the new replace_all option.
 
-The new `apply_patch` tool accepts bounded DeepSeek/Codex-style
-`*** Begin Patch` / `*** Update File: relative/path` /
-`@@` context hunks / `*** End Patch`. **Only existing-file updates**
-are supported. A hunk must match exactly one whole-line context; every
-file/hunk is checked before any write. It reuses the existing
-`edit_files` transaction engine and worker coordination policy.
-`dryRun:true` validates without modifying files. Individual publishes
-are atomic; multi-file rollback on later failure is best effort, **not
-crash-atomic across files**. For adds/deletes/renames use file-specific
-tools. No model calls and no local shell are needed for patch application.
+`apply_patch` supports bounded DeepSeek/Codex-style `*** Begin Patch`,
+`*** Update File`, `*** Add File`, `*** Delete File`, and `*** Move File`
+sections. Updates require unique exact `@@` context hunks. All planned
+changes preflight paths, source hashes, and destination conflicts before
+writes. Per-file publication is guarded, and rollback after later failure
+is best effort — **not crash-atomic across multiple files**. `dryRun:true`
+validates without modifying files. For implementation and remaining caveats,
+see [agent-reliability-phases.md](agent-reliability-phases.md).
 
 ### Ripgrep recovery
 

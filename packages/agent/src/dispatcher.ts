@@ -201,10 +201,15 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     };
     const perform=async()=>{
       checkCancelled();
-      const freshHash=await automaticSourcePrecondition(name,args);
+      // Idempotent appends reconcile a previously completed operation before
+      // comparing the caller's original pre-write hash. Ordinary writes keep
+      // the existing optimistic hash checks and strict observation policy.
+      const replayableAppend=name==='write_file'&&args.mode==='append'&&
+        typeof args.append_id==='string';
+      const freshHash=replayableAppend?undefined:await automaticSourcePrecondition(name,args);
       if(freshHash)args={...args,expected_sha256:freshHash};
-      await requireSourceObservation(name,args);
-      if((name==='write_file'||name==='edit_block')&&args.expected_sha256!==undefined){
+      if(!replayableAppend)await requireSourceObservation(name,args);
+      if((name==='write_file'||name==='edit_block')&&!replayableAppend&&args.expected_sha256!==undefined){
         if(typeof args.expected_sha256!=='string'||!/^[a-fA-F0-9]{64}$/.test(args.expected_sha256))throw new AgentError('INVALID_ARGUMENT','expected_sha256 must be 64 hex characters.');
         const target=args.file_path??args.path;
         if(typeof target!=='string')throw new AgentError('INVALID_ARGUMENT','A file path is required for expected_sha256.');

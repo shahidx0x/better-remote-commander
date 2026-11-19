@@ -359,6 +359,22 @@ type FileResultPayloads = PdfPayload;
  * @param url URL to fetch content from
  * @returns File content or file result with metadata
  */
+async function readRemoteBounded(res:Response,max:number):Promise<Buffer>{
+ const stated=Number(res.headers.get('content-length')??0);
+ if(Number.isFinite(stated)&&stated>max)throw new Error('REMOTE_READ_LIMIT: Content-Length exceeds '+max+' bytes.');
+ if(!res.body)return Buffer.alloc(0);
+ const reader=res.body.getReader(),pieces:Buffer[]=[];
+ let total=0;
+ try{
+  for(;;){
+   const {done,value}=await reader.read();if(done)break;
+   total+=value.byteLength;
+   if(total>max){await reader.cancel().catch(()=>{});throw new Error('REMOTE_READ_LIMIT: Response exceeded '+max+' bytes.');}
+   pieces.push(Buffer.from(value));
+  }
+  return Buffer.concat(pieces,total);
+ }finally{reader.releaseLock();}
+}
 export async function readFileFromUrl(url: string): Promise<FileResult> {
     // Import the MIME type utilities
     const { isImageFile } = await import('./mime-types.js');
@@ -405,13 +421,13 @@ export async function readFileFromUrl(url: string): Promise<FileResult> {
 
         } else if (isImage) {
             // For images, convert to base64
-            const buffer = await response.arrayBuffer();
-            const content = Buffer.from(buffer).toString('base64');
+            const bytes=await readRemoteBounded(response,4*1024*1024);
+            const content = bytes.toString('base64');
 
             return { content, mimeType: contentType, metadata: { isImage } };
         } else {
             // For text content
-            const content = await response.text();
+            const content = (await readRemoteBounded(response,2*1024*1024)).toString('utf8');
 
             return { content, mimeType: contentType, metadata: { isImage } };
         }
@@ -464,8 +480,10 @@ export async function readFileFromDisk(
         fileStats = stats;
         if (stats.isDirectory()) {
             const dirListOp = async () => {
-                const entries = await listDirectory(validPath);
-                const listing = entries.join('\n');
+                const {listDirectoryPage}=await import('../../runtime/directory-page.js');
+                const page=await listDirectoryPage({path:validPath,depth:2,limit:200});
+                const listing=page.entries.join('\n')+
+                   (page.hasMore?'\n[MORE ENTRIES: use list_directory with offset='+page.nextOffset+' and limit=200]':'');
                 return {
                     content: `This is a directory, not a file. Use the list_directory tool instead of read_file for directories.\n\n${listing}`,
                     mimeType: 'text/plain',
@@ -505,7 +523,8 @@ export async function readFileFromDisk(
             fileSize: stats.size
         });
     } catch (error) {
-        console.error('error catch ' + error);
+        // Missing files are routine diagnostics, not reasons to log raw
+        // user paths, command arguments or source into agent console output.
         const errorMessage = error instanceof Error ? error.message : String(error);
         capture('server_read_file_error', { error: errorMessage, fileExtension: fileExtension });
         // If we can't stat the file, continue anyway and let the read operation handle errors

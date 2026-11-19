@@ -16,6 +16,8 @@ export interface ProcessInfo {
 
 export interface TerminalSession {
   pid: number;
+  sessionId:string;
+  lastJournalAt?:number;
   process: ChildProcess;
   outputLines: string[];      // Line-based buffer (persistent, capped — oldest lines evicted)
   lastReadIndex: number;      // Track where "new" output starts for default reads
