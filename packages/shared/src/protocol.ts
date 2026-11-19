@@ -53,10 +53,16 @@ export interface ResultMessage {
   result?: ToolResult;
   error?: { code: string; message: string };
 }
+/** Agent only lists unacknowledged operation IDs; no outputs are sent in the probe. */
+export interface ResultProbeMessage {type:'result_probe'; ids:string[]}
+/** Recovered output from encrypted local spool, NEVER another command execution. */
+export interface ResultReplayMessage {type:'result_replay'; id:string; tool:string; result:ToolResult}
 
 export interface PongMessage { type: 'pong'; ts: number }
 /** Relay confirms it durably settled an operation. Not a ChatGPT/host delivery receipt. */
 export interface ResultAckMessage { type:'result_ack'; id:string; relayPersisted:boolean; serverTime:number }
+/** Relay needs only the already-completed encrypted-spool result, not a new execution. */
+export interface ResultRequestMessage {type:'result_request'; id:string}
 
 /**
  * Plugin status report (agent -> relay). Sent after `welcome` and whenever plugin state changes
@@ -73,7 +79,7 @@ export interface PluginAdminResultMessage {
   plugin?: PluginStatusSummary;
 }
 
-export type AgentMessage = HelloMessage | ResultMessage | PongMessage | PluginsMessage | PluginAdminResultMessage;
+export type AgentMessage = HelloMessage | ResultMessage | ResultProbeMessage | ResultReplayMessage | PongMessage | PluginsMessage | PluginAdminResultMessage;
 
 /* ---------- relay -> agent ---------- */
 export interface WelcomeMessage {
@@ -90,6 +96,8 @@ export interface CallMessage {
   args: Record<string, unknown>;
   client?: { name?: string; version?: string };
   timeoutMs?: number;
+  /** A durable relay claim exists for this ID; agent should spool its result before sending. */
+  durable?:boolean;
 }
 
 export interface PingMessage { type: 'ping'; ts: number }
@@ -111,7 +119,7 @@ export interface PluginAdminMessage {
   unsetEnv?: string[];
 }
 export interface CancelMessage { type: 'cancel'; id: string; reason?: string }
-export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage | CancelMessage | PluginAdminMessage | ResultAckMessage;
+export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage | CancelMessage | PluginAdminMessage | ResultAckMessage | ResultRequestMessage;
 
 export const DEFAULTS = {
   pingIntervalMs: 20_000,

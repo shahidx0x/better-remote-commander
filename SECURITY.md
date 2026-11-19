@@ -4,7 +4,7 @@
 - The agent runs with the permissions of the user who started it. Anything that user can do, an authenticated AI client can do on that machine (within `allowedDirectories` and outside `blockedCommands`).
 - The relay never sees device tokens or user passwords in plaintext (SHA-256 / scrypt). OAuth access tokens live 1 h, refresh tokens 30 d and rotate on use.
 - Agents only make outbound connections. The relay is the only thing that needs a public endpoint.
-- Live tool activity/audit metrics remain RAM-only and contain no raw command output. Separately, the durable recovery journal persists bounded call metadata and optionally AES-256-GCM encrypted tool results for seven days. This journal is owner/client-scoped and never automatically replays mutations. See `docs/durable-operation-recovery.md`.
+- Live tool activity/audit metrics remain RAM-only and contain no raw command output. Separately, the durable recovery journal persists bounded call metadata and optionally AES-256-GCM encrypted tool results for seven days. The local agent also keeps a bounded encrypted backup until durable result acknowledgement. MongoDB multi-relay routing encrypts queued arguments, uses fenced device leases, and never automatically replays uncertain mutations. See `docs/durable-operation-recovery.md`.
 
 ## Defaults you should keep
 - `BRC_ADMIN_PASSWORD` strong; `BRC_SESSION_SECRET` random (32+ bytes)

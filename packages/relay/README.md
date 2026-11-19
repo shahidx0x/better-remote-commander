@@ -7,7 +7,7 @@ Doors it exposes:
 - `/mcp` — remote MCP (Streamable HTTP) with OAuth 2.0 (PKCE, dynamic client registration) or API-key bearer auth
 - `/admin`, `/device/verify`, `/auth/clients`, `/auth/apikeys` — browser dashboard: pair / pause / remove devices, OAuth clients, API keys, audit log
 - `/ws` — agent WebSocket (agents connect outbound; nothing to open on their side)
-- `recover_operation` — read-only MCP recovery of durably journaled operation outcomes and encrypted bounded results (same OAuth client, no replay). See [durable recovery](../../docs/durable-operation-recovery.md).
+- `recover_operation` — read-only MCP recovery of durably journaled operation outcomes and encrypted bounded results (same OAuth client, no replay). An updated local agent keeps an encrypted backup until the relay acknowledges the result; MongoDB-backed relays can coordinate multiple instances. See [durable recovery](../../docs/durable-operation-recovery.md).
 
 ## Install & run
 

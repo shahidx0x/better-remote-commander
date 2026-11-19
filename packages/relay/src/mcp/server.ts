@@ -17,6 +17,7 @@ import type { RegistryClient } from '../plugins/registry.js';
 import { SKILL_RELAY_TOOLS, handleSkillRelayTool } from './skill-tools.js';
 import type { SkillsCatalog } from '../features/skills.js';
 import { OperationJournal, RecoveryError } from './operation-journal.js';
+import type {CrossRelayCoordinator} from './cross-relay.js';
 
 export type McpContext = InvokeContext;
 
@@ -221,7 +222,7 @@ export const CORE_TOOL_ROUTING_GUIDANCE = [
   'Access controls and user approval are enforced separately from discovery. Do not fabricate file content, completion, tests, extra tools or successful edits.'
 ].join(' ');
 
-export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full', plugins?: { registry: RegistryClient; publicUrl: string; skills?: SkillsCatalog; journal?: OperationJournal },
+export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full', plugins?: { registry: RegistryClient; publicUrl: string; skills?: SkillsCatalog; journal?: OperationJournal; crossRelay?: CrossRelayCoordinator },
   onToolTraffic?: (userId:string,tool:string,args:unknown,result:unknown)=>void): Server {
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} },
     instructions: (mcpToolProfile()==='core' ? CORE_TOOL_ROUTING_GUIDANCE : TOOL_ROUTING_GUIDANCE) +
@@ -229,17 +230,18 @@ export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpConte
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { online, tools } = await liveTools(hub, store, ctx.userId);
+    const onlineCount=plugins?.crossRelay?.enabled?(await plugins.crossRelay.available(ctx.userId)).length:online;
     const selected = access === 'read' ? tools.filter(t => READ_ONLY_TOOLS.has(t.name)).map(t =>
       t.name === 'batch_tools' ? { ...t, description: 'READ-ONLY BATCH: all nested tools must be permitted reads. ' + t.description,
         annotations: { ...t.annotations, readOnlyHint: true, destructiveHint: false } } : t) : tools;
-    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.` }, ...(plugins?.journal?[RECOVER_OPERATION_TOOL]:[]), ...(plugins ? PLUGIN_RELAY_TOOLS.filter(t => access !== 'read' || t.name === 'search_mcp_registry') : []), ...(plugins?.skills ? SKILL_RELAY_TOOLS.filter(t => access !== 'read' || t.name !== 'request_skill_install') : []), ...selected] };
+    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${onlineCount} device(s) currently online.` }, ...(plugins?.journal?[RECOVER_OPERATION_TOOL]:[]), ...(plugins ? PLUGIN_RELAY_TOOLS.filter(t => access !== 'read' || t.name === 'search_mcp_registry') : []), ...(plugins?.skills ? SKILL_RELAY_TOOLS.filter(t => access !== 'read' || t.name !== 'request_skill_install') : []), ...selected] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
     const execute = async () => {
     if (name === 'list_devices') {
-      return { content: [{ type: 'text', text: JSON.stringify({ ...await connectionStatus(hub, store, ctx.userId), relayInstance: hub.instanceId }, null, 2) }] };
+      return { content: [{ type: 'text', text: JSON.stringify({ ...await connectionStatus(hub, store, ctx.userId, plugins?.crossRelay), relayInstance: hub.instanceId }, null, 2) }] };
     }
     if(name==='recover_operation'&&plugins?.journal){
       try{
@@ -262,7 +264,7 @@ export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpConte
       const pluginResult = await handlePluginRelayTool({ hub, store, registry: plugins.registry, publicUrl: plugins.publicUrl }, ctx, name, args as Record<string, unknown> | undefined);
       if (pluginResult) return pluginResult;
     }
-    const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined, {signal:extra.signal,journal:plugins?.journal,readOnly:readOnlyToolAllowed(name,args)});
+    const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined, {signal:extra.signal,journal:plugins?.journal,readOnly:readOnlyToolAllowed(name,args),crossRelay:plugins?.crossRelay});
     if (!out.ok) return { content: [{ type: 'text', text: out.message }], isError: true,
       ...(out.operationId?{structuredContent:{operationId:out.operationId,
         recovery:{tool:'recover_operation',args:{operationId:out.operationId}},automaticReplay:false}}:{}) };

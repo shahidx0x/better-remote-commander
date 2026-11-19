@@ -40,6 +40,7 @@ import { registerSkillsRoutes } from './features/skills-routes.js';
 import { validateUsageReport, usageView, type UsagePeriod } from './features/usage.js';
 import { McpTrafficEstimator } from './features/mcp-estimates.js';
 import { OperationJournal } from './mcp/operation-journal.js';
+import { CrossRelayCoordinator } from './mcp/cross-relay.js';
 import { dashboardPage } from './pages/dashboard.js';
 
 export interface RelayConfig {
@@ -90,6 +91,30 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   // Adds no new credentials or OAuth client IDs. Metadata is always durable;
   // encrypted payload retention uses the existing stable session secret.
   const operationJournal = new OperationJournal(store,cfg.sessionSecret);
+  const crossRelay=store instanceof MongoStore?new CrossRelayCoordinator(hub,store,operationJournal,cfg.sessionSecret,log):undefined;
+  crossRelay?.start();
+  // Authenticated device reconciliation. Only accept completed results for
+  // already-claimed operations owned by this device and account. There is
+  // never a call dispatch or shell execution in these handlers.
+  hub.onResultProbe=async(ownerId,deviceId,ids)=>{
+    const ack:string[]=[],request:string[]=[];
+    for(const id of ids){
+      const row=await store.getOperation(id);
+      if(!row||row.user_id!==ownerId||row.device_id!==deviceId)continue;
+      if(row.state==='settled'&&row.encrypted_result)ack.push(id);
+      else request.push(id);
+    }
+    return {ack,request};
+  };
+  hub.onResultReplay=async(ownerId,deviceId,id,tool,result)=>{
+    const row=await store.getOperation(id);
+    if(!row||row.user_id!==ownerId||row.device_id!==deviceId||row.tool!==tool)return false;
+    if(row.state==='settled'&&row.encrypted_result)return true;
+    // A late original result can fill a previously uncertain or metadata-only
+    // receipt. Same-ID, same-result hashes are enforced by the store.
+    const stored=await operationJournal.settle(row,result);
+    return stored.resultStored;
+  };
   const registry = RegistryClient.fromEnv();
   const skills = new SkillsCatalog();
   const mcpEstimates = new McpTrafficEstimator(store, log);
@@ -243,6 +268,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
     res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl,
       mcpTools: BUNDLED_AGENT_TOOL_CATALOG.filter(t=>exposeMcpAgentTool(t.name)).length + 2 + PLUGIN_RELAY_TOOLS.length + SKILL_RELAY_TOOLS.length,
       operationRecovery:operationJournal.status(),
+      multiRelayRouting:crossRelay?.status()??{enabled:false,mode:'single-instance'},
       mcpToolProfile: mcpToolProfile(),
       storage: cfg.mongoUri ? 'mongodb' : 'sqlite', relayInstance: hub.instanceId });
   });
@@ -386,7 +412,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
   const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
-    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access, { registry, publicUrl: cfg.publicUrl, skills, journal: operationJournal },
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access, { registry, publicUrl: cfg.publicUrl, skills, journal: operationJournal, crossRelay },
       (owner, tool, args, result) => mcpEstimates.track(owner,tool,args,result,
         typeof req.headers['x-brc-model'] === 'string' ? req.headers['x-brc-model'] : undefined));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -562,6 +588,6 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
 
   return {
     http, hub, store,
-    close: async () => { clearInterval(housekeeping); hub.close(); wss.close(); await new Promise<void>((r) => http.close(() => r())); await mcpEstimates.close(); await store.close(); },
+    close: async () => { clearInterval(housekeeping); await crossRelay?.stop(); hub.close(); wss.close(); await new Promise<void>((r) => http.close(() => r())); await mcpEstimates.close(); await store.close(); },
   };
 }

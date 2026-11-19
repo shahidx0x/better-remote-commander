@@ -21,7 +21,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
  const p=path.join(project,'sample.ts'),source='const sourceSecret = "DO_NOT_LOG_SOURCE_7e164";\nconst value = 1;\n';await fs.writeFile(p,source);
  await fs.writeFile(path.join(project,'package.json'),JSON.stringify({name:'mcp-fixture',packageManager:'pnpm@11.24.0',scripts:{test:'node --check sample.ts'}}));
  await fs.writeFile(path.join(project,'AGENTS.md'),'Keep edits small. Verify before completion.');
- const relay=await buildRelay({port:0,host:'127.0.0.1',publicUrl:'http://127.0.0.1:3210',trustProxy:false,dbFile:path.join(dir,'relay.sqlite'),sessionSecret:'test-only',adminUser:'admin',adminPassword:'test-only',relayVersion:'integration'},()=>{});
+ const relay=await buildRelay({port:0,host:'127.0.0.1',publicUrl:'http://127.0.0.1:3210',trustProxy:false,dbFile:path.join(dir,'relay.sqlite'),sessionSecret:'integration-only-stable-strong-test-secret-32-plus-characters',adminUser:'admin',adminPassword:'test-only',relayVersion:'integration'},()=>{});
  await new Promise(r=>relay.http.listen(0,'127.0.0.1',r));
  const url=`http://127.0.0.1:${relay.http.address().port}`,user=relay.store.getUserByName('admin');
  const token=relay.store.issueDeviceToken('integration-pc',user.id,'Test PC','win32'),apiKey=relay.store.createApiKey(user.id,'integration');
@@ -48,7 +48,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    const r=await tool('edit_files',{files:[{path:p,expected_sha256:snap.structuredContent.sha256,edits:[{old_string:'value = 1',new_string:'value = 2'}]}]});assert.equal(r.isError,false);assert.ok((await fs.readFile(p,'utf8')).includes('value = 2'));
    const b=await tool('batch_tools',{calls:[{tool:'read_code_file',arguments:{path:p}},{tool:'read_code_context',arguments:{path:project,pattern:'value = 2'}}]});assert.equal(b.isError,false);assert.equal(b.structuredContent.results.length,2);
   });
-  await t.test('completed remote command has a durable, metadata-only outcome lookup',async()=>{
+  await t.test('completed remote command has a durable relay acknowledgement and outcome lookup',async()=>{
    const called=await tool('run_command',{cwd:project,command:'node -e "console.log(73)"',timeout_ms:8000});
    assert.equal(called.isError,false,JSON.stringify(called.structuredContent));
    const callId=called._meta?.callId;

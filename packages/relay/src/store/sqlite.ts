@@ -152,9 +152,9 @@ export class SqliteStore {
       const total=this.statement('SELECT COALESCE(SUM(LENGTH(encrypted_result)),0) AS size FROM durable_operations').get() as {size:number};
       if(amount>MAX_OPERATION_STORED_BYTES || total.size-(previous?.size??0)+amount>MAX_OPERATION_STORED_BYTES)payload=null;
     }
-    this.statement("UPDATE durable_operations SET state=?,updated_at=?,encrypted_result=?,result_bytes=?,result_sha256=?,result_is_error=?,error_code=? WHERE id=? AND state!='settled'")
+    this.statement("UPDATE durable_operations SET state=?,updated_at=?,encrypted_result=?,result_bytes=?,result_sha256=?,result_is_error=?,error_code=? WHERE id=? AND (state!='settled' OR (state='settled' AND encrypted_result IS NULL AND ? IS NOT NULL AND result_sha256=?))")
       .run(update.state,update.updated_at,payload,update.result_bytes,
-        update.result_sha256,update.result_is_error,update.error_code,id);
+        update.result_sha256,update.result_is_error,update.error_code,id,payload,update.result_sha256);
   }
   pruneOperations(now=Date.now()):number{
     return Number(this.statement('DELETE FROM durable_operations WHERE expires_at<=?').run(now).changes);

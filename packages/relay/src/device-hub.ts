@@ -59,6 +59,9 @@ export class DeviceHub {
   onWireTraffic?: (ownerId:string,direction:'to-agent'|'from-agent',bytes:number)=>void;
   /** Called with every (sanitised) plugin report, e.g. to persist the last-known list. */
   onPlugins?: (deviceId: string, plugins: PluginStatusSummary[]) => void;
+  /** Authenticated agent probes persisted results only; never re-dispatches work. */
+  onResultProbe?: (ownerId:string,deviceId:string,ids:string[])=>Promise<{ack:string[];request:string[]}>;
+  onResultReplay?: (ownerId:string,deviceId:string,id:string,tool:string,result:ToolResult)=>Promise<boolean>;
 
   constructor(private readonly relayVersion: string, private readonly log: (l: string, m: string) => void) {
     this.heartbeat = setInterval(() => this.tick(), DEFAULTS.pingIntervalMs);
@@ -129,6 +132,30 @@ export class DeviceHub {
         else p.resolve(msg.result ?? { content: [] });
         return;
       }
+      if(msg.type==='result_probe'){
+        const activeId=dev.info.deviceId;
+        const ids=Array.isArray(msg.ids)?[...new Set(msg.ids.filter(id=>typeof id==='string'&&
+          /^[0-9a-fA-F-]{36}$/.test(id)))].slice(0,32):[];
+        if(ids.length&&this.onResultProbe){
+          void this.onResultProbe(dev.ownerId,activeId,ids).then(reply=>{
+            if(this.devices.get(activeId)?.socket!==socket)return;
+            for(const id of reply.ack)this.acknowledgeResult(activeId,id,true);
+            for(const id of reply.request)this.sendTo(socket,{type:'result_request',id});
+          }).catch(()=>this.log('warn','Relay result reconciliation storage unavailable'));
+        }
+        return;
+      }
+      if(msg.type==='result_replay'){
+        const activeId=dev.info.deviceId;
+        const bytes=Buffer.isBuffer(raw)?raw.length:Array.isArray(raw)?raw.reduce((n,b)=>n+b.length,0):raw instanceof ArrayBuffer?raw.byteLength:Buffer.byteLength(String(raw));
+        if(bytes>512*1024||typeof msg.id!=='string'||!/^[0-9a-fA-F-]{36}$/.test(msg.id)||
+           typeof msg.tool!=='string'||!msg.result||!Array.isArray(msg.result.content))return;
+        if(this.onResultReplay)void this.onResultReplay(dev.ownerId,activeId,msg.id,msg.tool,msg.result)
+          .then(saved=>{if(saved&&this.devices.get(activeId)?.socket===socket)
+            this.acknowledgeResult(activeId,msg.id,true);})
+          .catch(()=>this.log('warn','Recovered result settlement failed'));
+        return;
+      }
       if (msg.type === 'plugins') {
         if (!dev || !Array.isArray(msg.plugins)) return;
         dev.plugins = msg.plugins.slice(0, 500).map(sanitizePluginSummary).filter((p): p is PluginStatusSummary => !!p);
@@ -165,7 +192,7 @@ export class DeviceHub {
   }
 
   /** Route a tool call to a device. Throws if offline or timed out. */
-  call(deviceId: string, tool: string, args: Record<string, unknown>, opts: { client?: { name?: string; version?: string }; timeoutMs?: number; signal?: AbortSignal; callId?: string } = {}): Promise<ToolResult> {
+  call(deviceId: string, tool: string, args: Record<string, unknown>, opts: { client?: { name?: string; version?: string }; timeoutMs?: number; signal?: AbortSignal; callId?: string; durable?:boolean } = {}): Promise<ToolResult> {
     const dev = this.devices.get(deviceId);
     if (!dev) return Promise.reject(new Error(`DEVICE_OFFLINE: ${deviceId}`));
     if (!dev.tools.some((t) => t.name === tool)) return Promise.reject(new Error(`UNKNOWN_TOOL: ${tool}`));
@@ -197,7 +224,7 @@ export class DeviceHub {
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, socket:dev.socket, cleanup });
       opts.signal?.addEventListener('abort', abort, {once:true});
-      const sentBytes=this.sendTo(dev.socket,{ type:'call',id,tool,args,client:opts.client,timeoutMs });
+      const sentBytes=this.sendTo(dev.socket,{ type:'call',id,tool,args,client:opts.client,timeoutMs,durable:opts.durable===true });
       if(sentBytes) try { this.onWireTraffic?.(dev.ownerId,'to-agent',sentBytes); }
       catch { /* no observer failure should interrupt execution */ }
     });
@@ -237,6 +264,12 @@ export class DeviceHub {
   }
 
   get(deviceId: string): ConnectedDevice | undefined { return this.devices.get(deviceId); }
+
+  /** Fence a stale WebSocket when another relay instance acquires its lease. */
+  disconnectDevice(deviceId:string,reason='superseded'):void{
+    const device=this.devices.get(deviceId);
+    if(device)device.socket.close(4409,reason.slice(0,120));
+  }
 
   /** Best-effort notification only AFTER a durable result has been saved.
    * A dropped ACK does not erase the relay journal, and an old agent ignores it. */

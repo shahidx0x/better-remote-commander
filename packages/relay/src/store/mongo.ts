@@ -12,6 +12,7 @@ import { MAX_PENDING_PLUGIN_REQUESTS, type PluginRequestStatus, type PluginReque
 import type { UsageRecord, UsageDay, McpEstimateDelta, McpEstimateDay } from '../features/usage.js';
 import type { SkillRow, SkillRequest } from '../features/skills.js';
 import { MAX_OPERATION_ROWS_PER_USER, MAX_OPERATION_STORED_BYTES, type OperationRow, type OperationUpdate } from './operation-record.js';
+import type {DevicePresence,RoutedOperation} from './cross-relay-types.js';
 
 export class MongoStore implements RelayStore {
   readonly auditRetentionMs = 0;
@@ -67,6 +68,10 @@ export class MongoStore implements RelayStore {
       this.col('skill_requests').createIndex({ user_id: 1, skill_id: 1 }, { unique: true }),
       this.col('durable_operations').createIndex({ user_id:1,client_id:1,created_at:-1 }),
       this.col('durable_operations').createIndex({ expire_on:1 }, { expireAfterSeconds:0 }),
+      this.col('durable_operations').createIndex({route_state:1,route_target_instance:1,created_at:1}),
+      this.col('durable_operations').createIndex({user_id:1,route_state:1}),
+      this.col('device_presence').createIndex({user_id:1,expires_at:1}),
+      this.col('device_presence').createIndex({expire_on:1},{expireAfterSeconds:0}),
     ];
     // TTL indexes remove expired records without a background relay database process.
     for (const name of ['auth_codes', 'device_codes', 'connection_links', 'tokens']) {
@@ -117,7 +122,8 @@ export class MongoStore implements RelayStore {
       const previous=existing?.encrypted_result?Buffer.byteLength(existing.encrypted_result,'utf8'):0;
       if(Buffer.byteLength(payload,'utf8')+total-previous>MAX_OPERATION_STORED_BYTES)payload=null;
     }
-    await this.col('durable_operations').updateOne({_id:id,state:{$ne:'settled'}},{$set:{
+    await this.col('durable_operations').updateOne({_id:id,
+      $or:[{state:{$ne:'settled'}},...(payload?[{state:'settled',encrypted_result:null,result_sha256:update.result_sha256}]:[])]},{$set:{
       state:update.state,updated_at:update.updated_at,encrypted_result:payload,
       result_bytes:update.result_bytes,
       result_sha256:update.result_sha256,
@@ -126,6 +132,62 @@ export class MongoStore implements RelayStore {
   }
   async pruneOperations(now=Date.now()):Promise<number>{
     return (await this.col('durable_operations').deleteMany({expires_at:{$lte:now}})).deletedCount;
+  }
+
+  /* ---------- Mongo-only cross-instance routing and fenced presence ---------- */
+  async acquirePresence(owner:string,deviceId:string,instanceId:string,leaseId:string,now=Date.now()):Promise<void>{
+    const expires=now+20_000;
+    await this.col('device_presence').updateOne({_id:deviceId},{$set:{
+      device_id:deviceId,user_id:owner,instance_id:instanceId,lease_id:leaseId,
+      expires_at:expires,expire_on:new Date(expires)
+    }},{upsert:true,writeConcern:{j:true}});
+    await this.col('durable_operations').updateMany({user_id:owner,device_id:deviceId,
+      state:'claimed',route_state:'queued'},{$set:{route_target_instance:instanceId}});
+  }
+  async renewPresence(deviceId:string,instanceId:string,leaseId:string,now=Date.now()):Promise<boolean>{
+    const expires=now+20_000;
+    const result=await this.col('device_presence').updateOne({_id:deviceId,instance_id:instanceId,lease_id:leaseId},
+      {$set:{expires_at:expires,expire_on:new Date(expires)}});
+    return result.matchedCount===1;
+  }
+  async releasePresence(deviceId:string,instanceId:string,leaseId:string):Promise<void>{
+    await this.col('device_presence').deleteOne({_id:deviceId,instance_id:instanceId,lease_id:leaseId});
+  }
+  async presenceForUser(userId:string,now=Date.now()):Promise<DevicePresence[]>{
+    return (await this.col('device_presence').find({user_id:userId,expires_at:{$gt:now}}).limit(128).toArray())
+      .map(r=>MongoStore.row<DevicePresence>(r)!);
+  }
+  async getPresence(deviceId:string,now=Date.now()):Promise<DevicePresence|undefined>{
+    return MongoStore.row<DevicePresence>(await this.col('device_presence').findOne({_id:deviceId,expires_at:{$gt:now}}));
+  }
+  async enqueueRouted(id:string,owner:string,deviceId:string,targetInstance:string,ciphertext:string):Promise<boolean>{
+    if(ciphertext.length>1450*1024)throw new Error('REMOTE_ARGS_TOO_LARGE');
+    const outstanding=await this.col('durable_operations').countDocuments({user_id:owner,
+      state:'claimed',route_state:{$in:['queued','running']}});
+    if(outstanding>=128)throw new Error('REMOTE_QUEUE_CAPACITY');
+    const result=await this.col('durable_operations').updateOne({_id:id,user_id:owner,device_id:deviceId,
+      state:'claimed',route_state:{$exists:false},expires_at:{$gt:Date.now()}},{$set:{
+      route_state:'queued',route_target_instance:targetInstance,route_ciphertext:ciphertext
+    }},{writeConcern:{j:true}});
+    return result.modifiedCount===1;
+  }
+  async claimRouted(instanceId:string,deviceIds:string[],now=Date.now()):Promise<RoutedOperation|undefined>{
+    if(!deviceIds.length)return undefined;
+    const row=await this.col('durable_operations').findOneAndUpdate({
+      route_state:'queued',route_target_instance:instanceId,
+      device_id:{$in:deviceIds},state:'claimed',expires_at:{$gt:now}
+    },{$set:{route_state:'running',route_instance:instanceId,route_started_at:now}},
+      {sort:{created_at:1},returnDocument:'after',writeConcern:{j:true}});
+    return MongoStore.row<RoutedOperation>(row);
+  }
+  async clearRoutedPayload(id:string):Promise<void>{
+    await this.col('durable_operations').updateOne({_id:id},{$unset:{route_ciphertext:''}});
+  }
+  async markStaleRouted(now=Date.now()):Promise<number>{
+    const stale=await this.col('durable_operations').updateMany({route_state:'running',state:'claimed',
+      route_started_at:{$lt:now-190_000}},{$set:{state:'uncertain',error_code:'REMOTE_RELAY_INTERRUPTED',updated_at:now},
+      $unset:{route_ciphertext:''}});
+    return stale.modifiedCount;
   }
 
   /* ---------- users ---------- */

@@ -8,6 +8,7 @@ import { PluginAdmin } from './plugin-admin.js';
 import { isTermuxRuntime } from '../runtime/platform-capabilities.js';
 import { boundedAgentFrame,recordResultFrameQueued } from './result-budget.js';
 import { connectionHealth } from './connection-health.js';
+import { ResultSpool } from './result-spool.js';
 import {beginCallOutcome,settleCallOutcome,lookupCallOutcome,acknowledgeCallOutcome,type CallOutcomeRecord} from '../runtime/call-outcomes.js';
 export interface WsClientOptions {
  relayUrl:string;token:string;deviceId:string;name:string;agentVersion:string;coreVersion:string;tools:ToolDefinition[];
@@ -30,8 +31,13 @@ export class WsClient {
  private seen=new Map<string,number>();
  private readonly log:NonNullable<WsClientOptions['log']>;
  private readonly plugins:PluginAdmin;
+ private readonly spool:ResultSpool;
+ private probeTimer?:NodeJS.Timeout;
+ private probeCursor=0;
+ private replayLane:Promise<void>=Promise.resolve();
+ private replayAttempts=new Map<string,{at:number;attempts:number}>();
  readonly wsUrl:string;
- constructor(private readonly opts:WsClientOptions){this.log=opts.log??(()=>{});this.wsUrl=WsClient.toWsUrl(opts.relayUrl);this.plugins=new PluginAdmin(m=>this.send(m),this.log);}
+ constructor(private readonly opts:WsClientOptions){this.log=opts.log??(()=>{});this.wsUrl=WsClient.toWsUrl(opts.relayUrl);this.plugins=new PluginAdmin(m=>this.send(m),this.log);this.spool=new ResultSpool(opts.deviceId,opts.token,this.wsUrl);}
  static toWsUrl(url:string):string{
   const u=new URL(url);
   if(!['http:','https:','ws:','wss:'].includes(u.protocol)||u.username||u.password||u.search||u.hash)throw new Error('Use a relay base URL without credentials, query or fragment.');
@@ -42,8 +48,8 @@ export class WsClient {
  }
  start():void{if(this.ws)return;this.stopped=false;this.welcomed=false;this.plugins.start();this.connect();}
  /** O(1) live console status; no heartbeat poll or network request. */
- status(){return {online:this.welcomed && this.ws?.readyState===WebSocket.OPEN,connecting:!!this.ws&&this.ws.readyState===WebSocket.CONNECTING,inFlight:this.callsInFlight,health:connectionHealth.snapshot()};}
- stop():void{this.stopped=true;this.welcomed=false;this.plugins.stop();clearTimeout(this.pongTimer);clearTimeout(this.reconnectTimer);this.scheduler.cancelAll('Agent stopping.');const ws=this.ws;this.ws=null;ws?.close(1000,'agent stopped');}
+ status(){return {online:this.welcomed && this.ws?.readyState===WebSocket.OPEN,connecting:!!this.ws&&this.ws.readyState===WebSocket.CONNECTING,inFlight:this.callsInFlight,health:connectionHealth.snapshot(),resultSpool:this.spool.status()};}
+ stop():void{this.stopped=true;this.welcomed=false;this.plugins.stop();clearTimeout(this.pongTimer);clearTimeout(this.reconnectTimer);clearInterval(this.probeTimer);this.scheduler.cancelAll('Agent stopping.');const ws=this.ws;this.ws=null;ws?.close(1000,'agent stopped');}
  /** Pause only when idle: opening settings never cancels an in-flight tool call. */
  pauseForSettings():boolean{if(this.callsInFlight>0)return false;this.settingsPaused=true;return true;}
  resumeAfterSettings():void{this.settingsPaused=false;}
@@ -58,7 +64,7 @@ export class WsClient {
   ws.on('unexpected-response',(_req,res)=>{unauthorized=res.statusCode===401||res.statusCode===403;connectionHealth.record('socket_error',`HTTP_${res.statusCode??'UNKNOWN'}`);this.log('error',`Relay refused connection: HTTP ${res.statusCode}`);res.resume();ws.terminate();});
   ws.on('close',(code)=>{
    if(this.ws!==ws)return;
-   clearTimeout(this.pongTimer);this.ws=null;this.welcomed=false;
+   clearTimeout(this.pongTimer);clearInterval(this.probeTimer);this.ws=null;this.welcomed=false;
    connectionHealth.record('disconnected',code,this.callsInFlight);
    this.scheduler.cancelAll('Relay disconnected; active operations are not automatically retried.');
    if(this.stopped)return;
@@ -80,12 +86,24 @@ export class WsClient {
  private async onMessage(raw:Buffer,ws:WebSocket):Promise<void>{
   const msg=parseMessage<RelayMessage>(raw);if(!msg)return;
   switch(msg.type){
-   case 'welcome':if(msg.protocol!==BRC_PROTOCOL_VERSION){connectionHealth.record('relay_error','PROTOCOL_MISMATCH');this.stop();return;}this.welcomed=true;connectionHealth.record('connected');this.backoff=DEFAULTS.reconnectMinMs;this.unauthorizedCount=0;this.log('info',`Ready: relay ${msg.relayVersion}; ${this.opts.tools.length} tools`);this.plugins.sendStatus();try{this.opts.onConnected?.();}catch{}return;
+   case 'welcome':if(msg.protocol!==BRC_PROTOCOL_VERSION){connectionHealth.record('relay_error','PROTOCOL_MISMATCH');this.stop();return;}this.welcomed=true;connectionHealth.record('connected');this.backoff=DEFAULTS.reconnectMinMs;this.unauthorizedCount=0;this.log('info',`Ready: relay ${msg.relayVersion}; ${this.opts.tools.length} tools`);this.plugins.sendStatus();void this.probeResults(ws);clearInterval(this.probeTimer);this.probeTimer=setInterval(()=>{void this.probeResults(ws);},20000);this.probeTimer.unref();try{this.opts.onConnected?.();}catch{}return;
    case 'ping':connectionHealth.ping();this.armHeartbeat(ws);this.send({type:'pong',ts:msg.ts},ws);return;
    case 'cancel':if(typeof msg.id==='string')cancelOperation(msg.id);return;
    case 'result_ack':
      if(msg.relayPersisted===true&&typeof msg.id==='string'&&msg.id.length>=8&&msg.id.length<=100)
-       void acknowledgeCallOutcome(msg.id);
+       {this.replayAttempts.delete(msg.id);
+        void Promise.all([acknowledgeCallOutcome(msg.id),this.spool.ack(msg.id)]);}
+     return;
+   case 'result_request':
+     if(typeof msg.id==='string'){
+      const id=msg.id;
+      // Serialise at most 32 replay requests per probe so a reconnect does
+      // not flood the WebSocket with 16 MiB of stored outputs at once.
+      this.replayLane=this.replayLane.catch(()=>{}).then(async()=>{
+       await new Promise<void>(resolve=>setTimeout(resolve,100));
+       await this.replayResult(id,ws);
+      });
+     }
      return;
    case 'call':await this.handleCall(msg,ws);return;
    case 'plugin_admin':await this.plugins.handle(msg);return;
@@ -132,10 +150,45 @@ export class WsClient {
   // steps must still permit lookup after reconnect or an agent restart.
   if(receipt)await settleCallOutcome(receipt,out,performance.now()-executionStarted);
   out={...out,_meta:{...out._meta,agentQueueMs:Math.max(0,Math.round(executionStarted-received)),agentTotalMs:Math.round(performance.now()-received)}};
+  // Freeze a bounded, encrypted result before transmitting it. An agent or
+  // relay restart can then resend the RESULT without executing the tool again.
+  if(msg.durable===true){
+   const safe=boundedAgentFrame({type:'result',id:msg.id,result:out});
+   const parsed=JSON.parse(safe.encoded) as {result?:ToolResult};
+   if(parsed.result){
+    await this.spool.save(msg.id,msg.tool,parsed.result);
+    out=parsed.result;
+   }
+  }
   // Never route an old connection's result onto a new connection.
   if(this.ws===ws)this.send({type:'result',id:msg.id,result:out},ws);
   else connectionHealth.record('result_dropped','STALE_CONNECTION',this.callsInFlight);
   } finally {this.callsInFlight--;}
+ }
+ private async probeResults(ws:WebSocket):Promise<void>{
+  if(this.ws!==ws||!this.welcomed||ws.readyState!==WebSocket.OPEN)return;
+  const ids=await this.spool.ids();
+  if(!ids.length)return;
+  if(this.probeCursor>=ids.length)this.probeCursor=0;
+  const group=ids.slice(this.probeCursor,this.probeCursor+32);
+  this.probeCursor=(this.probeCursor+group.length)%ids.length;
+  if(this.ws===ws&&this.welcomed)this.send({type:'result_probe',ids:group},ws);
+ }
+ private async replayResult(id:string,ws:WebSocket):Promise<void>{
+  if(this.ws!==ws||!this.welcomed||ws.readyState!==WebSocket.OPEN)return;
+  const previous=this.replayAttempts.get(id);
+  const backoff=previous?Math.min(300_000,15_000*2**Math.min(previous.attempts,5)):0;
+  if(previous&&Date.now()-previous.at<backoff)return;
+  if(ws.bufferedAmount>4*1024*1024)return;
+  const saved=await this.spool.get(id);
+  if(!saved)return;
+  const frame:AgentMessage={type:'result_replay',id,tool:saved.tool,result:saved.result};
+  if(Buffer.byteLength(JSON.stringify(frame),'utf8')>512*1024)return;
+  if(this.ws===ws&&this.welcomed){
+   this.spool.recordReplay();this.send(frame,ws);
+   this.replayAttempts.set(id,{at:Date.now(),attempts:(previous?.attempts??0)+1});
+   if(this.replayAttempts.size>256)this.replayAttempts.delete(this.replayAttempts.keys().next().value!);
+  }
  }
  private send(msg:AgentMessage,ws=this.ws):void{
   if(ws?.readyState!==WebSocket.OPEN){if(msg.type==='result')connectionHealth.record('result_dropped','NOT_CONNECTED',this.callsInFlight);return;}
