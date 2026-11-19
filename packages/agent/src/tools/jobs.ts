@@ -35,6 +35,7 @@ import type { ToolDefinition } from '../core/tool-definitions.js';
 import { isHeavyTool } from '../runtime/operations.js';
 import { saveJobOutput,readJobOutput,redactJobOutput,spillEnabled,type SpillRef } from '../runtime/job-output-spill.js';
 import {classifyExecution} from '../runtime/execution-kernel.js';
+import {AgentError,failure} from '../runtime/errors.js';
 import {linkCallJobs} from '../runtime/call-outcomes.js';
 
 // ---------------------------------------------------------------------------
@@ -779,12 +780,18 @@ async function waitUntil(picked: Job[], cond: () => boolean, timeoutMs: number):
 // ---------------------------------------------------------------------------
 export async function handleManagedRunCommand(args: unknown): Promise<ServerResult> {
   const parsed = RunCommandArgsSchema.safeParse(args);
-  if (!parsed.success) return text('Invalid run_command args: '+parsed.error.message.slice(0,800),true);
+  if (!parsed.success) return failure(new AgentError('INVALID_ARGUMENT',
+    'Invalid run_command arguments: '+parsed.error.message.slice(0,800)));
   await loadHistory();
-  if (queue.length >= MAX_QUEUED_JOBS) return text('BUSY: queue full; no command started.',true);
+  if (queue.length >= MAX_QUEUED_JOBS) return failure(new AgentError('BUSY',
+    'Job queue is full. No command started; wait for current jobs to settle before submitting new work.'));
   const a = parsed.data, runtimeMs = a.max_runtime_ms ?? (6 * 60 * 60_000);
-  const job = createJob([{command:a.command,cwd:a.cwd,shell:a.shell,raw:a.raw,
-    maxOutputChars:a.maxOutputChars,timeout_ms:runtimeMs}],{timeoutMs:runtimeMs,label:'run_command'});
+  const directStep=a.program
+    ?{tool:'run_command',args:{program:a.program,args:a.args,cwd:a.cwd,raw:a.raw,
+        maxOutputChars:a.maxOutputChars,timeout_ms:runtimeMs}}
+    :{command:a.command!,cwd:a.cwd,shell:a.shell,raw:a.raw,
+        maxOutputChars:a.maxOutputChars,timeout_ms:runtimeMs};
+  const job = createJob([directStep],{timeoutMs:runtimeMs,label:'run_command'});
   job.quickReturnPending=true;
   await persist(job);
   const origin=getCallContext();
@@ -802,7 +809,8 @@ export async function handleManagedRunCommand(args: unknown): Promise<ServerResu
     // Most pnpm lint/test/build checks here finish in ~4-5 seconds. Returning
     // PENDING after only 1.8s forces needless additional AI tool calls.
     // Keep non-package commands low-latency, and never hold near relay limits.
-    const quickWaitMs=/^(?:pnpm|npm|yarn|bun|cargo|dotnet)(?:\s|$)/i.test(a.command.trim())?6000:1800;
+    const quickWaitMs=/^(?:pnpm|npm|yarn|bun|cargo|dotnet)(?:\s|\.|$)/i.test(
+      a.command?.trim()??path.basename(a.program??''))?6000:1800;
     await Promise.race([job.done!,new Promise<void>(resolve=>{timer=setTimeout(resolve,quickWaitMs);})]);
   } finally {
     if(timer)clearTimeout(timer);

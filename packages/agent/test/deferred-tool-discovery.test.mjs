@@ -35,7 +35,7 @@ test('discover_tools returns exact input schemas and paginates without execution
  assert.equal(resp.isError,false,JSON.stringify(resp.structuredContent?.error));
  const v=resp.structuredContent;
  assert.equal(v.mode,'deferred');
- assert.equal(v.catalogCount,81);
+ assert.equal(v.catalogCount,82);
  assert.equal(v.tools.length,2);
  assert.ok(v.tools[0].inputSchema);
  assert.ok(v.hasMore);

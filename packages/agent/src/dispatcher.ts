@@ -20,6 +20,7 @@ import { DEVELOPER_TOOL_HANDLERS, buildDeveloperToolDefinitions } from './tools/
 import { reclaimCaches, markToolStarted, markToolFinished } from './runtime/resource-limits.js';
 import { CODING_TOOL_HANDLERS, buildCodingToolDefinitions, runBatch } from './tools/coding-tools.js';
 import {LSP_TOOL_HANDLERS,buildLspToolDefinitions} from './tools/lsp-tools.js';
+import {PATCH_TOOL_HANDLERS,buildPatchToolDefinitions} from './tools/patch-tools.js';
 import { activity, activityAction } from './runtime/activity.js';
 import { traceToolArguments, traceToolResult } from './runtime/tool-trace.js';
 import { summarizeCommandActivity } from './runtime/command-log-summary.js';
@@ -77,6 +78,7 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(AST_GREP_TOOL_HANDLERS),
   ...Object.entries(CODING_TOOL_HANDLERS),
   ...Object.entries(LSP_TOOL_HANDLERS),
+  ...Object.entries(PATCH_TOOL_HANDLERS),
   ...Object.entries(EXPERT_TOOL_HANDLERS),
   ...Object.entries(POLYGLOT_TOOL_HANDLERS),
   ...Object.entries(DEVELOPER_TOOL_HANDLERS),
@@ -101,7 +103,7 @@ let cachedDeferredDefs: ToolDefinition[] | null = null;
 
 function fullToolCatalog(): ToolDefinition[] {
   if (!cachedDefs) {
-    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildCodingToolDefinitions(), ...buildLspToolDefinitions(), ...buildExpertToolDefinitions(), ...buildPolyglotToolDefinitions(), ...buildDeveloperToolDefinitions(), ...buildWorkerToolDefinitions()]
+    cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildCodingToolDefinitions(), ...buildLspToolDefinitions(), ...buildPatchToolDefinitions(), ...buildExpertToolDefinitions(), ...buildPolyglotToolDefinitions(), ...buildDeveloperToolDefinitions(), ...buildWorkerToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name))
       .filter(t => process.env.BRC_TOOL_PROFILE !== 'coding' || !['write_pdf','prepare_file_transfer','send_file_transfer','receive_file_transfer','get_recent_tool_calls','get_usage_stats'].includes(t.name))
       .filter(t => !isTermuxRuntime() || availableOnTermux(t.name))
@@ -164,7 +166,7 @@ function safeCommandDiagnostic(cause:unknown):string{
 }
 
 const MUTATIONS = new Set(['write_file','edit_block','delete_file','move_file','create_directory','write_pdf']);
-const RECEIPT_ONLY_MUTATIONS=new Set(['edit_files','workspace_batch','edit_code_ranges','replace_symbol',
+const RECEIPT_ONLY_MUTATIONS=new Set(['edit_files','apply_patch','workspace_batch','edit_code_ranges','replace_symbol',
   'worker_patch','worker_integrate','call_plugin_tool','git_stage','git_commit','git_push']);
 let readOnlyToolCache:Set<string>|null=null;
 function executionKindForTool(name:string):ExecutionKind{
@@ -286,7 +288,10 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     const exitCode=name==='run_command'&&code==='COMMAND_FAILED'&&typeof meta?.exitCode==='number'
       ?meta.exitCode:undefined;
     recordToolFailure({tool:name,code,durationMs,callId:parent.id,
-      ...(exitCode!==undefined?{exitCode,diagnostic:safeCommandDiagnostic(cause)}:{})});
+      ...(exitCode!==undefined?{exitCode,diagnostic:
+        typeof meta?.commandFailureKind==='string' &&
+          /^(?:NONZERO_EXIT|GIT_NOT_REPOSITORY|PROJECT_MANIFEST_MISSING|TYPECHECK_ERROR|SYNTAX_ERROR|MODULE_RESOLUTION|EXECUTABLE_NOT_FOUND|SHELL_CHAIN_SYNTAX)$/.test(meta.commandFailureKind)
+          ?meta.commandFailureKind:safeCommandDiagnostic(cause)}:{})});
   }
   return {...out,_meta:{...out._meta,callId:parent.id,durationMs}};
   } finally {

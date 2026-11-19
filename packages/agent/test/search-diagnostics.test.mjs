@@ -37,7 +37,7 @@ test('valid filename and content searches, including no-match, are successful',a
 
 test('invalid regex is SEARCH_INVALID_PATTERN, not opaque TOOL_FAILED, and logs safe cause',async()=>{
  const secret='search_privacy_secret_3481';
- const r=await callTool('start_search',{path:root,pattern:'['+secret,searchType:'content',wait:true,maxResults:10});
+ const r=await callTool('start_search',{path:root,pattern:'['+secret,searchType:'content',wait:true,maxResults:10,literalSearch:false});
  assert.equal(r.isError,true);
  assert.equal(r.structuredContent.error.code,'SEARCH_INVALID_PATTERN',txt(r));
  assert.match(r.structuredContent.recovery.suggestion,/literalSearch:true/);

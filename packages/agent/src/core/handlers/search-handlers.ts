@@ -22,7 +22,12 @@ export async function handleStartSearch(args: unknown): Promise<ServerResult> {
   }
 
   if (parsed.data.wait) {
-    return runBlockingSearch(parsed.data);
+    // A model often sends punctuation as a literal search without realizing
+    // ripgrep treats it as regex. Retry only malformed *implicit* regexes as
+    // exact literals: a read-only, bounded second search, never a mutation.
+    const raw=args&&typeof args==='object'&&!Array.isArray(args)
+      ?args as Record<string,unknown>:{};
+    return runBlockingSearch(parsed.data,!Object.prototype.hasOwnProperty.call(raw,'literalSearch'));
   }
 
   try {
@@ -98,7 +103,16 @@ const WAIT_POLL_MS = 250; // upper bound; waitForActivity wakes earlier on outpu
 
 type StartSearchArgs = ReturnType<typeof StartSearchArgsSchema.parse>;
 
-async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
+async function runBlockingSearch(args: StartSearchArgs,allowLiteralFallback=false): Promise<ServerResult> {
+  const retryMalformedRegex=async ():Promise<ServerResult>=>{
+    const corrected=await runBlockingSearch({...args,literalSearch:true},false);
+    if(corrected.isError)return corrected;
+    return {...corrected,
+      content:[{type:'text' as const,text:'[BRC] Invalid implicit regex; searched exact literal text instead (no syntax guessing or data mutation).\n'+
+        (corrected.content??[]).map(c=>c.type==='text'?c.text:'').join('\n')}],
+      structuredContent:{...corrected.structuredContent,autoLiteralFallback:true,
+        actualSearchMode:'literal',requestedPatternWasInvalidRegex:true}};
+  };
   const timeoutMs = Math.min(Math.max(args.timeout_ms ?? WAIT_DEFAULT_TIMEOUT_MS, 1_000), WAIT_MAX_TIMEOUT_MS);
   const deadline = Date.now() + timeoutMs; // includes time waiting for a free worker
   const cap = Math.max(1, args.maxResults ?? WAIT_DEFAULT_MAX_RESULTS);
@@ -124,6 +138,8 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
     // An immediate ripgrep failure must not be reported as a successful empty search.
     if (started.isError) {
       const state = searchManager.readSearchResults(sessionId, 0, 0);
+      if(allowLiteralFallback && !args.literalSearch && searchErrorCode(state.error??'')==='SEARCH_INVALID_PATTERN')
+        return retryMalformedRegex();
       return structuredSearchFailure(new AgentError(
         searchErrorCode(state.error ?? 'SEARCH_FAILED'),
         state.error ?? 'ripgrep search failed during startup'), 'start') as ServerResult;
@@ -154,6 +170,10 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
   if (all.stopReason === 'limit') stoppedReason = 'cap';
   if (all.stopReason === 'timeout') stoppedReason = 'timeout';
   if (all.isError && all.totalResults === 0 && all.error?.trim()) {
+    if(allowLiteralFallback && !args.literalSearch && searchErrorCode(all.error)==='SEARCH_INVALID_PATTERN'){
+      searchManager.terminateSearch(sessionId);
+      return retryMalformedRegex();
+    }
     return structuredSearchFailure(new AgentError(searchErrorCode(all.error),all.error),'results') as ServerResult;
   }
 

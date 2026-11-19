@@ -181,6 +181,7 @@ export const EditBlockEditSchema = z.object({
   old_string: z.string(),
   new_string: z.string(),
   expected_replacements: z.number().int().min(1).optional().default(1),
+  replace_all: z.boolean().optional().default(false).describe('Replace every exact occurrence only when explicitly requested; never guess broad replacements.'),
 });
 
 export const EditBlockArgsSchema = z.object({
@@ -190,6 +191,7 @@ export const EditBlockArgsSchema = z.object({
   old_string: z.string().optional(),
   new_string: z.string().optional(),
   expected_replacements: z.number().int().min(1).max(10000).optional().default(1),
+  replace_all: z.boolean().optional().default(false).describe('Replace all exact matches, only with explicit authorization. Does not perform fuzzy edits.'),
   // Multiple replacements in one call (applied sequentially, atomically for text files)
   edits: z.array(EditBlockEditSchema).optional(),
   // Structured file range rewrite (Excel, etc.)

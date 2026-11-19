@@ -104,6 +104,80 @@ of development.
 
 Windows restricted-token sandboxing is **not included**, by request.
 
+## Most-used tool reliability pass (commands, edits, search)
+
+The local agent's bounded failure history (last 100 failures) showed that
+**real command exits** and **exact edit mismatches** were the dominant failure
+categories, ahead of search regex and resource admission. A nonzero exit is
+never reclassified as a successful command, and the system does not replay a
+possibly committed command just to mask a failure.
+
+### Direct native command invocation
+
+Prefer `run_command({program:"git",args:["status","--short"],cwd:"D:\\project"})`
+for Git, Node, Python, dotnet, rg and other native executables.
+`program+args` passes each argument literally to the process, bypassing
+PowerShell quoting and command injection via shell operators in data.
+Use `command:"pnpm build"` or an explicitly chosen shell for .cmd/.bat
+scripts and pipelines. On Windows argv-mode resolves .exe only, honors
+blockedCommands, command environment isolation, managed process ownership,
+timeouts and cancellation, and returns `PROGRAM_NOT_FOUND` or
+`PROGRAM_START_FAILED` without silent shell substitution. The optional rtk
+output compressor does not intercept argv-mode commands.
+
+Failed commands carry their **real exit code**, bounded stdout/stderr, and
+`commandFailureKind` when recognizable (TypeScript diagnostics, project
+manifest missing, module resolution, shell/script syntax, Git outside repo,
+missing executable). These are diagnostic hints, not automatic fixes.
+
+### Exact edits and patches
+
+`edit_block` keeps the default single-occurrence requirement. Setting
+`replace_all:true` explicitly allows multiple **exact** matches in plain
+UTF-8 source; maximum 10,000, never an implicit global replace. An unmatched
+hunk returns `sourceSha256`, bounded `candidateLines` and a
+`next:{tool:"read_code_file",args:{path,offset,length}}` suggestion.
+These candidates do not authorize fuzzy writes. Office/structured-file
+handlers reject the new replace_all option.
+
+The new `apply_patch` tool accepts bounded DeepSeek/Codex-style
+`*** Begin Patch` / `*** Update File: relative/path` /
+`@@` context hunks / `*** End Patch`. **Only existing-file updates**
+are supported. A hunk must match exactly one whole-line context; every
+file/hunk is checked before any write. It reuses the existing
+`edit_files` transaction engine and worker coordination policy.
+`dryRun:true` validates without modifying files. Individual publishes
+are atomic; multi-file rollback on later failure is best effort, **not
+crash-atomic across files**. For adds/deletes/renames use file-specific
+tools. No model calls and no local shell are needed for patch application.
+
+### Ripgrep recovery
+
+`start_search(wait:true,searchType:"content")` now retries a malformed
+**implicit** regex as a literal search once, and returns an explicit
+`autoLiteralFallback:true` marker. If the caller explicitly specifies
+`literalSearch:false`, malformed regexes still return
+`SEARCH_INVALID_PATTERN` and are never silently reinterpreted.
+Search concurrency and result caps remain in place to protect host RAM.
+
+### Activation, tests and known limitations
+
+The source changes require a local BRC agent restart. The regenerated
+MCP relay catalog requires a relay deployment (and may require a client
+tool refresh) before ChatGPT sees new `run_command.program/args`,
+`edit_block.replace_all`, `apply_patch` and new search guidance.
+No OAuth, pairing or database migration is required by these source
+changes; preserve the existing service identity and endpoint.
+
+There is no guarantee that every unsuccessful user command becomes
+successful: a broken build, missing dependency, invalid path, real compiler
+error, or unavailable executable still returns a failure with improved
+diagnostics. The Windows restricted-token sandbox is not part of this work.
+
+Tests: `command-argv-reliability.test.mjs`,
+`edit-repair-robustness.test.mjs`, `context-patch-reliability.test.mjs`,
+`regex-auto-literal.test.mjs`, plus the complete agent and relay suites.
+
 ## Verification
 
 ```sh

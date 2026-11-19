@@ -47,7 +47,7 @@ export function activityAction(tool: string, args: Record<string,unknown> | unde
         return compactLine(text,100);
     };
     // Recognize common package-manager cwd flags, without showing the command text.
-    const command=val('command');
+    const command=val('command') || val('program');
     const dirFlag=/(?:^|\s)(?:--dir|--cwd|-C)\s+(?:'([^']{1,260})'|"([^"]{1,260})"|([^\s]{1,260}))/i.exec(command);
     const hintedDir=dirFlag?.[1]||dirFlag?.[2]||dirFlag?.[3]||'';
     const where=shortPath(val('file_path')||val('path')||val('cwd')||
@@ -55,7 +55,7 @@ export function activityAction(tool: string, args: Record<string,unknown> | unde
     const at=where?' @ '+where:'';
     if (tool==='run_command'||tool==='start_process'){
         // Only approved executable and task names; never echo raw arguments.
-        const first=command.match(/^\s*("[^"]+"|[^\s]+)/)?.[1]??'';
+        const first=val('program')||command.match(/^\s*("[^"]+"|[^\s]+)/)?.[1]||'';
         const exe=first.replace(/^"|"$/g,'').split(/[\\/]/).at(-1)?.toLowerCase().replace(/\.(exe|cmd|bat|ps1)$/,'')??'';
         const approved=['pnpm','npm','node','python','python3','git','rg','cargo','go','dotnet','tsc','bun','npx','cmd','powershell'].includes(exe)?exe:'shell';
         const task=/(?:^|\s)(eslint|tsc|vitest|jest|pytest|build|test|lint|typecheck)(?=\s|$)/i.exec(command)?.[1].toLowerCase();

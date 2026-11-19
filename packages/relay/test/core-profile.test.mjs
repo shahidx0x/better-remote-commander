@@ -13,7 +13,7 @@ test('retired overlapping tools are not advertised by ANY profile, but essential
   delete process.env.BRC_MCP_TOOL_PROFILE;
   assert.equal(mcpToolProfile(),'core');
   assert.equal(mcpToolProfile('unrecognized'),'core');
-  assert.equal(BUNDLED_AGENT_TOOL_CATALOG.length,81,'new lazy LSP tool has a stable offline schema');
+  assert.equal(BUNDLED_AGENT_TOOL_CATALOG.length,82,'new context patch tool has a stable offline schema');
   assert.equal(RETIRED_PUBLIC_AGENT_TOOLS.size,19);
   for(const name of CORE_MCP_AGENT_TOOLS) assert.ok(known.has(name),'unknown core '+name);
   for(const name of RETIRED_PUBLIC_AGENT_TOOLS) {
@@ -22,8 +22,8 @@ test('retired overlapping tools are not advertised by ANY profile, but essential
   }
   const core=(await liveTools(hub,store,account)).tools;
   const names=new Set(core.map(t=>t.name));
-  assert.equal(names.size,36);
-  for(const name of ['read_file','read_multiple_files','write_file','edit_block','edit_files','lsp_query','run_command','run_project_checks','run_parallel','worker_tasks','worker_patch','worker_integrate','agent_status'])
+  assert.equal(names.size,37);
+  for(const name of ['read_file','read_multiple_files','write_file','edit_block','edit_files','apply_patch','lsp_query','run_command','run_project_checks','run_parallel','worker_tasks','worker_patch','worker_integrate','agent_status'])
    assert.ok(names.has(name),'essential tool missing: '+name);
   for(const name of ['workspace_batch','batch_tools','edit_code_ranges','replace_symbol','docker_inventory','docker_inspect','sandbox_run','verify_project'])
    assert.ok(!names.has(name),'retired tool still shown: '+name);
@@ -35,11 +35,11 @@ test('retired overlapping tools are not advertised by ANY profile, but essential
   assert.equal(readOnlyToolAllowed('read_file',{}),true);
   process.env.BRC_MCP_TOOL_PROFILE='focused';
   const focused=(await liveTools(hub,store,account)).tools;
-  assert.equal(focused.length,46,'profile switch must invalidate cached snapshot');
+  assert.equal(focused.length,47,'profile switch must invalidate cached snapshot');
   assert.ok(!focused.some(t=>RETIRED_PUBLIC_AGENT_TOOLS.has(t.name)));
   process.env.BRC_MCP_TOOL_PROFILE='full';
   const full=(await liveTools(hub,store,account)).tools;
-  assert.equal(full.length,62);
+  assert.equal(full.length,63);
   assert.ok(full.some(t=>t.name==='write_pdf'));
   assert.ok(full.some(t=>t.name==='code_graph'));
   assert.ok(!full.some(t=>RETIRED_PUBLIC_AGENT_TOOLS.has(t.name)));

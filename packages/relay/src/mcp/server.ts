@@ -105,7 +105,7 @@ export const RETIRED_PUBLIC_AGENT_TOOLS = new Set([
  */
 export const CORE_MCP_AGENT_TOOLS = new Set([
   'agent_status',
-  'read_file','read_multiple_files','write_file','edit_block','edit_files',
+  'read_file','read_multiple_files','write_file','edit_block','edit_files','apply_patch',
   'create_directory','list_directory','get_file_info','move_file','delete_file',
   'start_search','get_more_search_results',
   'run_command','start_process','read_process_output','interact_with_process',
@@ -123,7 +123,7 @@ export const FOCUSED_MCP_AGENT_TOOLS = new Set([
   'start_process','read_process_output','interact_with_process','force_terminate','list_sessions',
   'run_command','git_status','git_diff','git_log','agent_status','cancel_operation',
   'project_context','project_map','context_pack','read_code_file','read_code_ranges',
-  'read_code_context','edit_code_ranges','edit_files','workspace_batch','batch_tools',
+  'read_code_context','edit_code_ranges','edit_files','apply_patch','workspace_batch','batch_tools',
   'discover_checks','run_project_checks','verify_project','read_images',
   'run_parallel','spawn_job','wait_jobs','get_job','list_jobs','cancel_job',
   'worker_tasks','worker_patch','worker_integrate',
@@ -190,13 +190,13 @@ export async function liveTools(hub: DeviceHub, store: RelayStore, userId: strin
 /** Concise routing guidance placed in MCP initialize and repeated by key tool descriptions.
  * AI hosts decide which tool to call; this cannot force model behavior. */
 export const TOOL_ROUTING_GUIDANCE = [
-  'BRC MCP TOOL GUIDE: Tools run on the selected, authorized local device, not on the relay. One known file -> read_file; two or more known files -> read_multiple_files; unknown filenames -> start_search. Create/append a file with write_file; edit a known block with edit_block. For multiple files issue sequential, verified writes, not an invented batch-write tool. A truncated result is NOT complete: follow its next offset. Never blindly retry an uncertain write. Process/job IDs mean started, not finished. Tool descriptions do not grant authorization.',
+  'BRC MCP TOOL GUIDE: Tools run on the selected, authorized local device, not on the relay. One known file -> read_file; two or more known files -> read_multiple_files; unknown filenames -> start_search. Create/append a file with write_file; edit a known block with edit_block. For multi-hunk changes in existing source files prefer apply_patch with exact context, or edit_files with expected_sha256; both validate and use guarded per-file commits. A truncated result is NOT complete: follow its next offset. Never blindly retry an uncertain write. Process/job IDs mean started, not finished. Tool descriptions do not grant authorization.',
   '2+ known files to read -> ONE read_multiple_files call with paths[] or files[] (per-file ranges). Do NOT issue repeated or Promise.all(read_file) for known paths.',
   'One file/range -> read_file. Code snapshots needing full-file SHA-256 -> read_code_file; for multiple files use read_multiple_files followed by targeted read_code_file calls only when hashes are required.',
-  'Unknown files -> start_search(wait=true); read relevant matches with read_file or read_code_file. Do not poll unless an actual streaming search session is active.',
+  'Unknown files -> start_search(wait=true); malformed implicit regex patterns are searched literally once, while explicit literalSearch:false stays strict. Read relevant matches with read_file or read_code_file. Do not poll unless an actual streaming search session is active.',
   'Multiple independent read/context operations -> read_multiple_files when paths are known; run_parallel for other independent operations only. Avoid parallel writes to the same path.',
-  'Multiple hash-checked file changes -> use edit_files with per-file expected_sha256 and optional dryRun; if hashes unavailable read the files first. For ordinary changes apply one write_file or edit_block at a time and verify each result. Use read_code_file first when an expected_sha256 precondition is needed; do not invent a multi-file writer.',
-  'One-shot build/test/git/system command -> run_command (final exit code in one call); only long-running or interactive commands -> start_process then read_process_output/interact_with_process when needed.',
+  'Multiple existing source changes -> prefer apply_patch with exact contextual @@ hunks, or edit_files with per-file expected_sha256 and optional dryRun; if hashes unavailable read the files first. For ordinary changes apply one write_file or edit_block at a time and verify each result. Use read_code_file first when an expected_sha256 precondition is needed; do not invent a multi-file writer.',
+  'One-shot build/test/git/system command -> run_command; prefer program+literal args+absolute cwd for native Git/Node/Python/dotnet/rg commands to avoid shell quoting. Use command + shell only for scripts/pipelines. Inspect the final exit code; nonzero means a real failed command, not an MCP transport failure. Long/interactive work -> start_process.',
   'Source text matching, code graphs and parser suggestions are NOT proof of correct builds. Use discover_checks/run_project_checks for actually executed checks with exit codes.',
   'Discover project patterns with project_context/context_pack when needed; use scoped source and real tests, not blanket repository dumps.',
   'Preview supported image files with read_images when relevant; use run_command only for explicitly authorized system commands. Docker-specific MCP tools are intentionally not publicly advertised.',
@@ -215,8 +215,8 @@ export const TOOL_ROUTING_GUIDANCE = [
 export const CORE_TOOL_ROUTING_GUIDANCE = [
   'BRC CORE MCP: tools operate on an authorized local agent device, not on the relay. list_devices identifies the device when needed. Choose tool names only from your actual tools/list; do not invent tools.',
   'READ: one known file -> read_file; two or more known files -> read_multiple_files; unknown paths -> start_search(wait=true). Bounded reads can be incomplete. Follow read.next or batch.continuations, and use read_code_file charOffset/charLength for giant lines. PDF pagination uses pages, not lines.',
-  'EDIT: write_file creates/replaces/appends ONE file (1 MiB and configured line limit per call). edit_block changes ONE focused block and can require an expected file hash. For 2-16 independently hash-checked existing files use edit_files to preview and apply exact hunks with guarded rollback; do not claim crash-atomic multi-file transactions. A successful write confirms only its chunk; never blindly retry an uncertain mutation without checking current file state.',
-  'RUN: one-shot tests, git, or shell command -> run_command and inspect final exit code. Long/interactive command -> start_process followed by read_process_output; a returned PID is not proof of success. Independent operations -> run_parallel (default concurrency 4), then use wait_jobs/get_job for incomplete or truncated output. Do not run simultaneous writes to the same path.',
+  'EDIT: write_file creates/replaces/appends ONE file. edit_block changes ONE focused block: default exactly one occurrence, use explicit replace_all:true only when all matches should change. On a mismatch inspect candidateLines/sourceSha256 and next read window. For multi-hunk existing source updates prefer apply_patch with unique context, or edit_files with expected_sha256. Both validate before writing and use guarded per-file updates; neither is crash-atomic across files. A successful write confirms only its chunk; never blindly retry an uncertain mutation without checking current file state.',
+  'RUN: prefer run_command({program:"git",args:["status","--short"],cwd:"absolute project path"}) for native executable calls. Literal argv bypasses Windows quoting; for shell scripts/pipelines use command and an explicit compatible shell. Inspect final exitCode, not merely tool success. A nonzero exit means the program failed, not MCP transport. Long/interactive command -> start_process followed by read_process_output; a returned PID is not proof of success. Independent operations -> run_parallel (default concurrency 4), then use wait_jobs/get_job for incomplete or truncated output. Do not run simultaneous writes to the same path.',
   'WORKERS: worker_tasks, worker_patch and worker_integrate coordinate *existing host-native AI workers*; BRC does not create extra models. Without subagents use ordinary sequential write_file/edit_block calls; only the worker integrator uses the internal batch engine. Worker plans live in agent RAM; expire/reclaim with fresh hashes.',
   'ERRORS: check structuredContent.error.code and recovery.suggestion. BUSY means wait/reduce concurrency; CHECK_FAILED means actual verification failed; WRITE_LINE_LIMIT/WRITE_SIZE_LIMIT means nothing was written; a disconnected write may still have succeeded, so verify before any retry.',
   'Access controls and user approval are enforced separately from discovery. Do not fabricate file content, completion, tests, extra tools or successful edits.'

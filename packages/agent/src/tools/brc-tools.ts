@@ -18,13 +18,13 @@ import { validatePath } from '../core/tools/filesystem.js';
 import { commandManager } from '../core/command-manager.js';
 import { configManager } from '../core/config-manager.js';
 import { getShellSpawnArgs, getRepairedPathExt } from '../core/terminal-manager.js';
-import { selectRunCommandShell } from './command-shell.js';
+import { selectRunCommandShell, type CommandShellDecision } from './command-shell.js';
 import {commandEnvironment,commandEnvironmentPolicy} from '../runtime/command-environment.js';
 import {requestProcessTreeStop,observeManagedChild,stopManagedChild,managedTerminationState} from '../runtime/process-termination.js';
 import {commandCpuAdmission} from '../runtime/resource-admission.js';
 import {spawnManaged} from '../runtime/managed-spawn.js';
 import { AgentError, failure } from '../runtime/errors.js';
-import { planFastExec } from './fast-exec.js';
+import { planFastExec,findOnPath } from './fast-exec.js';
 import { planRtkCommand, resolveRtk, rtkEnv, annotateRtkOutput, isRtkUsageError } from './rtk.js';
 import type { ServerResult } from '../core/types.js';
 import type { ToolDefinition } from '../core/tool-definitions.js';
@@ -99,14 +99,17 @@ async function resolveShell(requested?: string): Promise<string> {
 // run_command
 // ---------------------------------------------------------------------------
 export const RunCommandArgsSchema = z.object({
-  command: z.string().min(1),
+  command: z.string().min(1).optional().describe('Shell command, only when program is not supplied.'),
+  program: z.string().min(1).max(1024).optional().describe('Executable name or absolute path. Runs directly without a shell; on Windows, native .exe programs only.'),
+  args: z.array(z.string().max(8192)).max(128).optional().default([]).describe('Literal argv values for program; spaces and shell operators in arguments are never interpolated by a shell.'),
   cwd: z.string().optional(),
   timeout_ms: z.number().int().min(1).optional().default(60_000),
   shell: z.string().optional(),
   maxOutputChars: z.number().int().min(1_000).max(1_000_000).optional().default(100_000),
   raw: z.boolean().optional().default(false),
   max_runtime_ms: z.number().int().min(1000).max(6*60*60_000).optional(),
-});
+}).refine(a=>!!a.command !== !!a.program && (!a.program || !a.shell) && (!!a.program || !a.args.length),
+  {message:'Supply exactly one of command OR program/args. Shell cannot be specified with program.'});
 
 export async function handleRunCommand(args: unknown): Promise<ServerResult> {
   if (getCallContext()?.remote) {
@@ -134,7 +137,11 @@ export async function runCommandCore(
   const parsed = RunCommandArgsSchema.safeParse(args);
   if (!parsed.success) return failure(new AgentError('INVALID_ARGUMENT',
     'Invalid run_command arguments: '+parsed.error.message.slice(0,900)));
-  const { command, shell } = parsed.data;
+  const { shell } = parsed.data;
+  // Argv-mode bypasses PowerShell/cmd quoting entirely. The textual string
+  // below is for blocklist inspection and display, never executed as shell input.
+  const command = parsed.data.command ??
+    [parsed.data.program!,...parsed.data.args.map(a=>JSON.stringify(a))].join(' ');
   // Prevent a single command result from exceeding the agent's 512 KiB frame budget.
   const maxOutputChars = Math.min(parsed.data.maxOutputChars,160_000);
   if (!opts.signal) checkCancelled();
@@ -143,7 +150,13 @@ export async function runCommandCore(
   const remaining = opts.signal ? opts.maxTimeoutMs : Math.max(1, (getCallContext()?.deadline ?? (Date.now() + opts.maxTimeoutMs)) - Date.now());
   const timeoutMs = Math.max(1, Math.min(parsed.data.timeout_ms, opts.maxTimeoutMs, remaining));
 
-  if (!(await commandManager.validateCommand(command))) {
+  const directBase = parsed.data.program
+    ?path.win32.basename(parsed.data.program.replaceAll('/','\\')).replace(/\.(exe|com)$/i,'')
+    :undefined;
+  // Check the actual native executable name as well as the displayed argv.
+  // Absolute paths containing spaces must not evade configured blockedCommands.
+  if ((directBase && !(await commandManager.validateCommand(directBase))) ||
+      !(await commandManager.validateCommand(command))) {
     return failure(new AgentError('COMMAND_BLOCKED',
       'This command is blocked by the local agent policy. No command executed.'));
   }
@@ -164,8 +177,10 @@ export async function runCommandCore(
     }
   }
 
-  const configuredShell = await resolveShell(shell);
-  const shellDecision = selectRunCommandShell(command, configuredShell, shell !== undefined);
+  const configuredShell = parsed.data.program ?? await resolveShell(shell);
+  const shellDecision:CommandShellDecision = parsed.data.program
+    ?{shell:configuredShell,originalShell:configuredShell,changed:false,nativeChain:false}
+    :selectRunCommandShell(command, configuredShell, shell !== undefined);
   if(shellDecision.error) {
     const nextArgs=shellDecision.suggestedShell
       ? {command,...(cwd?{cwd}:{}),shell:shellDecision.suggestedShell,raw:true,timeout_ms:timeoutMs}
@@ -193,9 +208,22 @@ export async function runCommandCore(
     : command;
   const env=commandEnvironment(process.env,{COREPACK_ENABLE_NETWORK:'0'});
   if (isWindows) env.PATHEXT = getRepairedPathExt();
-  const fast = await planFastExec(shellPath, command, env);
-  const cfg = fast
-    ? { executable: fast.executable, args: fast.args, windowsVerbatim: fast.windowsVerbatim }
+  let directProgram:string|undefined;
+  if(parsed.data.program){
+    const requested=parsed.data.program;
+    if(/(?:^|[\\/])(?:\.\.?)(?:[\\/]|$)/.test(requested))
+      return failure(new AgentError('PROGRAM_NOT_FOUND','Ambiguous relative executable path. Supply a full executable path or PATH-resolvable program name; no program ran.'));
+    const exts=isWindows?['.exe']:[''];
+    directProgram=findOnPath(requested,env.PATH??env.Path,exts)??undefined;
+    if(!directProgram || isWindows && path.extname(directProgram).toLowerCase()!=='.exe')
+      return failure(new AgentError('PROGRAM_NOT_FOUND',
+        'Could not resolve a native executable for '+JSON.stringify(requested)+
+        '. On Windows use an .exe (git, node, python, dotnet, rg) for program/args; .cmd/.bat scripts need command with a shell. Nothing executed.'));
+  }
+  const fast = directProgram ? null : await planFastExec(shellPath, command, env);
+  const cfg = directProgram
+    ? {executable:directProgram,args:parsed.data.args}
+    : fast ? { executable: fast.executable, args: fast.args, windowsVerbatim: fast.windowsVerbatim }
     : getShellSpawnArgs(shellPath, wrapped);
   const spawnEnv = fast?.env ?? env;
 
@@ -308,7 +336,7 @@ export async function runCommandCore(
       : timedOut ? 'TIMEOUT after '+timeoutMs+'ms'
       : 'exit code '+(exitCode===null?'null':exitCode)+(signal?' (signal '+signal+')':'');
     const actualCwd=cwd??process.cwd();
-    const details = '$ '+command+'\n['+status+' | '+r.ms+'ms | shell '+shellPath+
+    const details = '$ '+command+'\n['+status+' | '+r.ms+'ms | '+(directProgram?'program '+directProgram:'shell '+shellPath)+
       ' | cwd '+actualCwd+']\n'+
       (shellDecision.reason?'[shell selection] '+shellDecision.reason+'\n':'')+
       (note?'[output processing] '+note+'\n':'')+
@@ -316,7 +344,7 @@ export async function runCommandCore(
         ? '[output budget] requested '+parsed.data.maxOutputChars+
           ' chars; limited to '+maxOutputChars+' to protect the MCP response.\n':'')+
       (r.truncated?'[OUTPUT TRUNCATED: command completed or stopped, but some logs were omitted. Request narrower diagnostic output; do not treat this as the full log.]\n':'');
-    let cause='',suggestion='';
+    let cause='',suggestion='',commandFailureKind='NONZERO_EXIT';
     if(terminationUnconfirmed){
       cause='A stop was requested, but root-process exit was not observed before the grace deadline. Side effects may still occur.';
       suggestion='Inspect running processes and actual filesystem/external state; do not automatically repeat this command.';
@@ -330,15 +358,31 @@ export async function runCommandCore(
     } else if(failed) {
       const combined=r.err+'\n'+r.out;
       if(/not a git repository/i.test(combined)) {
+        commandFailureKind='GIT_NOT_REPOSITORY';
         cause='Git was executed outside a repository.';
         suggestion='Set cwd to the absolute Git repository directory, then re-run only the corrected command. Or use git_status / git_log for separate diagnostics.';
+      } else if(/ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND|No package\.json found|No package\.json file found|No matching package\.json|No projects matched/i.test(combined)) {
+        commandFailureKind='PROJECT_MANIFEST_MISSING';
+        cause='The package manager could not locate a project manifest or matching workspace from this cwd.';
+        suggestion='Inspect cwd and project files with list_directory or project_context; run from the actual app package directory or use an explicit package-manager project target. Do not retry unchanged.';
+      } else if(/TS\d{4}:|error TS\d{4}\b/i.test(combined)) {
+        commandFailureKind='TYPECHECK_ERROR';
+        cause='The compiler reported one or more TypeScript diagnostics.';
+        suggestion='Read the exact file and line referenced by the compiler, fix the diagnostic, then rerun the smallest relevant typecheck. Do not treat an unsuccessful build as passed.';
+      } else if(/SyntaxError:|ParserError:|Unexpected token|unterminated string|The string is missing the terminator/i.test(combined)) {
+        commandFailureKind='SYNTAX_ERROR';
+        cause='The invoked shell or script parser reported invalid syntax.';
+        suggestion='Check the selected shell and the first syntax-error location. For a single native executable prefer program + args to avoid quote/interpolation problems; inspect the script before correcting it.';
       } else if(/Could not find the Next\.js package|Cannot find package|Cannot find module|Module not found|ERR_MODULE_NOT_FOUND/i.test(combined)) {
+        commandFailureKind='MODULE_RESOLUTION';
         cause='Project dependencies or runtime module resolution failed.';
         suggestion='Check the absolute cwd, package.json and actual node_modules layout; for pnpm/Next.js confirm dependencies resolve from the project root. Re-run the smallest failing build step after correction.';
       } else if(/is not recognized as an internal or external command|The term .+ is not recognized|command not found|ENOENT/i.test(combined)) {
+        commandFailureKind='EXECUTABLE_NOT_FOUND';
         cause='An executable or shell command could not be found.';
         suggestion='Check the selected shell and PATH (including PATHEXT on Windows). Confirm that the tool is installed and use an absolute cwd. Do not retry the unchanged command.';
       } else if(/The token .{0,20}(?:&&|\|\|).{0,80}not a valid statement separator/i.test(combined)) {
+        commandFailureKind='SHELL_CHAIN_SYNTAX';
         cause='Windows PowerShell 5.1 rejected && / || command chaining.';
         suggestion='Use shell:"cmd.exe" with raw:true for a native command chain, or rewrite with PowerShell-compatible conditional statements. Check which shell is selected.';
       } else {
@@ -360,7 +404,9 @@ export async function runCommandCore(
         platform:process.platform,shell:shellPath,configuredShell,
         autoSelectedShell:shellDecision.changed,shellSelectionReason:shellDecision.reason??null,
         cwd:actualCwd,cwdProvided:!!cwd,raw:parsed.data.raw,
+        invocation:directProgram?'argv':'shell',resolvedProgram:directProgram??null,
         outputTruncated:r.truncated,maxOutputCharsApplied:maxOutputChars,
+        ...(failed && !cancelled && !timedOut && !terminationUnconfirmed?{commandFailureKind}:{}) ,
         ...(failed?{
           error:{code,message:cause,retryable:false},
           recovery:{cause,suggestion,automaticRetry:false,repeatIdenticalCommand:false}
@@ -371,7 +417,9 @@ export async function runCommandCore(
 
   // rtk: compress the output of supported simple commands (see rtk.ts). Falls back to the
   // normal run when rtk cannot start or rejects the arguments before running anything.
-  const rtkArgs = planRtkCommand({
+  // Native program+args must execute the exact requested executable and argv.
+  // Do not substitute an rtk wrapper or reinterpret shell syntax in this mode.
+  const rtkArgs = directProgram?null:planRtkCommand({
     command,
     raw: parsed.data.raw,
     posix: !['cmd', 'powershell', 'pwsh'].includes(shellName),
@@ -391,10 +439,10 @@ export async function runCommandCore(
   }
 
   const r = await execOnce(cfg, spawnEnv);
-  if (r.spawnThrew) return failure(new AgentError('SHELL_START_FAILED',
-    'Unable to start command with shell '+shellPath+': '+(r.spawnError?.message??'unknown error')+'. No command executed.'));
-  if (r.spawnError) return failure(new AgentError('SHELL_START_FAILED',
-    'Shell '+shellPath+' could not start the command: '+r.spawnError.message+'. Check installed shell/PATH; no command executed.'));
+  if (r.spawnThrew) return failure(new AgentError(directProgram?'PROGRAM_START_FAILED':'SHELL_START_FAILED',
+    'Unable to start '+(directProgram?'program ':'shell ')+shellPath+': '+(r.spawnError?.message??'unknown error')+'. No command executed.'));
+  if (r.spawnError) return failure(new AgentError(directProgram?'PROGRAM_START_FAILED':'SHELL_START_FAILED',
+    (directProgram?'Program ':'Shell ')+shellPath+' could not start: '+r.spawnError.message+'. Check installed executable/PATH and containment diagnostics; no command executed.'));
   return format(r);
   }finally{releaseCpu();}
 }
@@ -597,6 +645,8 @@ export function buildBrcToolDefinitions(): ToolDefinition[] {
       description: [
         'Quick commands return normally. Remote long-running commands return PENDING with a jobId after about 2 seconds. PENDING is not completion; get_job and wait_jobs must be called until final status, then continue the AI task.',
         'Local execution keeps its original timeout; remote managed commands have a 6-hour hard cap configurable with max_runtime_ms, not timeout_ms.',
+        'For native tools prefer program + args: {program:"git",args:["status","--short"],cwd:"D:\\project"}; literal argv avoids Windows shell interpolation, quoting errors and PowerShell 5.1 operators.',
+        'program/args accepts direct executables (.exe on Windows), not .cmd/.bat; for scripts, pipes or multiple shell statements use command with the chosen shell. Supply exactly one form.',
         'Prefer this over start_process + read_process_output for non-interactive commands',
         '(builds, tests, git, package managers, scripts, one-off queries).',
         'Use start_process/interact_with_process only for interactive or long-running sessions (REPLs, servers).',

@@ -66,6 +66,33 @@ function countNewlines(text: string, before = text.length): number {
     for (let pos = text.indexOf('\n'); pos !== -1 && pos < before; pos = text.indexOf('\n', pos + 1)) count++;
     return count;
 }
+/** Bounded, read-only repair hint. These are line numbers, not guessed edits.
+ * Never return source content or the attempted search string in telemetry.
+ */
+function findCandidateLineNumbers(content:string,wanted:string):number[]{
+    const first=wanted.split(/\r?\n/).map(line=>line.trim()).find(line=>line.length>=6);
+    if(!first)return [];
+    const probes=[first.slice(0,Math.min(first.length,48)),first.slice(0,Math.min(first.length,12))];
+    for(const probe of probes){
+        const found:number[]=[];
+        let line=1,offset=0;
+        while(offset<content.length && found.length<8){
+            const end=content.indexOf('\n',offset);
+            const limit=end<0?content.length:end;
+            if(content.slice(offset,limit).includes(probe))found.push(line);
+            if(end<0)break;
+            offset=end+1;line++;
+        }
+        if(found.length)return found;
+    }
+    return [];
+}
+function repairHint(content:string,sourceSha256:string,wanted:string,readPath:string){
+    const candidateLines=findCandidateLineNumbers(content,wanted);
+    const line=candidateLines[0];
+    return {sourceSha256,candidateLines,
+      ...(line?{next:{tool:'read_code_file',args:{path:readPath,offset:Math.max(0,line-4),length:14}}}:{})};
+}
 export function boundedEditPreview(text: string, changeOffset: number, replacement: string): {statusLine:string; previewContent:string} {
     const totalLines = countNewlines(text) + 1;
     const changeStartLine = changeOffset < 0 ? 0 : countNewlines(text, changeOffset);
@@ -87,7 +114,7 @@ export function boundedEditPreview(text: string, changeOffset: number, replaceme
     return {statusLine, previewContent};
 }
 
-export async function performSearchReplace(filePath: string, block: SearchReplace, expectedReplacements: number = 1, origin?: 'ui' | 'llm'): Promise<ServerResult> {
+export async function performSearchReplace(filePath: string, block: SearchReplace, expectedReplacements: number = 1, origin?: 'ui' | 'llm', replaceAll=false): Promise<ServerResult> {
     // Get file extension for telemetry using path module
     const fileExtension = path.extname(filePath).toLowerCase();
     
@@ -134,8 +161,13 @@ export async function performSearchReplace(filePath: string, block: SearchReplac
     // Normalize search string to match file's line endings
     const normalizedSearch = normalizeLineEndings(block.search, fileLineEnding);
     
-    // First try exact match
+    // First try exact match. replace_all is an explicit bulk-edit request;
+    // never infer it from an ambiguous match count.
     const count = countNonOverlapping(content, normalizedSearch);
+    if(replaceAll && count>10000)return editBlockFailure('EDIT_COUNT_MISMATCH',
+      'replace_all found over 10000 occurrences; no changes were written.',COUNT_GUIDANCE,
+      {actualReplacements:count,sourceSha256:originalHash});
+    if(replaceAll && count>0)expectedReplacements=count;
     
     // If exact match found and count matches expected replacements, proceed with exact replacement
     if (count > 0 && count === expectedReplacements) {
@@ -203,7 +235,8 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
         capture('server_edit_block_unexpected_count', {fileExtension: fileExtension, expectedReplacements, expectedReplacementsCount: count});
         return editBlockFailure('EDIT_COUNT_MISMATCH',
             `Expected ${expectedReplacements} occurrences but found ${count} in ${filePath}. No changes were written.`,
-            COUNT_GUIDANCE,{expectedReplacements,actualReplacements:count});
+            COUNT_GUIDANCE,{expectedReplacements,actualReplacements:count,
+                ...repairHint(content,originalHash,normalizedSearch,validPath)});
     }
     
     // An exact multi-line block may have been reindented by a formatter.
@@ -238,7 +271,8 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
     if (count === 0) {
         return editBlockFailure('EDIT_TEXT_NOT_FOUND',
             'old_string was not found exactly in the current file. No changes were written.',
-            NO_MATCH_GUIDANCE, {actualReplacements:0});
+            NO_MATCH_GUIDANCE, {actualReplacements:0,
+                ...repairHint(content,originalHash,normalizedSearch,validPath)});
     }
 
     throw new Error("Unexpected error during search and replace operation.");
@@ -295,7 +329,7 @@ function countNonOverlapping(haystack: string, needle: string): number {
 export async function performMultiEdit(
     validPath: string,
     displayPath: string,
-    edits: Array<{ old_string: string; new_string: string; expected_replacements?: number }>,
+    edits: Array<{ old_string: string; new_string: string; expected_replacements?: number;replace_all?:boolean }>,
 ): Promise<ServerResult> {
     // One bounded file snapshot supplies both the contents and conflict hash.
     // Preserve existing UTF-8 text/line endings while avoiding duplicate reads.
@@ -312,7 +346,7 @@ export async function performMultiEdit(
 
     for (let i = 0; i < edits.length; i++) {
         const e = edits[i];
-        const expected = e.expected_replacements ?? 1;
+        let expected = e.expected_replacements ?? 1;
         const label = `Edit #${i + 1} of ${edits.length}`;
         if (!e.old_string) {
             return editBlockFailure('INVALID_ARGUMENT',
@@ -322,6 +356,10 @@ export async function performMultiEdit(
         const search = normalizeLineEndings(e.old_string, lineEnding);
         const replace = normalizeLineEndings(e.new_string, lineEnding);
         const count = countNonOverlapping(next, search);
+        if(e.replace_all && count>10000)return editBlockFailure('EDIT_COUNT_MISMATCH',
+          'Edit #'+(i+1)+' would replace over 10000 occurrences; no changes were written.',COUNT_GUIDANCE,
+          {editIndex:i+1,actualReplacements:count,editsApplied:0});
+        if(e.replace_all && count>0)expected=count;
 
         if (count !== expected) {
             const hint = count > 0
@@ -332,7 +370,8 @@ export async function performMultiEdit(
                 (i>0?' (after evaluating previous edits in memory)':'')+
                 `. No changes were written.${hint.slice(0,1200)}`,
                 count===0?NO_MATCH_GUIDANCE:COUNT_GUIDANCE,
-                {editIndex:i+1,expectedReplacements:expected,actualReplacements:count,editsApplied:0});
+                {editIndex:i+1,expectedReplacements:expected,actualReplacements:count,editsApplied:0,
+                    ...repairHint(next,originalHash,search,validPath)});
         }
 
         if (expected === 1) {
@@ -401,6 +440,10 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
     }
 
     const hasEditRange = 'editRange' in handler && typeof handler.editRange === 'function';
+    if(hasEditRange && (parsed.replace_all||parsed.edits?.some(edit=>edit.replace_all)))
+      return editBlockFailure('EDIT_UNSUPPORTED_REPLACE_ALL',
+        'replace_all applies only to plain UTF-8 text files; structured Office formats have different replacement semantics.',
+        'Use exact expected_replacements with the appropriate structured document tool; no change was made.');
 
     // Path 1: Range rewrite (Excel, etc.) — range + content
     if (hasRange && hasContent) {
@@ -536,5 +579,5 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
     return performSearchReplace(parsed.file_path, {
         search: parsed.old_string,
         replace: parsed.new_string
-    }, parsed.expected_replacements, parsed.origin);
+    }, parsed.expected_replacements, parsed.origin, parsed.replace_all);
 }

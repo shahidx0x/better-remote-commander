@@ -38,7 +38,7 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   },
   write_file: {
     use: 'Create, replace, or append ONE selected file.',
-    instead: 'For coordinated multiple source files use workspace_batch; for a focused text replacement use edit_block; for PDF creation/editing use write_pdf.',
+    instead: 'For several existing code files use apply_patch or hash-checked edit_files; for a focused text replacement use edit_block; for PDF creation/editing use write_pdf.',
     caveat: 'Hard limits: 2000 lines and 1 MiB per call (new default 1000 lines). A rejected write changes nothing. Successful append/rewrite confirms only that chunk; verify before retrying after an uncertain connection.',
   },
   write_pdf: {
@@ -78,7 +78,7 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   start_search: {
     use: 'Find filenames or content under a known project root when the exact paths are UNKNOWN.',
     instead: 'For 2+ known paths use read_multiple_files; for code context and hashes use read_code_context.',
-    caveat: 'Set wait=true for a single bounded call; poll only when an actual streaming search is needed.',
+    caveat: 'Set wait=true for one bounded call; implicit invalid regex retries once as a literal search, while explicit literalSearch:false keeps strict regex validation. Poll only for actual streaming searches.'
   },
   get_more_search_results: {
     use: 'Read a subsequent page from an ACTIVE asynchronous search session.',
@@ -99,8 +99,8 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   },
   edit_block: {
     use: 'Make a small exact find-and-replace or supported structural edit in ONE file.',
-    instead: 'For hash-checked coordinated edits across several files use edit_files / workspace_batch.',
-    caveat: 'For one file, use exact old_string/new_string; include whitespace and unique context. expected_replacements defaults to 1 and must equal the actual count. An unmatched edit returns EDIT_TEXT_NOT_FOUND; mismatched counts return EDIT_COUNT_MISMATCH; stale expected_sha256 returns FILE_CONFLICT. On any failure re-read the file and do not replay the unchanged edit. Check changed/partialApplied before retrying a DOCX or spreadsheet edit.',
+    instead: 'For multi-hunk existing source changes use apply_patch or hash-checked edit_files; for one exact snippet use edit_block.',
+    caveat: 'Use exact old_string/new_string; default one occurrence. Explicit replace_all=true changes every exact match, never ambiguous by default. On mismatch, use returned sourceSha256, candidateLines and next read window; do not fuzzy-guess or blindly retry. FILE_CONFLICT requires inspecting the latest hash. Check partialApplied for Office files.',
   },
   start_process: {
     use: 'Start a long-running or interactive shell command that may need more input or output retrieval.',
@@ -146,7 +146,7 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   run_command: {
     use: 'Run a ONE-SHOT command (git, build, test, package manager) and get its final exit code and bounded output.',
     instead: 'For interactive or long-running sessions use start_process; for discovered project checks use run_project_checks; for ordinary reads use read_multiple_files.',
-    caveat: 'Windows uses the selected/configured shell; PowerShell 5.1 has no && or ||. For a safe native git/node/pnpm chain on PS5.1, run_command may select cmd.exe if shell omitted; explicit CMD syntax requires shell:"cmd.exe". Give absolute cwd, use raw:true for debugging, distinguish COMMAND_FAILED vs TIMEOUT vs SHELL_SYNTAX and inspect exit code before success.',
+    caveat: 'Prefer program + args for Git, Node, Python, dotnet and rg on Windows: literal argv bypasses shell quoting and && operators inside data. Shell command mode remains for pipelines/scripts; PowerShell 5.1 does not accept &&/||. A nonzero exit is a real failed command, not an MCP connection failure. Inspect exitCode and diagnostic output; never blindly repeat a failed mutation.',
   },
   delete_file: {
     use: 'Delete an explicitly named file, empty directory or approved recursive directory.',
@@ -173,6 +173,11 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   read_code_context: {
     use: 'Search unknown code locations with ripgrep and return nearby fresh snippets and hashes in ONE call.',
     instead: 'For known files use read_multiple_files / read_code_ranges; for semantic references do not trust lexical matches alone.',
+  },
+  apply_patch: {
+    use: 'Apply a multi-hunk context patch to existing source files when exact old_string edits are error-prone or span several lines.',
+    instead: 'For simple one-file substitutions use edit_block; for explicit hash-based replacements use edit_files. To create/delete/move use write_file/delete_file/move_file.',
+    caveat: 'Update File + @@ hunks only. Every whole-line context must match uniquely before any file is written; atomic per-file commit with best-effort rollback, not crash-atomic.',
   },
   edit_files: {
     use: 'Make hash-checked exact replacements in several UTF-8 files, validating all before publication.',
@@ -413,10 +418,11 @@ export const TOOL_WORKFLOWS: Record<string,string> = {
   read_code_file: 'START: path,offset,length for code + SHA-256; if a single line is oversized use charOffset/charLength, then follow nextCharOffset. Keep the full-file hash for edits.',
   read_code_ranges: 'START: multiple exact known line ranges; check returned hashes. NEXT: narrow or paginate if snippets are truncated.',
   write_file: 'START: mode=rewrite for a new file; explicit mode=append for subsequent chunks (or mode=rewrite for deliberate replacement). NEXT: if WRITE_*_LIMIT, nothing changed: split. If SUCCESS, only that chunk completed. If transport outcome is uncertain, inspect file/hash BEFORE retrying. Never append the same chunk twice. Optional strict source mode requires expected_sha256 for existing code/config files.',
-  edit_block: 'START: read the current file and provide an exact old_string/new_string; prefer expected_sha256 or expected replacement counts. NEXT: inspect changed content/diff; on conflict reread source, never force an uncertain edit.',
+  edit_block: 'START: read the file and provide exact unique old_string/new_string; replace_all:true explicitly authorizes all exact occurrences. On EDIT_TEXT_NOT_FOUND inspect candidateLines/sourceSha256/next read range. Prefer expected_sha256 or expected replacement counts. NEXT: inspect changed content/diff; on conflict reread source, never force an uncertain edit.',
   workspace_batch: 'START: hash-checked changes with dryRun=true; inspect validation. APPLY: dryRun=false only with user authorization. NEXT: inspect per-file hashes and actual check results. Rollback is best effort; never replay an uncertain commit.',
   batch_tools: 'START: group INDEPENDENT reads in mode=auto; use maxChars. Writes are ordered barriers; a prior successful write is not rolled back if a later step fails. NEXT: read skipped/truncated results separately.',
-  run_command: 'START: one-shot command, preferably absolute cwd; Windows uses the configured shell (often cmd.exe); PowerShell 5.1 cannot parse &&/||. Safe native chains auto-select cmd.exe when PowerShell 5.1 was selected implicitly; for CMD syntax pass shell:"cmd.exe", and raw:true for diagnostics. NEXT: inspect structuredContent.exitCode/error.code/recovery; COMMAND_FAILED is a real nonzero exit, TIMEOUT exceeded execution time, SHELL_SYNTAX changed nothing. Never retry identically without correction. Use start_process for interactive/long-running work.',
+  apply_patch: 'START: cwd (project root) + *** Begin Patch/Update File/@@ context hunks. Preview with dryRun=true when uncertain. NEXT: inspect validated hashes and run actual checks; creates/deletes/moves are deliberately separate tools.',
+  run_command: 'START: prefer program + literal args + absolute cwd for Git/Node/Python/dotnet/rg (no shell quoting); command + shell is for scripts/pipelines. Windows uses the configured shell (often cmd.exe); PowerShell 5.1 cannot parse &&/||. Safe native chains auto-select cmd.exe when PowerShell 5.1 was selected implicitly; for CMD syntax pass shell:"cmd.exe", and raw:true for diagnostics. NEXT: inspect structuredContent.exitCode/error.code/recovery; COMMAND_FAILED is a real nonzero exit, TIMEOUT exceeded execution time, SHELL_SYNTAX changed nothing. Never retry identically without correction. Use start_process for interactive/long-running work.',
   start_process: 'START: long-running/interactive command. Returned PID means STARTED, not successful. NEXT: read_process_output, then interact_with_process if waiting for input; inspect final exit code.',
   read_process_output: 'START: known PID, offset=0 for new output; positive absolute offset or negative tail. NEXT: follow remaining output, or stop polling when process has exited.',
   run_parallel: 'START: independent operations with max_concurrency=3, or add depends_on:[0,1] using earlier zero-based call indices. A dependent step runs only after predecessors succeed. NEXT: wait_jobs({group}) or get_job(id); never replay a completed mutation to retrieve output.',
@@ -431,7 +437,7 @@ export const TOOL_WORKFLOWS: Record<string,string> = {
 };
 // Tool schemas remain available in full; route text stays complete, while
 // verbose details receive a smaller bounded token/metadata budget.
-export const MAX_DISCOVERY_DESCRIPTION_CHARS=1018;
+export const MAX_DISCOVERY_DESCRIPTION_CHARS=912;
 /** Prefix use / avoid / next-step rules. Never mutate tool schemas, names or permissions. */
 export function addToolChoice<T extends { name: string; description: string }>(tool: T): T {
   const rule = TOOL_CHOICES[tool.name];
