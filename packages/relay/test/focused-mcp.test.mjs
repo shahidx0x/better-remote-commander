@@ -15,9 +15,9 @@ test('focused MCP discovery reduces the advertised tool list without changing au
     const {tools}=await liveTools(hub,store,'focused-offline');
     const names=new Set(tools.map(t=>t.name));
     assert.ok(names.size>=40 && names.size<=60,'unexpected focused count '+names.size);
-    for(const name of ['read_file','read_multiple_files','write_file','edit_block','run_command','run_parallel','worker_tasks','agent_status'])
+    for(const name of ['read_file','read_multiple_files','write_file','edit_block','edit_files','lsp_query','run_command','run_parallel','worker_tasks','agent_status'])
       assert.ok(names.has(name),'missing essential '+name);
-    for(const name of ['write_pdf','ast_search','ast_rewrite','sandbox_run','workspace_batch','edit_files'])
+    for(const name of ['write_pdf','ast_search','ast_rewrite','sandbox_run','workspace_batch'])
       assert.ok(!names.has(name),'advanced tool should be hidden '+name);
     for(const tool of tools){
       assert.ok(tool.description.startsWith('USE WHEN:'),'missing routing for '+tool.name);

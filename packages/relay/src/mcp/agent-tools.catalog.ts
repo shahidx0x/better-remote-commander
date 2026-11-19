@@ -4,7 +4,7 @@ import type { ToolDefinition } from 'brc-shared';
 export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   {
     "name": "read_multiple_files",
-    "description": "USE WHEN: Read 2+ already-known files or specific per-file ranges in ONE MCP request.\nUSE INSTEAD: If names are unknown use start_search; if you need multiple code ranges with hashes use read_code_ranges; do not issue repeated read_file calls.\nIMPORTANT: Up to 8 reads overlap internally; individual errors are isolated. Use batch.continuations when truncated; images/PDFs have a small shared media budget.\nHOW / NEXT: START: paths[] for known files, or files[{path,offset,length}] for precise ranges. NEXT: batch.continuations, or smaller batches if the shared reply budget is reached. Do not treat a truncated batch as the complete files.\nDETAILS: PREFERRED FOR 2 OR MORE KNOWN FILE PATHS: read_multiple_files uses ONE MCP call and reads up to 8 files concurrently. Use this instead of repeating read_file, parallel Promise.all(read_file), or batching several identical read_file calls. Read only the files needed; search first when paths are unknown. For many narrow code snippets with hashes, prefer read_code_ranges. For mixed tool types, use batch_tools. For image previews, prefer read_images.\n\nReturns a bounded combined response: 200 lines per file by default (up to 2000 when requested), at most 48000 text characters per item, 160000 total text characters and 2 MiB combined image data. A TRUNCATED notice means content is incomplete; reread a smaller range. For image-heavy batches prefer read_images.\n\nTwo ways to list files (can be combined):\n- paths: [\"/a.ts\", \"/b.ts\"] → read each file from the start (default line limit)\n- files: [{path: \"/a.ts\", offset: 120, length: 40}, {path: \"/b.log\", offset: -50}]\n→ per-file line ranges, same offset/length semantics as read_file\n\nEach file's content is returned with its path as a reference.\nHandles text files normally and renders images as viewable content.\nRecognized image types: PNG, JPEG, GIF, WebP.\n\nFailed reads for individual files won't stop the entire operation.\nOnly works within allowed directories.\n\nIMPORTANT: Use absolute paths appropriate for the connected device.",
+    "description": "USE WHEN: Read 2+ already-known files or specific per-file ranges in ONE MCP request.\nUSE INSTEAD: If names are unknown use start_search; if you need multiple code ranges with hashes use read_code_ranges; do not issue repeated read_file calls.\nIMPORTANT: Up to 3 file reads overlap internally; individual errors are isolated. Use batch.continuations when truncated; images/PDFs have a small shared media budget.\nHOW / NEXT: START: paths[] for known files, or files[{path,offset,length}] for precise ranges. NEXT: batch.continuations, or smaller batches if the shared reply budget is reached. Do not treat a truncated batch as the complete files.\nDETAILS: PREFERRED FOR 2 OR MORE KNOWN FILE PATHS: read_multiple_files uses ONE MCP call and reads up to 8 files concurrently. Use this instead of repeating read_file, parallel Promise.all(read_file), or batching several identical read_file calls. Read only the files needed; search first when paths are unknown. For many narro\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -75,7 +75,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "batch_tools",
-    "description": "USE WHEN: Bundle multiple INDEPENDENT different tool operations into one MCP call, especially mixed safe reads/searches.\nUSE INSTEAD: For only 2+ known files use read_multiple_files; for coordinated multi-file writes use workspace_batch.\nIMPORTANT: Do not nest batches; reads can overlap but dependent steps must remain ordered.\nHOW / NEXT: START: group INDEPENDENT reads in mode=auto; use maxChars. Writes are ordered barriers; a prior successful write is not rolled back if a later step fails. NEXT: read skipped/truncated results separately.\nDETAILS: BEST FOR 2+ INDEPENDENT, DIFFERENT read/search/context operations in ONE MCP round trip (up to 64). If just reading 2+ known files, use read_multiple_files instead; for many specific code ranges/hashes use read_code_ranges. Auto mode overlaps consecutive reads up to concurrency=4 and orders any write barriers; parallel mode is read-only. Do not nest batches or include shell/config tools. Output is bounded; earlier writes are not rolled back. For multi-file edits + readback/checks prefer workspace_batch.",
+    "description": "USE WHEN: Bundle multiple INDEPENDENT different tool operations into one MCP call, especially mixed safe reads/searches.\nUSE INSTEAD: For only 2+ known files use read_multiple_files; for coordinated multi-file writes use workspace_batch.\nIMPORTANT: Do not nest batches; reads can overlap but dependent steps must remain ordered.\nHOW / NEXT: START: group INDEPENDENT reads in mode=auto; use maxChars. Writes are ordered barriers; a prior successful write is not rolled back if a later step fails. NEXT: read skipped/truncated results separately.\nDETAILS: BEST FOR 2+ INDEPENDENT, DIFFERENT read/search/context operations in ONE MCP round trip (up to 64). If just reading 2+ known files, use read_multiple_files instead; for many specific code ranges/hashes use read_code_ranges. Auto mode overlaps consecutive reads up to concurrency=4 and orders any write barriers; parallel mode is read-only. Do not nest batches or include shell/config tools. Output is bounded; earlier w\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -146,7 +146,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "workspace_batch",
-    "description": "USE WHEN: Coordinate MULTIPLE hash-checked file edits, post-edit reads and agreed checks in one MCP request.\nUSE INSTEAD: For only file reads use read_multiple_files; for independent mixed reads use batch_tools; for one tiny edit use edit_block.\nIMPORTANT: dryRun=true by default; set false only when authorized. Rollback is best effort.\nHOW / NEXT: START: hash-checked changes with dryRun=true; inspect validation. APPLY: dryRun=false only with user authorization. NEXT: inspect per-file hashes and actual check results. Rollback is best effort; never replay an uncertain commit.\nDETAILS: PREFERRED FOR COORDINATED MULTI-FILE WRITES: one MCP call for up to 64 hash-checked changes, 64 readbacks and 5 real project checks. Also supports conditional/ranged reads with known hashes. Use read_multiple_files instead for read-only multi-file inspection; batch_tools for mixed independent reads. path is project root; expected_sha256 is required for edits, null means create-only, content OR exact edits. dryRun=true by default: set false to commit. Validates first, per-file atomic publication with best-effort rollback; optional writeConcurrency=1..4 for distinct files; returns hashes/readbacks. Not a crash-atomic project transaction.",
+    "description": "USE WHEN: Coordinate MULTIPLE hash-checked file edits, post-edit reads and agreed checks in one MCP request.\nUSE INSTEAD: For only file reads use read_multiple_files; for independent mixed reads use batch_tools; for one tiny edit use edit_block.\nIMPORTANT: dryRun=true by default; set false only when authorized. Rollback is best effort.\nHOW / NEXT: START: hash-checked changes with dryRun=true; inspect validation. APPLY: dryRun=false only with user authorization. NEXT: inspect per-file hashes and actual check results. Rollback is best effort; never replay an uncertain commit.\nDETAILS: PREFERRED FOR COORDINATED MULTI-FILE WRITES: one MCP call for up to 64 hash-checked changes, 64 readbacks and 5 real project checks. Also supports conditional/ranged reads with known hashes. Use read_multiple_files instead for read-only multi-file inspection; batch_tools for mixed independent reads. path is project root; expected_sha256 is required for edits, null means create-onl\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -400,7 +400,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "read_file",
-    "description": "USE WHEN: Read ONE known file, section or supported URL.\nUSE INSTEAD: For 2+ known files use read_multiple_files; for code with hashes use read_code_file / read_code_ranges; for image previews use read_images.\nIMPORTANT: Text is line-paginated (new default 300, hard cap 2000); PDF is page-paginated (default 3, max 5). Follow read.next when more content exists. Giant lines require read_code_file character windows.\nHOW / NEXT: START: path + small offset/length. NEXT: structuredContent.read.next for remaining text/PDF pages. Giant line: read_code_file charOffset/charLength until nextCharOffset=null. No next means no automatic extra read.\nDETAILS: ONE FILE OR URL ONLY. If you already know 2+ paths, prefer ONE read_multiple_files call, not several read_file calls or Promise.all(read_file). For narrow code snippets across files with hashes use read_code_ranges; mixed independent reads use batch_tools.\nRead path from allowed directories. Use isUrl=true for URLs. offset/length select lines (0-based) for text files, negative offset tails efficiently; default 300 lines on a new install, configurable up to 2000 lines. Model-facing text is capped at 128000 characters with an explicit TRUNCATED notice for huge lines; request narrower ranges or use read_code_file for character offsets. If you need a full-file SHA-256 for safe edits, use read_code_file.\nSupported formats: text; Excel via sheet/range (A1:D100) or rows; PDF as page text/images with page offsets; DOCX outline by default (offset=0), raw XML with nonzero offset for exact edits; raster images as image content (use read_images for optimized previews/contact sheets). Use dedicated tools instead of launching a shell to cat/type files.\nIMPORTANT: Use absolute paths appropriate for the connected device. Relative paths may depend on the active shell and working directory.\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: Read ONE known file, section or supported URL.\nUSE INSTEAD: For 2+ known files use read_multiple_files; for code with hashes use read_code_file / read_code_ranges; for image previews use read_images.\nIMPORTANT: Text is line-paginated (new default 300, hard cap 2000); PDF is page-paginated (default 3, max 5). Follow read.next when more content exists. Giant lines require read_code_file character windows.\nHOW / NEXT: START: path + small offset/length. NEXT: structuredContent.read.next for remaining text/PDF pages. Giant line: read_code_file charOffset/charLength until nextCharOffset=null. No next means no automatic extra read.\nDETAILS: ONE FILE OR URL ONLY. If you already know 2+ paths, prefer ONE read_multiple_files call, not several read_file calls or Promise.all(read_file). For narrow code snippets across files with hashes use read_code_ranges; mixed independent reads use batch_tools.\nRead path from allowed directories. Use isUrl=true for URLs. offset/length select lines (0-based) for text files, negative offset tails efficiently; default 300 lines on a new install, configurable up to 2000 lines. Model-facing text is capped at 128000 characters with an explicit TRUNCATED notice for huge lines; request narrower ranges or use read_code_file for character offsets. If you need a full-file SHA-256 for safe edits, use read_code_file.\nSupported formats: text; Excel via sheet/range (A1:D100) or rows; PDF as page text/images with page offsets; DOCX outline by default (offset=0), raw XML with nonzero offset for exact edits; raster images as image content (use read_images for optimized previews/contact sheets). Use dedicated to\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -495,7 +495,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "start_search",
-    "description": "USE WHEN: Find filenames or content under a known project root when the exact paths are UNKNOWN.\nUSE INSTEAD: For 2+ known paths use read_multiple_files; for code context and hashes use read_code_context.\nIMPORTANT: Set wait=true for a single bounded call; poll only when an actual streaming search is needed.\nDETAILS: SEARCH WHEN PATHS ARE UNKNOWN. For filename or content discovery, use ONE start_search call with wait=true and bounded maxResults; avoid unnecessary polling (get_more_search_results) unless you deliberately need streaming.\nsearchType=\"files\" finds names; searchType=\"content\" searches file contents. pattern is regex unless literalSearch=true. filePattern filters files; includeHidden and ignoreCase control scope; contextLines adds surrounding lines.\nChoose wait=true for the complete bounded response in one call, wait=false only for a long-running stream. For 2+ known paths, use read_multiple_files instead. For code search with immediate surrounding fresh snippets and hashes, prefer read_code_context.\nSet path to the project directory, narrow pattern/filePattern, and use appropriate limits. Search never edits files.\nIMPORTANT: Use absolute paths appropriate for the connected device. Relative paths may depend on the active shell and working directory.\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: Find filenames or content under a known project root when the exact paths are UNKNOWN.\nUSE INSTEAD: For 2+ known paths use read_multiple_files; for code context and hashes use read_code_context.\nIMPORTANT: Set wait=true for a single bounded call; poll only when an actual streaming search is needed.\nDETAILS: SEARCH WHEN PATHS ARE UNKNOWN. For filename or content discovery, use ONE start_search call with wait=true and bounded maxResults; avoid unnecessary polling (get_more_search_results) unless you deliberately need streaming.\nsearchType=\"files\" finds names; searchType=\"content\" searches file contents. pattern is regex unless literalSearch=true. filePattern filters files; includeHidden and ignoreCase control scope; contextLines adds surrounding lines.\nChoose wait=true for the complete bounded response in one call, wait=false only for a long-running stream. For 2+ known paths, use read_multiple_files instead. Content searches with wait=true now includ\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -530,6 +530,10 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
         "contextLines": {
           "type": "number",
           "default": 5
+        },
+        "includeSource": {
+          "type": "boolean",
+          "default": true
         },
         "timeout_ms": {
           "type": "number"
@@ -598,7 +602,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "context_pack",
-    "description": "USE WHEN: Collect BOUNDED project instructions and related context in ONE call. For broad orientation start with mode=outline (compact file IDs, line ranges and edge candidates; no source snippets), then selectively expand exact source with read_code_ranges or read_symbol. Default mode=balanced includes fresh code snippets/hashes.\nUSE INSTEAD: For only 2+ known files use read_multiple_files; do not dump an entire repository unnecessarily.\nIMPORTANT: Outline is representation compression, not model conversation compaction; graph relationships are candidates, and no extra LLM or database is involved.\nDETAILS: Budgeted coding context. mode=outline returns compressed graph/file/symbol IDs, scoped instructions and exact line references with no raw source snippets; expand through read_code_ranges/read_symbol. Default mode=balanced reads fresh source snippets/hashes. Context-aware across languages, no extra LLM calls, saved transcripts or database.",
+    "description": "USE WHEN: Collect BOUNDED project instructions and related context in ONE call. For broad orientation start with mode=outline (compact file IDs, line ranges and edge candidates; no source snippets), then selectively expand exact source with read_code_ranges or read_symbol. Default mode=balanced includes fresh code snippets/hashes.\nUSE INSTEAD: For only 2+ known files use read_multiple_files; do not dump an entire repository unnecessarily.\nIMPORTANT: Outline is representation compression, not model conversation compaction; graph relationships are candidates, and no extra LLM or database is involved.\nDETAILS: Budgeted coding context. mode=outline returns compressed graph/file/symbol IDs, scoped instructions and exact line references without source snippets; expand via read_code_ranges/read_symbol. mode=balanced reads fresh source/hashes. Includes lightweight retrieval metadata; use project_context for editor settings and checks. No extra LLM calls or saved transcripts.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -709,7 +713,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "edit_files",
-    "description": "USE WHEN: Make hash-checked exact replacements in several UTF-8 files, validating all before publication.\nUSE INSTEAD: For changes + readback + project checks in one call use workspace_batch; for one tiny edit use edit_block.\nIMPORTANT: Rollback is best effort, not a crash-atomic project transaction.\nDETAILS: Apply exact edits to up to 16 UTF-8 files using mandatory expected_sha256 values from read_code_file/context. Validate all first, atomic replace per file, conflict-aware rollback on failure. dryRun previews hashes without writes. Not a crash-atomic multi-file transaction.",
+    "description": "USE WHEN: Make hash-checked exact replacements in several UTF-8 files, validating all before publication.\nUSE INSTEAD: For one tiny edit use edit_block; for explicit post-edit verification use run_project_checks. Hash-checked patches are not a crash-atomic multi-file transaction.\nIMPORTANT: Rollback is best effort, not a crash-atomic project transaction.\nDETAILS: SAFE MULTI-FILE PATCH: Apply up to 100 exact hunks per file across 1-16 UTF-8 files using mandatory expected_sha256 values from read_code_file or start_search(wait=true,searchType=content). Validate all first, atomic replace per file, conflict-aware rollback on failure. dryRun previews hashes without writes. Not a crash-atomic multi-file transaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -784,7 +788,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "edit_block",
-    "description": "USE WHEN: Make a small exact find-and-replace or supported structural edit in ONE file.\nUSE INSTEAD: For hash-checked coordinated edits across several files use edit_files / workspace_batch.\nIMPORTANT: Use expected_sha256 and expected match counts when available; verify the final diff.\nHOW / NEXT: START: read the current file and provide an exact old_string/new_string; prefer expected_sha256 or expected replacement counts. NEXT: inspect changed content/diff; on conflict reread source, never force an uncertain edit.\nDETAILS: Apply surgical edits to files.\n\nBEST PRACTICE: Make multiple small, focused edits rather than one large edit.\nEach edit_block call should change only what needs to be changed - include just enough\ncontext to uniquely identify the text being modified.\n\nFORMAT HANDLING (by extension):\n\nEXCEL FILES (.xlsx, .xls, .xlsm) - Range Update mode:\nTakes:\n- file_path: Path to the Excel file\n- range: ALWAYS use FROM:TO format - \"SheetName!A1:C10\" or \"SheetName!C1:C1\"\n- content: 2D array, e.g., [[\"H1\",\"H2\"],[\"R1\",\"R2\"]]\n\nTEXT FILES - Find/Replace mode:\nTakes:\n- file_path: Path to the file to edit\n- old_string: Text to replace\n- new_string: Replacement text\n- expected_replacements: Optional number of replacements (default: 1)\n\nDOCX FILES (.docx) - XML Find/Replace mode:\nTakes same parameters as text files (old_string, new_string, expected_replacements).\nOperates on the pretty-printed XML inside the DOCX — the same XML you see from\nread_file with offset/length. Copy XML fragments from read output as old_string.\nAfter editing, the XML is repacked into a valid DOCX.\nAlso searches headers/footers if not found in document body.\nExamples:\n- Replace text: old_string=\"<w:t>Old Text</w:t>\" new_string=\"<w:t>New Text</w:t>\"\n- Change style: old_string='<w:pStyle w:val=\"Normal\"/>' new_string='<w:pStyle w:val=\"Heading1\"/>'\n- Add content: include surrounding XML context in old_string, add new elements in new_string\n\nBy default, replaces only ONE occurrence of the search text.\nTo replace multiple occurrences, provide expected_replacements with\nthe exact number of matches expected.\n\nUNIQUENESS REQUIREMENT: When expected_replacements=1 (default), include the minimal\namount of context necessary (typically 1-3 lines) before and after the change point,\nwith exact whitespace and indentation.\n\nMULTI-EDIT (preferred for several changes in one file):\nPass edits: [{old_string, new_string, expected_replacements?}, ...] instead of\nold_string/new_string. Edits apply in order (each sees the result of the previous one)\nin ONE call. For text files it is all-or-nothing: if any edit fails to match, nothing\nis written and the failing edit is reported.\n\nWhen a close but non-exact match is found, a character-level diff is shown in the format:\ncommon_prefix{-removed-}{+added+}common_suffix to help you identify what's different.\n\nedit_block warns about oversized search/replacement block\n[More details are in the tool input schema. Prefer bounded ranges and check result metadata.]",
+    "description": "USE WHEN: Make a small exact find-and-replace or supported structural edit in ONE file.\nUSE INSTEAD: For hash-checked coordinated edits across several files use edit_files / workspace_batch.\nIMPORTANT: For one file, use exact old_string/new_string; include whitespace and unique context. expected_replacements defaults to 1 and must equal the actual count. An unmatched edit returns EDIT_TEXT_NOT_FOUND; mismatched counts return EDIT_COUNT_MISMATCH; stale expected_sha256 returns FILE_CONFLICT. On any failure re-read the file and do not replay the unchanged edit. Check changed/partialApplied before retrying a DOCX or spreadsheet edit.\nHOW / NEXT: START: read the current file and provide an exact old_string/new_string; prefer expected_sha256 or expected replacement counts. NEXT: inspect changed content/diff; on conflict reread source, never force an uncertain edit.\nDETAILS: Apply surgical edits to files.\n\nBEST PRACTICE: Make multiple small, focused edits rather than one large edit.\nEach edit_block call should change only what needs to be changed - include just enough\ncontext to uniquely identify the text being modified.\n\nFORMAT HANDLING (by extension):\n\nEXCEL FILES (.xlsx, .xls, .xlsm) - Range Update mode:\nTakes:\n- file_path: Path to the Excel file\n- range: ALWAYS use FROM:TO format - \"SheetName!A1:C10\" or \"SheetName!C1:C1\"\n- content: 2D array, e.g., [[\"H1\",\"H2\"],[\"R1\",\"R2\"]]\n\nTEXT FILES - Find/Replace mode:\nTakes:\n- file_path: Path to the file to edit\n- old_string: Text to replace\n- new_string: Replacement text\n- expected_replacements: Optional number of replacements (default: 1)\n\nDOCX FILES (.docx) - XML Find/Replace mode:\nTakes sa\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -793,7 +797,8 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
           "pattern": "^[a-fA-F0-9]{64}$"
         },
         "file_path": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "old_string": {
           "type": "string"
@@ -802,7 +807,9 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
           "type": "string"
         },
         "expected_replacements": {
-          "type": "number",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
           "default": 1
         },
         "edits": {
@@ -860,7 +867,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "write_file",
-    "description": "USE WHEN: Create, replace, or append ONE selected file.\nUSE INSTEAD: For coordinated multiple source files use workspace_batch; for a focused text replacement use edit_block; for PDF creation/editing use write_pdf.\nIMPORTANT: Hard limits: 2000 lines and 1 MiB per call (new default 1000 lines). A rejected write changes nothing. Successful append/rewrite confirms only that chunk; verify before retrying after an uncertain connection.\nHOW / NEXT: START: mode=rewrite for a new file; explicit mode=append for subsequent chunks (or mode=rewrite for deliberate replacement). NEXT: if WRITE_*_LIMIT, nothing changed: split. If SUCCESS, only that chunk completed. If transport outcome is uncertain, inspect file/hash BEFORE retrying. Never append the same chunk twice.\nDETAILS: Write or append to file contents.\n\nIMPORTANT: DO NOT use this tool to create PDF files. Use 'write_pdf' for all PDF creation tasks.\nDO NOT use this tool to edit DOCX files. Use 'edit_block' with old_string/new_string instead.\nTo CREATE a new DOCX, use write_file with .docx extension — text content with markdown headings (#, ##, ###) is converted to styled DOCX paragraphs.\n\nEFFICIENCY: This tool is for one file. For 2+ known UTF-8 file edits, use workspace_batch (hash-checked changes + readback + checks) instead of repeated write_file calls. For one modest file, write the entire content in ONE call; do NOT split ordinary files into arbitrary 25–30-line chunks. Use append only when continuation is genuinely needed. For safer targeted edits use edit_block with an expected SHA-256, or workspace_batch for coordinated changes.\n\nFORMAT HANDLING (by extension):\n- Text files: String content\n- Excel (.xlsx, .xls, .xlsm): JSON 2D array or {\"SheetName\": [[...]]}\nExample: '[[\"Name\",\"Age\"],[\"Alice\",30]]'\n\nDirect plain-text writes are limited to the configured fileWriteLineLimit (new default: 1000 lines, hard maximum: 2000) and 1 MiB UTF-8 per call. Oversized writes fail BEFORE changing files with WRITE_LINE_LIMIT/WRITE_SIZE_LIMIT. For large new files use mode=rewrite then explicit mode=append chunks; for edits of existing co\n[More details are in the tool input schema. Prefer bounded ranges and check result metadata.]",
+    "description": "USE WHEN: Create, replace, or append ONE selected file.\nUSE INSTEAD: For coordinated multiple source files use workspace_batch; for a focused text replacement use edit_block; for PDF creation/editing use write_pdf.\nIMPORTANT: Hard limits: 2000 lines and 1 MiB per call (new default 1000 lines). A rejected write changes nothing. Successful append/rewrite confirms only that chunk; verify before retrying after an uncertain connection.\nHOW / NEXT: START: mode=rewrite for a new file; explicit mode=append for subsequent chunks (or mode=rewrite for deliberate replacement). NEXT: if WRITE_*_LIMIT, nothing changed: split. If SUCCESS, only that chunk completed. If transport outcome is uncertain, inspect file/hash BEFORE retrying. Never append the same chunk twice. Optional strict source mode requires expected_sha256 for existing code/config files.\nDETAILS: Write or append to file contents.\n\nIMPORTANT: DO NOT use this tool to create PDF files. Use 'write_pdf' for all PDF\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -906,7 +913,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "run_command",
-    "description": "USE WHEN: Run a ONE-SHOT command (git, build, test, package manager) and get its final exit code and bounded output.\nUSE INSTEAD: For interactive or long-running sessions use start_process; for discovered project checks use run_project_checks; for ordinary reads use read_multiple_files.\nIMPORTANT: A claimed build or test pass requires actual exit code 0, not merely a command being started.\nHOW / NEXT: START: one-shot command and cwd. Check the actual exitCode before calling tests successful. NEXT: output may truncate; narrow logs. Use start_process for interactive or long-running sessions.\nDETAILS: Run a shell command to completion and return its exit code, stdout and stderr in ONE call.\nPrefer this over start_process + read_process_output for non-interactive commands\n(builds, tests, git, package managers, scripts, one-off queries).\nUse start_process/interact_with_process only for interactive or long-running sessions (REPLs, servers).\nstdin is closed, so commands that prompt for input will fail fast instead of hanging.\ntimeout_ms defaults to 60000 (max 110000); on timeout the whole process tree is killed.\nOutput is capped (maxOutputChars, default 100000) keeping the beginning and end.\nPass cwd (absolute path, must be inside allowed directories) to choose the working directory.\nBlocked commands (config blockedCommands) are rejected.\nOutput of common dev commands (git status/log/diff, cargo/go/pytest/vitest/jest/tsc/eslint, npm run, ...)\nmay be compressed by rtk; such results say \"[compressed by rtk ...]\". Pass raw=true for the exact, uncompressed output.",
+    "description": "USE WHEN: Run a ONE-SHOT command (git, build, test, package manager) and get its final exit code and bounded output.\nUSE INSTEAD: For interactive or long-running sessions use start_process; for discovered project checks use run_project_checks; for ordinary reads use read_multiple_files.\nIMPORTANT: Windows uses the selected/configured shell; PowerShell 5.1 has no && or ||. For a safe native git/node/pnpm chain on PS5.1, run_command may select cmd.exe if shell omitted; explicit CMD syntax requires shell:\"cmd.exe\". Give absolute cwd, use raw:true for debugging, distinguish COMMAND_FAILED vs TIMEOUT vs SHELL_SYNTAX and inspect exit code before success.\nHOW / NEXT: START: one-shot command, preferably absolute cwd; Windows uses the configured shell (often cmd.exe); PowerShell 5.1 cannot parse &&/||. Safe native chains auto-select cmd.exe when PowerShell 5.1 was selected implicitly; for CMD syntax pass shell:\"cmd.exe\", and raw:true for diagnostics. NEXT: inspect structuredContent.exitCode/error.code/recovery; COMMAND_FAILED is a real nonzero exit, TIMEOUT exceeded execution time, SHELL_SYNTAX changed nothing. Never retry identically without correction. Use start_process for interactive/long-running work.\nDETAILS: ",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -934,6 +941,11 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
         "raw": {
           "type": "boolean",
           "default": false
+        },
+        "max_runtime_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 21600000
         }
       },
       "required": [
@@ -1078,7 +1090,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "get_config",
-    "description": "USE WHEN: Inspect this BRC agent configuration and access limits.\nUSE INSTEAD: For project coding conventions use project_context or project_preferences; for process health use agent_status.\nIMPORTANT: Read only; never assume returned configuration grants wider access.\nDETAILS: Get the complete server configuration as JSON. Config includes fields for:\n- blockedCommands (array of blocked shell commands)\n- defaultShell (shell to use for commands)\n- allowedDirectories (paths the server can access)\n- fileReadLineLimit (default lines for read_file, default 300; hard max 2000)\n- fileWriteLineLimit (max lines per write_file call, default 1000; hard max 2000, max 1 MiB)\n- telemetryEnabled (boolean for telemetry opt-in/out)\n- currentClient (information about the currently connected MCP client)\n- clientHistory (history of all clients that have connected)\n- version (version of the DesktopCommander)\n- systemInfo (operating system and environment details)\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: Inspect this BRC agent configuration and access limits.\nUSE INSTEAD: For project coding conventions use project_context or project_preferences; for process health use agent_status.\nIMPORTANT: Read only; never assume returned configuration grants wider access.\nDETAILS: Get the complete server configuration as JSON. Config includes fields for:\n- blockedCommands (array of blocked shell commands)\n- defaultShell (shell to use for commands)\n- allowedDirectories (paths the server can access)\n- fileReadLineLimit (default lines for read_file, default 300; hard max 2000)\n- fileWriteLineLimit (max lines per write_file call, default 1000; hard max 2000, max 1 MiB)\n- telemetryEnabled (boolean for telemetry opt-in/out)\n- currentClient (information about the currently connected MCP client)\n- clientHistory (history of all clients that have connected)\n- version (version of the DesktopCommander)\n- systemInfo (operating system and environment details)\nThis command can\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1153,7 +1165,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "write_pdf",
-    "description": "USE WHEN: Create or modify a PDF through the supported PDF content/operation schema.\nUSE INSTEAD: Do not use write_file for PDF edits or write_pdf for source-code editing.\nIMPORTANT: Use a new outputPath for PDF changes; do not silently overwrite the source.\nDETAILS: Create a new PDF file or modify an existing one.\n\nTHIS IS THE ONLY TOOL FOR CREATING AND MODIFYING PDF FILES.\n\nRULES ABOUT FILENAMES:\n- When creating a new PDF, 'outputPath' MUST be provided and MUST use a new unique filename (e.g., \"result_01.pdf\", \"analysis_2025_01.pdf\", etc.).\n\nMODES:\n1. CREATE NEW PDF:\n- Pass a markdown string as 'content'.\nwrite_pdf(path=\"doc.pdf\", content=\"# Title\\n\\nBody text...\")\n\n2. MODIFY EXISTING PDF:\n- Pass array of operations as 'content'.\n- NEVER overwrite the original file.\n- ALWAYS provide a new filename in 'outputPath'.\n- After modifying, show original file path and new file path to user.\n\nwrite_pdf(path=\"doc.pdf\", content=[\n{ type: \"delete\", pageIndexes: [0, 2] },\n{ type: \"insert\", pageIndex: 1, markdown: \"# New Page\" }\n])\n\nOPERATIONS:\n- delete: Remove pages by 0-based index.\n{ type: \"delete\", pageIndexes: [0, 1, 5] }\n\n- insert: Add pages at a specific 0-based index.\n{ type: \"insert\", pageIndex: 0, markdown: \"...\" }\n{ type: \"insert\", pageIndex: 5, sourcePdfPath: \"/path/to/source.pdf\" }\n\nPAGE BREAKS:\nTo force a page break, use this HTML element:\n<div style=\"page-break-before: always;\"></div>\n\nExample:\n\"# Page 1\\n\\n<div style=\\\"page-break-before: always;\\\"></div>\\n\\n# Page 2\"\n\nADVANCED STYLING:\nHTML/CSS and inline SVG are supported for:\n- Text styling: colors, sizes, alignment, highlights\n- Boxes: borders, backgrounds, padding, rounded corners\n- SVG graphics: charts, diagrams, icons, shapes\n- Images: <img src=\"/absolute/path/image.jpg\" width=\"300\" /> or ![alt](/path/image.jpg)\n\nSupports standard markdown features including headers, lists, code blocks, tables, and basic formatting.\n\nOnly works within allowed directories.\n\nIMPORTANT: Use absolute paths appropriate for the connected device. Relative paths may depend on the active shell and working directory.\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: Create or modify a PDF through the supported PDF content/operation schema.\nUSE INSTEAD: Do not use write_file for PDF edits or write_pdf for source-code editing.\nIMPORTANT: Use a new outputPath for PDF changes; do not silently overwrite the source.\nDETAILS: Create a new PDF file or modify an existing one.\n\nTHIS IS THE ONLY TOOL FOR CREATING AND MODIFYING PDF FILES.\n\nRULES ABOUT FILENAMES:\n- When creating a new PDF, 'outputPath' MUST be provided and MUST use a new unique filename (e.g., \"result_01.pdf\", \"analysis_2025_01.pdf\", etc.).\n\nMODES:\n1. CREATE NEW PDF:\n- Pass a markdown string as 'content'.\nwrite_pdf(path=\"doc.pdf\", content=\"# Title\\n\\nBody text...\")\n\n2. MODIFY EXISTING PDF:\n- Pass array of operations as 'content'.\n- NEVER overwrite the original file.\n- ALWAYS provide a new filename in 'outputPath'.\n- After modifying, show original file path and new file path to user.\n\nwrite_pdf(path=\"doc.pdf\", content=[\n{ type: \"delete\", pageIndexes: [0, 2] },\n{ type: \"insert\", pageIndex: 1, markdown: \"# New Page\" }\n])\n\nOPERATIONS:\n- delete: Remove pages by 0-based index.\n{ type: \"delete\", pageIndexes: [0, 1, 5] }\n\n- insert: Add pages at a specific 0-based index.\n{ type: \"insert\", pageIndex: 0, markdown: \"...\" }\n{ type: \"insert\", pageIndex: 5, sourcePdfPath: \"/path/to/source.pdf\" }\n\nPAGE BREAKS:\nTo force a page break, use this HTML element:\n<div style=\"page-break-before: always;\"></div>\n\nExample:\n\"# Page 1\\n\\n<div style=\\\"page-break-before: always;\\\"></div>\\n\\n# Page 2\"\n\nADVANCED STYLING:\nHTML/CSS and inline SVG are supported for:\n- Text styling: colors, sizes, alignment, highlights\n- Boxes: borders, backgrounds, padding, roun\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1269,7 +1281,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "list_directory",
-    "description": "USE WHEN: List entries in a known folder, optionally with bounded depth.\nUSE INSTEAD: For a repository overview use project_map; unknown filenames use start_search; file contents use read_multiple_files.\nDETAILS: Get a detailed listing of all files and directories in a specified path.\n\nUse this instead of 'execute_command' with ls/dir commands.\nResults distinguish between files and directories with [FILE] and [DIR] prefixes.\n\nSupports recursive listing with the 'depth' parameter (default: 2):\n- depth=1: Only direct contents of the directory\n- depth=2: Contents plus one level of subdirectories\n- depth=3+: Multiple levels deep\n\nCONTEXT OVERFLOW PROTECTION:\n- Top-level directory shows ALL items\n- Nested directories are limited to 100 items maximum per directory\n- When a nested directory has more than 100 items, you'll see a warning like:\n[WARNING] node_modules: 500 items hidden (showing first 100 of 600 total)\n- This prevents overwhelming the context with large directories like node_modules\n\nResults show full relative paths from the root directory being listed.\nExample output with depth=2:\n[DIR] src\n[FILE] src/index.ts\n[DIR] src/tools\n[FILE] src/tools/filesystem.ts\n\nIf a directory cannot be accessed, it will show [DENIED] instead.\nIf a path does not exist, it will show [NOT_FOUND] instead.\nOnly works within allowed directories.\n\nIMPORTANT: Use absolute paths appropriate for the connected device. Relative paths may depend on the active shell and working directory.\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: List entries in a known folder, optionally with bounded depth.\nUSE INSTEAD: For a repository overview use project_map; unknown filenames use start_search; file contents use read_multiple_files.\nDETAILS: Get a detailed listing of all files and directories in a specified path.\n\nUse this instead of 'execute_command' with ls/dir commands.\nResults distinguish between files and directories with [FILE] and [DIR] prefixes.\n\nSupports recursive listing with the 'depth' parameter (default: 2):\n- depth=1: Only direct contents of the directory\n- depth=2: Contents plus one level of subdirectories\n- depth=3+: Multiple levels deep\n\nCONTEXT OVERFLOW PROTECTION:\n- Top-level directory shows ALL items\n- Nested directories are limited to 100 items maximum per directory\n- When a nested directory has more than 100 items, you'll see a warning like:\n[WARNING] node_modules: 500 items hidden (showing first 100 of 600 total)\n- This prevents overwhelming the context with large\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1351,7 +1363,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "send_file_transfer",
-    "description": "USE WHEN: Send an encrypted file to an already-prepared receiving BRC device.\nUSE INSTEAD: For normal local file reads or writes use filesystem tools.\nIMPORTANT: Requires the recipient public key and permitted source file; never treat as arbitrary URL upload.\nDETAILS: Encrypt a local file and upload only ciphertext to temporary storage for another BRC device.\n\nSECURITY:\n- Maximum plaintext size: 99 MB.\n- Uses AES-256-GCM for the file.\n- The AES key is wrapped for the destination's ephemeral X25519 public key.\n- tmpfiles.org receives only a randomly named encrypted blob.\n- The source file is never modified.\n- The returned transferToken contains the download URL and wrapped key material, never the raw AES key.\n\nRun prepare_file_transfer on the destination first and pass its recipientPublicKey here.\n\nIMPORTANT: Use absolute paths appropriate for the connected device. Relative paths may depend on the active shell and working directory.\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: Send an encrypted file to an already-prepared receiving BRC device.\nUSE INSTEAD: For normal local file reads or writes use filesystem tools.\nIMPORTANT: Requires the recipient public key and permitted source file; never treat as arbitrary URL upload.\nDETAILS: Encrypt a local file and upload only ciphertext to temporary storage for another BRC device.\n\nSECURITY:\n- Maximum plaintext size: 99 MB.\n- Uses AES-256-GCM for the file.\n- The AES key is wrapped for the destination's ephemeral X25519 public key.\n- tmpfiles.org receives only a randomly named encrypted blob.\n- The source file is never modified.\n- The returned transferToken contains the download URL and wrapped key material, never the raw AES key.\n\nRun prepare_file_transfer on the destination first and pass its recipientPublicKey here.\n\nIMPORTANT: Use absolute paths appropriate for the connected device.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1385,7 +1397,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "receive_file_transfer",
-    "description": "USE WHEN: Receive and decrypt a transfer prepared on this destination device.\nUSE INSTEAD: Not for downloading web files or ordinary local copying.\nIMPORTANT: Requires matching transfer credentials; save only to an allowed destination.\nDETAILS: Download, authenticate, decrypt, and save a BRC encrypted file transfer on this device.\n\nRequires receiveId from prepare_file_transfer on this same device and transferToken from\nsend_file_transfer on the source device. Data is downloaded only from tmpfiles.org.\nAES-GCM authentication, expected size, and SHA-256 are verified before the destination\nfile is committed. Existing files are not replaced unless overwrite=true.\n\nIMPORTANT: Use absolute paths appropriate for the connected device. Relative paths may depend on the active shell and working directory.\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: Receive and decrypt a transfer prepared on this destination device.\nUSE INSTEAD: Not for downloading web files or ordinary local copying.\nIMPORTANT: Requires matching transfer credentials; save only to an allowed destination.\nDETAILS: Download, authenticate, decrypt, and save a BRC encrypted file transfer on this device.\n\nRequires receiveId from prepare_file_transfer on this same device and transferToken from\nsend_file_transfer on the source device. Data is downloaded only from tmpfiles.org.\nAES-GCM authentication, expected size, and SHA-256 are verified before the destination\nfile is committed. Existing files are not replaced unless overwrite=true.\n\nIMPORTANT: Use absolute paths appropriate for the connected device.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1422,7 +1434,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "get_more_search_results",
-    "description": "USE WHEN: Read a subsequent page from an ACTIVE asynchronous search session.\nUSE INSTEAD: For a fresh search use start_search; for one-shot output prefer start_search(wait=true).\nIMPORTANT: Use a returned sessionId rather than inventing one.\nDETAILS: Get more results from an active search with offset-based pagination.\n\nSupports partial result reading with:\n- 'offset' (start result index, default: 0)\n* Positive: Start from result N (0-based indexing)\n* Negative: Read last N results from end (tail behavior)\n- 'length' (max results to read, default: 100)\n* Used with positive offsets for range reading\n* Ignored when offset is negative (reads all requested tail results)\n\nExamples:\n- offset: 0, length: 100 → First 100 results\n- offset: 200, length: 50 → Results 200-249\n- offset: -20 → Last 20 results\n- offset: -5, length: 10 → Last 5 results (length ignored)\n\nReturns only results in the specified range, along with search status.\nWorks like read_process_output - call this repeatedly to get progressive\nresults from a search started with start_search.\n\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: Read a subsequent page from an ACTIVE asynchronous search session.\nUSE INSTEAD: For a fresh search use start_search; for one-shot output prefer start_search(wait=true).\nIMPORTANT: Use a returned sessionId rather than inventing one.\nDETAILS: Get more results from an active search with offset-based pagination.\n\nSupports partial result reading with:\n- 'offset' (start result index, default: 0)\n* Positive: Start from result N (0-based indexing)\n* Negative: Read last N results from end (tail behavior)\n- 'length' (max results to read, default: 100)\n* Used with positive offsets for range reading\n* Ignored when offset is negative (reads all requested tail results)\n\nExamples:\n- offset: 0, length: 100 → First 100 results\n- offset: 200, length: 50 → Results 200-249\n- offset: -20 → Last 20 results\n- offset: -5, length: 10 → Last 5 results (length ignored)\n\nReturns only results in the specified range, along with search status.\nWorks like read_process_output - cal\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1508,7 +1520,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "start_process",
-    "description": "USE WHEN: Start a long-running or interactive shell command that may need more input or output retrieval.\nUSE INSTEAD: For a one-shot command with exit status use run_command; for file inspection use read_multiple_files; for discovered checks use run_project_checks.\nIMPORTANT: A started process is not proof of completion; inspect status, output and exit code.\nHOW / NEXT: START: long-running/interactive command. Returned PID means STARTED, not successful. NEXT: read_process_output, then interact_with_process if waiting for input; inspect final exit code.\nDETAILS: RUN COMMANDS OR START PROCESSES ONLY WHEN NEEDED. Use for build/test commands, execution, system inspection, or an operation with no dedicated MCP tool.\nNOT a file-reader shortcut: use read_multiple_files for 2+ known paths, read_file for one path, start_search with wait=true for unknown paths, and batch_tools for independent mixed reads. Do not start a Python/Node REPL just to inspect code.\nPrefer workspace_batch for coordinated code changes and checks; start_process is not part of safe read-only batches.\nChoose commands for the connected device operating system and shell.\nThe command runs on the connected device, not the relay container. Choose shell syntax for that OS. A command may be destructive; do not run unrequested changes.\nSpecify a bounded timeout_ms. Inspect returned output/exit status first. Use read_process_output only when the process is still running, interact_with_process only for a genuine interactive process.\nFor perf\n[More details are in the tool input schema. Prefer bounded ranges and check result metadata.]",
+    "description": "USE WHEN: Start a long-running or interactive shell command that may need more input or output retrieval.\nUSE INSTEAD: For a one-shot command with exit status use run_command; for file inspection use read_multiple_files; for discovered checks use run_project_checks.\nIMPORTANT: A started process is not proof of completion; inspect status, output and exit code.\nHOW / NEXT: START: long-running/interactive command. Returned PID means STARTED, not successful. NEXT: read_process_output, then interact_with_process if waiting for input; inspect final exit code.\nDETAILS: RUN COMMANDS OR START PROCESSES ONLY WHEN NEEDED. Use for build/test commands, execution, system inspection, or an operation with no dedicated MCP tool.\nNOT a file-reader shortcut: use read_multiple_files for 2+ known paths, read_file for one path, start_search with wait=true for unknown paths, and batch_tools for independent mixed reads. Do not start a Python/Node REPL just to inspect code.\nPrefer wo\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1548,7 +1560,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "read_process_output",
-    "description": "USE WHEN: Read additional output from an EXISTING running terminal session.\nUSE INSTEAD: For already-completed one-shot commands prefer run_command; do not poll nonexistent PIDs.\nHOW / NEXT: START: known PID, offset=0 for new output; positive absolute offset or negative tail. NEXT: follow remaining output, or stop polling when process has exited.\nDETAILS: Use only for a process started by start_process that is still running; do not poll for commands that already returned their final output. Read output from a running process with file-like pagination support.\n\nSupports partial output reading with offset and length parameters (like read_file):\n- 'offset' (start line, default: 0)\n* offset=0: Read NEW output since last read (default, like old behavior)\n* Positive: Read from absolute line position\n* Negative: Read last N lines from end (tail behavior)\n- 'length' (max lines to read, default: configurable via 'fileReadLineLimit' setting)\n\nExamples:\n- offset: 0, length: 100 → First 100 NEW lines since last read\n- offset: 0 → All new lines (respects config limit)\n- offset: 500, length: 50 → Lines 500-549 (absolute position)\n- offset: -20 → Last 20 lines (tail)\n- offset: -50, length: 10 → Start 50 from end, read 10 lines\n\nOUTPUT PROTECTION:\n- Uses the configured fileReadLineLimit for process output (new default: 300 lines)\n- Returns status like: [Reading 100 lines from line 0 (total: 5000 lines, 4900 remaining)]\n- Prevents context overflow from verbose processes\n\nSMART FEATURES:\n- For offset=0, waits up to timeout_ms for new output to arrive\n- Detects REPL prompts and process completion\n- Shows process state (waiting for input, finished, etc.)\n\nDETECTION STATES:\nProcess waiting for input (ready for interact_with_process)\nProcess finished execution\nTimeout reached (may still be running)\n\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: Read additional output from an EXISTING running terminal session.\nUSE INSTEAD: For already-completed one-shot commands prefer run_command; do not poll nonexistent PIDs.\nHOW / NEXT: START: known PID, offset=0 for new output; positive absolute offset or negative tail. NEXT: follow remaining output, or stop polling when process has exited.\nDETAILS: Use only for a process started by start_process that is still running; do not poll for commands that already returned their final output. Read output from a running process with file-like pagination support.\n\nSupports partial output reading with offset and length parameters (like read_file):\n- 'offset' (start line, default: 0)\n* offset=0: Read NEW output since last read (default, like old behavior)\n* Positive: Read from absolute line position\n* Negative: Read last N lines from end (tail behavior)\n- 'length' (max lines to read, default: configurable via 'fileReadLineLimit' setting)\n\nExamples:\n- offset: 0, len\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1800,7 +1812,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "run_parallel",
-    "description": "USE WHEN: Run multiple INDEPENDENT commands or BRC tool operations concurrently on the same device.\nUSE INSTEAD: For lengthy background work use spawn_job and wait_jobs; for small independent existing tool reads use batch_tools.\nIMPORTANT: Four concurrent by default, max eight. Combined 128K-character output may truncate: retrieve remaining reports using wait_jobs(group) or get_job(id), NEVER rerun completed writes.\nHOW / NEXT: START: independent operations only, default concurrency=4. NEXT: MORE PARALLEL RESULTS => wait_jobs({group}) or get_job(id); never replay a completed mutation just to retrieve its output.\nDETAILS: Run independent tool calls/shell commands concurrently on this device. Total combined reply is capped at 128K characters; use wait_jobs(group) and get_job(id,step_offset) for omitted results without rerunning side effects.\nUse it whenever you would otherwise make several independent calls in a row: reading many files, several searches,\ngit_status in many repos, running lint + typecheck + tests together, etc.\nEach item is {tool, args} (any BRC tool, args exactly as for a direct call) or {command, cwd?, timeout_ms?}.\nResults come back in input order, with bounded output and an explicit group for follow-up. Do not run writes to the same file concurrently. Items still running at timeout_ms (default 90s, max 100s) continue as\nbackground jobs; collect them with wait_jobs({group}). Commands that exit non-zero are reported as failed.",
+    "description": "USE WHEN: Run multiple INDEPENDENT commands or BRC tool operations concurrently on the same device.\nUSE INSTEAD: For lengthy background work use spawn_job and wait_jobs; for small independent existing tool reads use batch_tools.\nIMPORTANT: Three concurrent by default, maximum three. Combined 128K-character output may truncate: retrieve remaining reports using wait_jobs(group) or get_job(id), NEVER rerun completed writes.\nHOW / NEXT: START: independent operations with max_concurrency=3, or add depends_on:[0,1] using earlier zero-based call indices. A dependent step runs only after predecessors succeed. NEXT: wait_jobs({group}) or get_job(id); never replay a completed mutation to retrieve output.\nDETAILS: Run independent tool calls/shell commands concurrently, or add explicit depends_on:[0,1] zero-based earlier indices for a bounded dependency-aware workflow. A dependent call runs ONLY after every predecessor succeeds. Failed or interrupted predecessors skip de\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1832,9 +1844,24 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
                     "type": "boolean",
                     "description": "Bypass rtk output compression (full output)."
                   },
+                  "maxOutputChars": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 1000000
+                  },
                   "label": {
                     "type": "string",
                     "maxLength": 120
+                  },
+                  "depends_on": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 49
+                    },
+                    "maxItems": 20,
+                    "default": []
                   }
                 },
                 "required": [
@@ -1859,6 +1886,9 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
                   "label": {
                     "type": "string",
                     "maxLength": 120
+                  },
+                  "depends_on": {
+                    "$ref": "#/properties/calls/items/anyOf/0/properties/depends_on"
                   }
                 },
                 "required": [
@@ -1870,13 +1900,13 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
           },
           "minItems": 1,
           "maxItems": 50,
-          "description": "Items run concurrently: {tool, args} or {command, cwd?, timeout_ms?}."
+          "description": "Items execute concurrently when independent; optional depends_on:[0,1] names earlier zero-based call indices. Dependent calls start only when all prerequisites succeed."
         },
         "max_concurrency": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 8,
-          "default": 4
+          "maximum": 3,
+          "default": 3
         },
         "timeout_ms": {
           "type": "integer",
@@ -1891,6 +1921,10 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
           "maximum": 50000,
           "default": 4000,
           "description": "Max output characters shown per call."
+        },
+        "retain_output": {
+          "type": "boolean",
+          "description": "Opt in/out of bounded redacted diagnostic output for every call in the batch."
         }
       },
       "required": [
@@ -1908,7 +1942,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "spawn_job",
-    "description": "USE WHEN: Start a bounded background command or sequence of BRC tools that may exceed the normal MCP call timeout.\nUSE INSTEAD: For short synchronous commands use run_command; for independent parallel steps use run_parallel.\nIMPORTANT: Returns a job ID, not a completed result; follow with wait_jobs or get_job.\nHOW / NEXT: START: lengthy job returning an ID immediately. NEXT: wait_jobs({ids}) or get_job({id}); do not confuse started with succeeded.\nDETAILS: Start a background worker job on this device and return its id immediately.\nUse for work that takes longer than one call (builds, test suites, installs, long scripts) or to run several\nworkstreams in parallel: spawn one job per piece, then call wait_jobs. A job is either a single \"command\"\nor \"steps\": a list run in order, each {command, cwd?, timeout_ms?} or {tool, args} (e.g. edit_block then run tests).\nA failed step stops the job unless continue_on_error=true. Jobs are not limited by the 2-minute call timeout\n(default limit 30 min, max 6 h). Up to 4 jobs run at once; more are queued.\nGive related jobs the same \"group\" to wait for or cancel them together.",
+    "description": "USE WHEN: Start a bounded background command or sequence of BRC tools that may exceed the normal MCP call timeout.\nUSE INSTEAD: For short synchronous commands use run_command; for independent parallel steps use run_parallel.\nIMPORTANT: Returns a job ID, not a completed result; follow with wait_jobs or get_job.\nHOW / NEXT: START: lengthy job returning an ID immediately. NEXT: wait_jobs({ids}) or get_job({id}); do not confuse started with succeeded.\nDETAILS: Start a background worker job on this device and return its id immediately.\nUse for work that takes longer than one call (builds, test suites, installs, long scripts) or to run several\nworkstreams: spawn one job per piece, then call wait_jobs. Up to three workers run globally; only one CPU-heavy job runs at a time, while light file work can continue. A job is either a single \"command\"\nor \"steps\": a list run in order, each {command, cwd?, timeout_ms?} or {tool, args} (e.g. edit_block then run tests).\nA faile\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1947,6 +1981,11 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
                   "raw": {
                     "type": "boolean",
                     "description": "Bypass rtk output compression (full output)."
+                  },
+                  "maxOutputChars": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 1000000
                   },
                   "label": {
                     "type": "string",
@@ -2003,6 +2042,10 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
           "default": false,
           "description": "Keep running later steps after a failed step (default: stop)."
         },
+        "retain_output": {
+          "type": "boolean",
+          "description": "Opt in/out of redacted, quota-limited diagnostic output storage (up to 2 MiB per step). Default follows BRC_JOB_OUTPUT_SPILL=1."
+        },
         "timeout_ms": {
           "type": "integer",
           "minimum": 1000,
@@ -2023,7 +2066,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "wait_jobs",
-    "description": "USE WHEN: Wait for completion of specific background jobs, or a known job group.\nUSE INSTEAD: For a single completed job use get_job; for quick commands use run_command.\nHOW / NEXT: START: known group or IDs. NEXT: for omitted output call again on the same group or get_job(id); never spawn duplicate jobs because output is truncated.\nDETAILS: Wait (up to timeout_ms, default 60s, max 100s) for background jobs and return their results.\nSelect jobs by ids or group; with neither, waits for all unfinished jobs plus finished ones not yet reported.\nmode=all (default) returns when every selected job is done; mode=any returns as soon as one more finishes,\nso you can react to results one by one. Each finished job's output is shown once; if some are still running,\ncall wait_jobs again.",
+    "description": "USE WHEN: Wait for completion of specific background jobs, or a known job group.\nUSE INSTEAD: For a single completed job use get_job; for quick commands use run_command.\nHOW / NEXT: START: known group or IDs. NEXT: for omitted output call again on the same group or get_job(id); never spawn duplicate jobs because output is truncated.\nDETAILS: Wait (up to timeout_ms, default 5s, max 100s) for background jobs and return their results.\nSelect jobs by ids or group; with neither, waits for all unfinished jobs plus finished ones not yet reported.\nmode=all (default) returns when every selected job is done; mode=any returns as soon as one more finishes,\nso you can react to results one by one. Each finished job's output is shown once; if some are still running,\ncall wait_jobs again.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2051,7 +2094,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
           "type": "integer",
           "minimum": 0,
           "maximum": 100000,
-          "default": 60000
+          "default": 5000
         },
         "output_chars": {
           "type": "integer",
@@ -2071,7 +2114,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "get_job",
-    "description": "USE WHEN: Inspect the current state and outputs of a known job ID.\nUSE INSTEAD: For many job statuses use list_jobs; for waiting use wait_jobs.\nIMPORTANT: Long results are paged using step_offset and step_limit; follow MORE JOB STEPS without restarting the job.\nHOW / NEXT: START: known ID. NEXT: follow step_offset from MORE JOB STEPS; no rerun necessary.\nDETAILS: Get the status and full step outputs of one background job (larger output limit than wait_jobs).",
+    "description": "USE WHEN: Inspect the current state and outputs of a known job ID.\nUSE INSTEAD: For many job statuses use list_jobs; for waiting use wait_jobs.\nIMPORTANT: Long results are paged using step_offset and step_limit; follow MORE JOB STEPS without restarting the job.\nHOW / NEXT: START: known ID. NEXT: follow step_offset from MORE JOB STEPS; no rerun necessary.\nDETAILS: Get job status and bounded step previews. For long output retained via retain_output:true or BRC_JOB_OUTPUT_SPILL=1, page safely using output_step (zero-based), output_byte_offset and output_chars; pages are read-only and never repeat execution.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2096,6 +2139,18 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
           "minimum": 1,
           "maximum": 20,
           "default": 10
+        },
+        "output_step": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 49,
+          "description": "Read a retained output page for this zero-based job step, without rerunning the job."
+        },
+        "output_byte_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Byte offset for output_step; use nextByteOffset from the previous page."
         }
       },
       "required": [
@@ -2127,6 +2182,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
             "failed",
             "cancelled",
             "timed_out",
+            "interrupted",
             "active",
             "finished"
           ]
@@ -2178,7 +2234,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "list_plugin_tools",
-    "description": "USE WHEN: Discover extra MCP servers installed on this device and inspect one plugin’s tool schemas.\nUSE INSTEAD: For built-in commands/files use BRC tools; to invoke a plugin tool use call_plugin_tool.\nIMPORTANT: An unavailable or uninstalled plugin is not a working capability.\nDETAILS: List plugins installed on this device (extra MCP servers such as browser automation, desktop control,\ncode intelligence or document conversion) and their status. Pass {\"plugin\":\"<id>\"} to get that plugin's\ntools with their full input schemas, then use call_plugin_tool. Check here whenever a task needs a\ncapability the core tools do not have (web browser, screen/mouse/keyboard, symbol navigation, Office/PDF files...).",
+    "description": "USE WHEN: Discover extra MCP servers installed on this device and inspect one plugin’s tool schemas.\nUSE INSTEAD: For built-in commands/files use BRC tools; to invoke a plugin tool use call_plugin_tool.\nIMPORTANT: An unavailable or uninstalled plugin is not a working capability.\nDETAILS: List plugins installed on this device (extra MCP servers such as browser automation, desktop control,\ncode intelligence or document conversion) and their status. Pass {\"plugin\":\"<id>\"} to get that plugin's\ntools with their full input schemas, then use call_plugin_tool. Check here whenever a task needs a\ncapability the core tools do not have (screen/mouse/keyboard, symbol navigation, Office/PDF files...).\nDEFAULT: no browser. First use local file tools and run_command, Serena when useful; browser/Playwright only for necessary visual verification or interaction.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2202,7 +2258,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "call_plugin_tool",
-    "description": "USE WHEN: Invoke a specific tool of an installed MCP plugin on the device.\nUSE INSTEAD: Call list_plugin_tools first to obtain plugin ID, tool name, and expected input schema.\nIMPORTANT: Third-party plugins may have side effects; obtain user authorization where needed.\nDETAILS: Call a tool of a plugin on this device: {\"plugin\":\"<id>\",\"tool\":\"<name>\",\"args\":{...}}. Get ids, tool names and input schemas from list_plugin_tools first. The plugin starts on first use (can take a few seconds).",
+    "description": "USE WHEN: Invoke a specific tool of an installed MCP plugin on the device.\nUSE INSTEAD: Call list_plugin_tools first to obtain plugin ID, tool name, and expected input schema.\nIMPORTANT: Third-party plugins may have side effects; obtain user authorization where needed.\nDETAILS: Call an installed plugin tool: {\"plugin\":\"<id>\",\"tool\":\"<name>\",\"args\":{...}}. First get its schema via list_plugin_tools. Default to NO browser for coding; use Serena for symbols. For Playwright, take fresh browser_snapshot before browser_click, use required target, never name; after navigation/DOM changes refresh refs. BRC serializes browser calls, never auto-retries stale clicks or restarts the browser for element errors.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2239,7 +2295,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "ast_search",
-    "description": "USE WHEN: Search source code by syntax tree shape, ignoring formatting and irrelevant text occurrences.\nUSE INSTEAD: Use start_search for plain text/files; use find_symbols for declarations.\nIMPORTANT: Requires installed ast-grep binary; check plugin availability.\nDETAILS: Structural code search with ast-grep: matches syntax trees, not text, so it ignores formatting, comments and strings\nthat merely contain the words. Use it instead of regex search for code shapes (calls, definitions, imports, JSX...).\nPattern syntax: write the code you are looking for; $NAME matches exactly one AST node (expression, identifier, ...),\n$$$NAME matches zero or more nodes (arguments, statements), $_ matches any node without capturing.\nReusing a name ($A ... $A) requires the same code in both places. Whitespace and formatting do not matter.\nExamples: {\"pattern\":\"callTool($NAME, $ARGS)\",\"lang\":\"ts\",\"path\":\"/repo/src\"} finds every two-argument callTool call;\n{\"pattern\":\"console.log($$$ARGS)\",\"lang\":\"js\",\"path\":\"/repo\"} finds console.log calls with any arguments.\nReturns \"file:line:col: matched code [captures]\" relative to path. Respects .gitignore. maxResults default 200;\ncontextLines shows surrounding source. Alternatively pass rule = an ast-grep YAML rule (id, language, rule) for\nrelational queries (inside / has / not).",
+    "description": "USE WHEN: Search source code by syntax tree shape, ignoring formatting and irrelevant text occurrences.\nUSE INSTEAD: Use start_search for plain text/files; use find_symbols for declarations.\nIMPORTANT: Requires installed ast-grep binary; check plugin availability.\nDETAILS: Structural code search with ast-grep: matches syntax trees, not text, so it ignores formatting, comments and strings\nthat merely contain the words. Use it instead of regex search for code shapes (calls, definitions, imports, JSX...).\nPattern syntax: write the code you are looking for; $NAME matches exactly one AST node (expression, identifier, ...),\n$$$NAME matches zero or more nodes (arguments, statements), $_ matches any node without capturing.\nReusing a name ($A ... $A) requires the same code in both places. Whitespace and formatting do not matter.\nExamples: {\"pattern\":\"callTool($NAME, $ARGS)\",\"lang\":\"ts\",\"path\":\"/repo/src\"} finds every two-argument callTool call;\n{\"pattern\":\"console.log\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2301,7 +2357,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "ast_rewrite",
-    "description": "USE WHEN: Preview or apply an AST-aware code transformation by structural pattern.\nUSE INSTEAD: For small exact edits use edit_block; for multi-file hash-checked operations use workspace_batch.\nIMPORTANT: Dry-run first, inspect the diff, and execute only when changes are authorized.\nDETAILS: Structural code rewrite with ast-grep. DRY RUN BY DEFAULT: returns a unified diff and counts without changing\nfiles; call again with dry_run=false to write the changes.\nPattern syntax: write the code you are looking for; $NAME matches exactly one AST node (expression, identifier, ...),\n$$$NAME matches zero or more nodes (arguments, statements), $_ matches any node without capturing.\nReusing a name ($A ... $A) requires the same code in both places. Whitespace and formatting do not matter.\nMeta-variables captured by pattern can be used in rewrite.\nExamples: {\"pattern\":\"oldApi($A, $B)\",\"rewrite\":\"newApi({ a: $A, b: $B })\",\"lang\":\"ts\",\"path\":\"/repo/src\"};\n{\"pattern\":\"assertEquals($X, $Y)\",\"rewrite\":\"assert $X == $Y\",\"lang\":\"py\",\"path\":\"/repo/tests\"}.\nAlternatively pass rule = an ast-grep YAML rule with a fix (id, language, rule: {...}, fix: ...).\nlang is required with pattern. globs narrows files. Respects .gitignore.",
+    "description": "USE WHEN: Preview or apply an AST-aware code transformation by structural pattern.\nUSE INSTEAD: For small exact edits use edit_block; for multi-file hash-checked operations use workspace_batch.\nIMPORTANT: Dry-run first, inspect the diff, and execute only when changes are authorized.\nDETAILS: Structural code rewrite with ast-grep. DRY RUN BY DEFAULT: returns a unified diff and counts without changing\nfiles; call again with dry_run=false to write the changes.\nPattern syntax: write the code you are looking for; $NAME matches exactly one AST node (expression, identifier, ...),\n$$$NAME matches zero or more nodes (arguments, statements), $_ matches any node without capturing.\nReusing a name ($A ... $A) requires the same code in both places. Whitespace and formatting do not matter.\nMeta-variables captured by pattern can be used in rewrite.\nExamples: {\"pattern\":\"oldApi($A, $B)\",\"rewrite\":\"newApi({ a: $A, b: $B })\",\"lang\":\"ts\",\"path\":\"/repo/src\"};\n{\"pattern\":\"assertEq\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2337,7 +2393,15 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
         "dry_run": {
           "type": "boolean",
           "default": true,
-          "description": "Default true: only preview (diff + counts). Set false to write the files."
+          "description": "Default true: preview plus SHA-256 hashes. Set false for guarded atomic per-file writes."
+        },
+        "expected_sha256_by_file": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          },
+          "description": "Optional exact source hashes keyed by path displayed in dry run. Required when BRC_REQUIRE_SOURCE_HASH=1. Reject stale edits rather than rebasing."
         },
         "contextLines": {
           "type": "integer",
@@ -2440,7 +2504,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "project_index",
-    "description": "USE WHEN: Manage an opt-in, bounded RAM-only filename index for repeated project lookups.\nUSE INSTEAD: For one search use start_search / project_map; this is not a persisted source-code database.\nDETAILS: Opt-in memory-only filename index, not a source-content database. enable/refresh/query/disable; up to 4 projects and 20000 filenames each. Watcher invalidation plus 30-second TTL; freshly reads code through normal tools. Reports truncation/staleness.",
+    "description": "USE WHEN: Manage an opt-in, bounded RAM-only filename index for repeated project lookups.\nUSE INSTEAD: For one search use start_search / project_map; this is not a persisted source-code database.\nDETAILS: Opt-in memory-only filename index, not a source-content database. enable/refresh/query/disable; up to 4 projects and 20000 filenames each. Watcher invalidation with 5-minute integrity refresh; if watching is unavailable, 30-second refresh fallback. Freshly reads code through normal tools. Reports truncation/staleness.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2487,10 +2551,16 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "agent_status",
-    "description": "USE WHEN: Inspect agent operation IDs, latency, memory and in-memory cache state.\nUSE INSTEAD: For OS processes use list_processes; for relay devices use list_devices.\nDETAILS: Show active/queued operation IDs, bounded recent latency metrics (mean/p95/max), memory, index status and diagnostic dropped/error counts. No tool arguments or file contents.",
+    "description": "USE WHEN: Inspect agent operation IDs, latency, memory, cache state and durable metadata-only call outcomes by supplying lookupCallId.\nUSE INSTEAD: For OS processes use list_processes; for relay devices use list_devices. A call-outcome receipt never contains the full output or proves relay delivery.\nDETAILS: Show active/queued operations, memory, recent latency and local agent-relay connection health. Optional lookupCallId returns metadata-only durable observed outcome for a prior potentially side-effecting tool call after disconnect/restart, never the full result; this does not prove relay delivery or safely replay an action. No arguments or file contents are stored.",
     "inputSchema": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "lookupCallId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 100
+        }
+      },
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     },
@@ -2521,6 +2591,62 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
       "title": "cancel_operation",
       "readOnlyHint": false,
       "destructiveHint": true
+    }
+  },
+  {
+    "name": "lsp_query",
+    "description": "USE WHEN: Use lazy C#/Rust/Python language servers for saved-file definitions, references, hover, implementations and document symbols. status checks installed servers without launching them.\nUSE INSTEAD: For TS/JS compiler-backed references use find_references(mode=semantic); for simple text search prefer start_search. Do not invent a server installation.\nIMPORTANT: One active LSP worker, 90-second idle release. A third-party language server may perform project loading. No code edits or automatic installation.\nDETAILS: Lazy read-only semantic navigation for C# (.cs, csharp-ls), Rust (.rs, rust-analyzer) and Python (.py, pylsp). Actions: status (server availability; does not start a server), definition, references, hover, implementation, document_symbols. Uses one trusted local language server at a time, starts only when a real semantic query is made, closes after 90s idle. No installations or edits. A missing language server is reported; never silently subst\n[Full parameter details: tool input schema.]",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "status",
+            "definition",
+            "references",
+            "hover",
+            "document_symbols",
+            "implementation"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute project root. Required except for status."
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Saved file path under project root, e.g. src/main.rs. Required except for status."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "One-based line number; not needed for document_symbols/status."
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "One-based column number; not needed for document_symbols/status."
+        },
+        "maxResults": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "Lazy language server",
+      "readOnlyHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -2803,7 +2929,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "find_references",
-    "description": "USE WHEN: Find lexical identifier reference CANDIDATES using ripgrep.\nUSE INSTEAD: Not a semantic language-server rename or definitive cross-project reference list.\nIMPORTANT: Comments, strings and unrelated symbols may appear; inspect results.\nDETAILS: Fast ripgrep identifier candidate search. Lexical, not semantic: comments/strings and unrelated same-name symbols may appear. Never use as automatic rename proof.",
+    "description": "USE WHEN: Find lexical identifier reference CANDIDATES using ripgrep (default), or TypeScript compiler-backed references/definitions with mode=semantic, file, line, column (enabled by default; BRC_TS_SEMANTIC=0 disables).\nUSE INSTEAD: This is not a general semantic language-server rename or definitive cross-project reference list. Optional TS/JS compiler mode is read-only and bounded.\nIMPORTANT: In lexical mode, comments, strings and unrelated symbols may appear; semantic mode starts one bounded lazy worker and marks truncated project coverage.\nDETAILS: Default mode=lexical uses fast ripgrep identifier candidate search; comments, strings and same-name symbols can appear. Compiler-backed mode=semantic (enabled by default; BRC_TS_SEMANTIC=0 disables) needs TS/JS file plus exact 1-based line/column and returns bounded TypeScript compiler-backed references/definitions from a lazy 160 MiB-heap child process. No automatic edits or model calls; coverage can be incomplete.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2824,6 +2950,25 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
         "filePattern": {
           "type": "string",
           "maxLength": 500
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "lexical",
+            "semantic"
+          ],
+          "default": "lexical"
+        },
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "required": [
@@ -3125,7 +3270,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "session_handoff",
-    "description": "USE WHEN: Generate a compact RAM-only summary of a current coding session and its verified state.\nUSE INSTEAD: For saving a persistent log or claiming independent review, do not use this.\nIMPORTANT: Never report checks as passed unless fresh evidence is included.\nDETAILS: Generate a compact current coding-session handoff: goal, scope, changed files, required checks and fresh verification status. RAM-only, not a saved progress log or claim of independent review.",
+    "description": "USE WHEN: Generate a compact RAM-only summary of a current coding session and its verified state.\nUSE INSTEAD: For saving a persistent log or claiming independent review, do not use this.\nIMPORTANT: Never report checks as passed unless fresh evidence is included.\nDETAILS: Generate a compact live coding-session handoff: goal, scope, changes, required checks and fresh verification status. The handoff itself is not saved; separate metadata-only coding-session checkpoints may survive agent restarts, but verification must be repeated.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3229,7 +3374,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "read_images",
-    "description": "USE WHEN: List and inspect local raster images with native resized previews or a contact sheet; avoid transferring full-size files over MCP.\nUSE INSTEAD: For exact original image bytes use read_file; for image editing or generation use the proper image tool; for SVG source use text tools.\nIMPORTANT: The first animation frame only is inspected; no OCR or persistent thumbnail cache. A compact preview is not a lossless original.\nHOW / NEXT: START: list/metadata or bounded image previews; avoid returning original full-size images. NEXT: request smaller sets or file transfer if exact bytes are required.\nDETAILS: FAST MODEL-FACING IMAGE INSPECTION: use instead of read_file when full-resolution original bytes are unnecessary. Discover images with mode=list, then choose up to 12 for metadata, native sharp/libvips resized previews, or a contact sheet; results are real MCP image blocks, not base64 JSON text. Selected images decode in up to two bounded workers (BRC_IMAGE_WORKERS=1..3); contact sheets encode only once. PNG/JPEG/WebP/GIF/AVIF/TIFF; first frame only; originals unchanged, no OCR/upload/disk thumbnails. Max 16 MiB/16 megapixels per input, 2 MiB preview budget. For exact originals use read_file, for SVG use text tools.",
+    "description": "USE WHEN: List and inspect local raster images with native resized previews or a contact sheet; avoid transferring full-size files over MCP.\nUSE INSTEAD: For exact original image bytes use read_file; for image editing or generation use the proper image tool; for SVG source use text tools.\nIMPORTANT: The first animation frame only is inspected; no OCR or persistent thumbnail cache. A compact preview is not a lossless original.\nHOW / NEXT: START: list/metadata or bounded image previews; avoid returning original full-size images. NEXT: request smaller sets or file transfer if exact bytes are required.\nDETAILS: FAST MODEL-FACING IMAGE INSPECTION: use instead of read_file when full-resolution original bytes are unnecessary. Discover images with mode=list, then choose up to 12 for metadata, native sharp/libvips resized previews, or a contact sheet; results are real MCP image blocks, not base64 JSON text. Selected images decode in up to two bounded workers (BRC_IMAG\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3339,7 +3484,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "worker_tasks",
-    "description": "USE WHEN: Coordinate 2–4 independent scopes ONLY when the AI host actually provides separately running workers with BRC access.\nUSE INSTEAD: Do not pretend this tool spawns LLM workers; for one model use batch_tools/workspace_batch.\nIMPORTANT: Owned scopes, dependencies and coordinatorKey are required.\nHOW / NEXT: START: host-native subagents only. Claim before working, renew a 15-minute default lease before expiry; new-directory scope ends with /. NEXT: workers submit via worker_patch; parent preview/apply/verify via worker_integrate.\nDETAILS: Optional host-native parallel coding coordination. create(path,goal,tasks with owned scope/dependsOn), status, claim(workerId, optional reads), renew/release, coordinator reset/set_checks/cancel. If the host truly supports spawning workers with these MCP tools, delegate ready independent tasks (prefer 2-4; max 10). Otherwise use ordinary batches or one AI; this server does not spawn models or call APIs. hostMode is caller-declared, not detection. Claims default to a 15-minute lease (max 60 minutes); renew before expiry, reclaim and reread hashes if expired. For scopes covering not-yet-created directories, use a trailing slash (e.g. src/new-feature/). Dependencies wait for integration. Keep coordinatorKey with parent. RAM-only bounded state; scope is not an OS sandbox. Skip this tool for small single-worker edits.",
+    "description": "USE WHEN: Coordinate 2–4 independent scopes ONLY when the AI host actually provides separately running workers with BRC access.\nUSE INSTEAD: Do not pretend this tool spawns LLM workers; for one model use batch_tools/workspace_batch.\nIMPORTANT: Owned scopes, dependencies and coordinatorKey are required.\nHOW / NEXT: START: host-native subagents only. Claim before working, renew a 15-minute default lease before expiry; new-directory scope ends with /. NEXT: workers submit via worker_patch; parent preview/apply/verify via worker_integrate.\nDETAILS: Optional host-native parallel coding coordination. create(path,goal,tasks with owned scope/dependsOn), status, coordinator-authorized resume (after a checkpoint is restored), claim(workerId, optional reads), renew/release, coordinator reset/set_checks/cancel. If the host truly supports spawning workers with these MCP tools, delegate ready independent tasks (prefer 2-4; max 10). Otherwise use ordinary batches or one AI;\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3348,6 +3493,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
           "enum": [
             "create",
             "status",
+            "resume",
             "claim",
             "renew",
             "release",
@@ -3613,7 +3759,7 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "worker_integrate",
-    "description": "USE WHEN: Let the coordinator preview, apply and verify workers proposed changes using coordinatorKey.\nUSE INSTEAD: For a single AI or unrelated edits use workspace_batch; do not claim worker completion before integration.\nIMPORTANT: Requires review digest, checks and current hashes; source changes remain gated.\nHOW / NEXT: START: coordinator previews, then applies using the fresh review_sha256; run real checks and finish only after passing fresh verification. NEXT: if failure or unclear commit, inspect plan/status and current hashes before retrying.\nDETAILS: Parent-only preview/apply/verify/finish with coordinatorKey. Preview validates selected submitted tasks and returns review_sha256; apply requires that digest, rechecks hashes and commits through workspace_batch with rollback safeguards. Wait for active claims; dependencies become ready after apply. runChecks=true on final apply runs combined required checks in this call. verify runs real project checks; finish requires fresh passing evidence and no unapproved changes. Worker summaries never prove success. Successful apply retries do not rerun edits. No automatic merge, commit, model call or deployment.",
+    "description": "USE WHEN: Let the coordinator preview, apply and verify workers proposed changes using coordinatorKey.\nUSE INSTEAD: For a single AI or unrelated edits use workspace_batch; do not claim worker completion before integration.\nIMPORTANT: Requires review digest, checks and current hashes; source changes remain gated.\nHOW / NEXT: START: coordinator previews, then applies using the fresh review_sha256; run real checks and finish only after passing fresh verification. NEXT: if failure or unclear commit, inspect plan/status and current hashes before retrying.\nDETAILS: Parent-only preview/apply/verify/finish with coordinatorKey. Preview validates selected submitted tasks and returns review_sha256; apply requires that digest, rechecks hashes and commits through workspace_batch with rollback safeguards. Wait for active claims; dependencies become ready after apply. runChecks=true on final apply runs combined required checks in this call. verify runs real project checks;\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {

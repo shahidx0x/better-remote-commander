@@ -88,7 +88,7 @@ export const LIST_DEVICES_TOOL = {
 export const RETIRED_PUBLIC_AGENT_TOOLS = new Set([
   // Keep simple write_file + edit_block; worker integrations retain the internal
   // hash-checked workspaceBatch engine without showing competing editors.
-  'workspace_batch','edit_files','edit_code_ranges','replace_symbol','ast_rewrite',
+  'workspace_batch','edit_code_ranges','replace_symbol','ast_rewrite',
   // Keep read_multiple_files and run_parallel, avoid a third composite batch.
   'batch_tools','read_code_context','read_code_ranges',
   // Executed check discovery/checks replace ad-hoc verification.
@@ -105,14 +105,14 @@ export const RETIRED_PUBLIC_AGENT_TOOLS = new Set([
  */
 export const CORE_MCP_AGENT_TOOLS = new Set([
   'agent_status',
-  'read_file','read_multiple_files','write_file','edit_block',
+  'read_file','read_multiple_files','write_file','edit_block','edit_files',
   'create_directory','list_directory','get_file_info','move_file','delete_file',
   'start_search','get_more_search_results',
   'run_command','start_process','read_process_output','interact_with_process',
   'git_status','git_diff','git_log',
   'project_context','project_map','context_pack','read_code_file',
   'discover_checks','run_project_checks',
-  'run_parallel','spawn_job','wait_jobs','get_job','cancel_job',
+  'run_parallel','spawn_job','wait_jobs','get_job','cancel_job','lsp_query',
   'worker_tasks','worker_patch','worker_integrate','read_images',
 ]);
 /** Optional larger discovery profile. No profile grants additional privileges. */
@@ -127,7 +127,7 @@ export const FOCUSED_MCP_AGENT_TOOLS = new Set([
   'discover_checks','run_project_checks','verify_project','read_images',
   'run_parallel','spawn_job','wait_jobs','get_job','list_jobs','cancel_job',
   'worker_tasks','worker_patch','worker_integrate',
-  'list_plugin_tools','call_plugin_tool','code_graph','get_recent_tool_calls',
+  'list_plugin_tools','call_plugin_tool','code_graph','lsp_query','get_recent_tool_calls',
 ]);
 export type McpToolProfile = 'core'|'focused'|'full';
 export function mcpToolProfile(value=process.env.BRC_MCP_TOOL_PROFILE):McpToolProfile {
@@ -195,7 +195,7 @@ export const TOOL_ROUTING_GUIDANCE = [
   'One file/range -> read_file. Code snapshots needing full-file SHA-256 -> read_code_file; for multiple files use read_multiple_files followed by targeted read_code_file calls only when hashes are required.',
   'Unknown files -> start_search(wait=true); read relevant matches with read_file or read_code_file. Do not poll unless an actual streaming search session is active.',
   'Multiple independent read/context operations -> read_multiple_files when paths are known; run_parallel for other independent operations only. Avoid parallel writes to the same path.',
-  'Multiple file changes -> apply one write_file or edit_block at a time and verify each result. Use read_code_file first when an expected_sha256 precondition is needed; do not invent a multi-file writer.',
+  'Multiple hash-checked file changes -> use edit_files with per-file expected_sha256 and optional dryRun; if hashes unavailable read the files first. For ordinary changes apply one write_file or edit_block at a time and verify each result. Use read_code_file first when an expected_sha256 precondition is needed; do not invent a multi-file writer.',
   'One-shot build/test/git/system command -> run_command (final exit code in one call); only long-running or interactive commands -> start_process then read_process_output/interact_with_process when needed.',
   'Source text matching, code graphs and parser suggestions are NOT proof of correct builds. Use discover_checks/run_project_checks for actually executed checks with exit codes.',
   'Discover project patterns with project_context/context_pack when needed; use scoped source and real tests, not blanket repository dumps.',
@@ -215,7 +215,7 @@ export const TOOL_ROUTING_GUIDANCE = [
 export const CORE_TOOL_ROUTING_GUIDANCE = [
   'BRC CORE MCP: tools operate on an authorized local agent device, not on the relay. list_devices identifies the device when needed. Choose tool names only from your actual tools/list; do not invent tools.',
   'READ: one known file -> read_file; two or more known files -> read_multiple_files; unknown paths -> start_search(wait=true). Bounded reads can be incomplete. Follow read.next or batch.continuations, and use read_code_file charOffset/charLength for giant lines. PDF pagination uses pages, not lines.',
-  'EDIT: write_file creates/replaces/appends ONE file (1 MiB and configured line limit per call). edit_block changes ONE focused block and can require an expected file hash. Multiple files: write them in deliberate order, checking each result; BRC does not offer a public multi-write tool. A successful write confirms only its chunk; never blindly retry an uncertain mutation without checking current file state.',
+  'EDIT: write_file creates/replaces/appends ONE file (1 MiB and configured line limit per call). edit_block changes ONE focused block and can require an expected file hash. For 2-16 independently hash-checked existing files use edit_files to preview and apply exact hunks with guarded rollback; do not claim crash-atomic multi-file transactions. A successful write confirms only its chunk; never blindly retry an uncertain mutation without checking current file state.',
   'RUN: one-shot tests, git, or shell command -> run_command and inspect final exit code. Long/interactive command -> start_process followed by read_process_output; a returned PID is not proof of success. Independent operations -> run_parallel (default concurrency 4), then use wait_jobs/get_job for incomplete or truncated output. Do not run simultaneous writes to the same path.',
   'WORKERS: worker_tasks, worker_patch and worker_integrate coordinate *existing host-native AI workers*; BRC does not create extra models. Without subagents use ordinary sequential write_file/edit_block calls; only the worker integrator uses the internal batch engine. Worker plans live in agent RAM; expire/reclaim with fresh hashes.',
   'ERRORS: check structuredContent.error.code and recovery.suggestion. BUSY means wait/reduce concurrency; CHECK_FAILED means actual verification failed; WRITE_LINE_LIMIT/WRITE_SIZE_LIMIT means nothing was written; a disconnected write may still have succeeded, so verify before any retry.',

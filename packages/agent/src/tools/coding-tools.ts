@@ -47,6 +47,7 @@ import {commandCpuAdmission,searchIoAdmission,pluginStartupAdmission} from '../r
 import {terminalManager} from '../core/terminal-manager.js';
 import {runningPluginIds} from '../plugins/host.js';
 import {semanticTsManager} from '../runtime/semantic-ts-host.js';
+import {lazyLanguageServer} from '../runtime/lazy-lsp.js';
 import { connectionHealth } from '../transport/connection-health.js';
 import {resultFrameTelemetry} from '../transport/result-budget.js';
 
@@ -153,7 +154,10 @@ async function editFiles(raw:unknown):Promise<ToolResult> {
       out.content.push({type:'text',text:JSON.stringify({rolledBack:committed.length-rollbackConflicts.length,rollbackConflicts})});
       return out;
     }
-    return result({dryRun:a.dryRun,files:prepared.map(f=>({path:f.path,beforeSha256:f.beforeHash,afterSha256:f.afterHash,changed:f.beforeHash!==f.afterHash})),atomicity:'Each file replacement is atomic. Multi-file updates validate first and attempt conflict-aware rollback on failure; not crash-atomic across files.'});
+    return result({dryRun:a.dryRun,files:prepared.map((f,i)=>({path:f.path,beforeSha256:f.beforeHash,afterSha256:f.afterHash,changed:f.beforeHash!==f.afterHash,
+      hunks:a.files[i].edits.map((e,index)=>({index,expectedReplacements:e.expected_replacements,
+        beforePreview:e.old_string.slice(0,240),afterPreview:e.new_string.slice(0,240),
+        truncated:e.old_string.length>240||e.new_string.length>240}))})),atomicity:'Each file replacement is atomic. Multi-file updates validate first and attempt conflict-aware rollback on failure; not crash-atomic across files.'});
   });
 }
 
@@ -188,7 +192,8 @@ export const CODING_TOOL_HANDLERS:Record<string,(args:Record<string,unknown>)=>P
     return result({callOutcomes:callOutcomeStatus(),operations:operationStatus(),latency:activity.metrics(),executionKernel:executionKernelStatus(),loopGuard:repeatFailureGuard.status(),workerPlanCheckpoints:workerPlanCheckpointStatus(),commandEnvironment:commandEnvironmentStatus(),sourceObservations:sourceObservationStatus(),resultPresentation:resultPresentationStatus(),responseWire:resultFrameTelemetry(),resourceLanes:{cpu:commandCpuAdmission.status(),searchIo:searchIoAdmission.status(),pluginStartup:pluginStartupAdmission.status()},commandCpuBudget:commandCpuAdmission.status(),
     managedActivity:{terminalSessions:terminalManager.listActiveSessions().length,
       ripgrepProcesses:searchManager.getActiveSessionCount(),parserWorkers:codeCacheStatus().parser.workers,
-      semanticWorker:semanticTsManager.status().activeProcess?1:0,pluginConnections:runningPluginIds().length,
+      semanticWorker:semanticTsManager.status().activeProcess?1:0,
+      polyglotLanguageServer:lazyLanguageServer.status(),pluginConnections:runningPluginIds().length,
       ownedChildLifecycle:managedChildStatus(),managedSpawn:managedSpawnStatus(),operationalRetention:operationalRetentionStatus(),
       note:'Counts are internal manager observations; plugins may be remote and the numbers are not a complete Windows process-tree or RSS inventory.'},
     receipts:{...mutationReceiptStatus(),recent:await recentMutationReceipts(8)},outputSpill:outputSpillLimits(),resources:cacheStatus(),indexedProjects:projectIndex.status(),codeGraphs:codeGraph.status(),parserCache:codeCacheStatus(),logging:{mode:"live-plus-optional-last-100-failure-metadata",
@@ -207,7 +212,7 @@ export function buildCodingToolDefinitions():ToolDefinition[]{
   const defs:{name:string;description:string;schema:z.ZodTypeAny;readOnly?:boolean}[]=[
     {name:'read_code_file',schema:SnapshotSchema,readOnly:true,description:'Read bounded UTF-8 source by zero-based LINE offset/length with exact full-file SHA-256; when a giant line exceeds the response limit, use charOffset/charLength (up to 100000 chars) and follow nextCharOffset until null. Response includes next requests and truncated/hasMore markers. File limit 8 MiB. Never edit based on incomplete content without checking the hash.'},
     {name:'read_code_context',schema:ContextSchema,readOnly:true,description:'Search code with ripgrep then return fresh surrounding snippets and file hashes in ONE call. Respects ignored files, directory policy and global result limits. Searches are literal by default.'},
-    {name:'edit_files',schema:EditFilesSchema,description:'Apply exact edits to up to 16 UTF-8 files using mandatory expected_sha256 values from read_code_file/context. Validate all first, atomic replace per file, conflict-aware rollback on failure. dryRun previews hashes without writes. Not a crash-atomic multi-file transaction.'},
+    {name:'edit_files',schema:EditFilesSchema,description:'SAFE MULTI-FILE PATCH: Apply up to 100 exact hunks per file across 1-16 UTF-8 files using mandatory expected_sha256 values from read_code_file or start_search(wait=true,searchType=content). Validate all first, atomic replace per file, conflict-aware rollback on failure. dryRun previews hashes without writes. Not a crash-atomic multi-file transaction.'},
     {name:'batch_tools',schema:BatchSchema,description:'BEST FOR 2+ INDEPENDENT, DIFFERENT read/search/context operations in ONE MCP round trip (up to 64). If just reading 2+ known files, use read_multiple_files instead; for many specific code ranges/hashes use read_code_ranges. Auto mode overlaps consecutive reads up to concurrency=4 and orders any write barriers; parallel mode is read-only. Do not nest batches or include shell/config tools. Output is bounded; earlier writes are not rolled back. For multi-file edits + readback/checks prefer workspace_batch.'},
     {name:'verify_project',schema:VerifySchema,description:'Run explicitly supplied build/typecheck/test steps sequentially with a total timeout and stop-on-failure. Each step accepts command OR a literal program/args pair. Returns per-step exit codes and bounded output. Never invents commands from repository text; shell policy applies.'},
     {name:'project_index',schema:IndexSchema,readOnly:true,description:'Opt-in memory-only filename index, not a source-content database. enable/refresh/query/disable; up to 4 projects and 20000 filenames each. Watcher invalidation with 5-minute integrity refresh; if watching is unavailable, 30-second refresh fallback. Freshly reads code through normal tools. Reports truncation/staleness.'},

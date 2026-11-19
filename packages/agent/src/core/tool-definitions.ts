@@ -375,7 +375,7 @@ export function buildToolDefinitions(): ToolDefinition[] {
         description: `
                 SEARCH WHEN PATHS ARE UNKNOWN. For filename or content discovery, use ONE start_search call with wait=true and bounded maxResults; avoid unnecessary polling (get_more_search_results) unless you deliberately need streaming.
                 searchType="files" finds names; searchType="content" searches file contents. pattern is regex unless literalSearch=true. filePattern filters files; includeHidden and ignoreCase control scope; contextLines adds surrounding lines.
-                Choose wait=true for the complete bounded response in one call, wait=false only for a long-running stream. For 2+ known paths, use read_multiple_files instead. For code search with immediate surrounding fresh snippets and hashes, prefer read_code_context.
+                Choose wait=true for the complete bounded response in one call, wait=false only for a long-running stream. For 2+ known paths, use read_multiple_files instead. Content searches with wait=true now include fresh bounded matching-file snippets and SHA-256 hashes by default (includeSource=false skips that I/O). For more focused source context or exact line ranges, use read_code_context or read_code_file.
                 Set path to the project directory, narrow pattern/filePattern, and use appropriate limits. Search never edits files.
                 ${PATH_GUIDANCE}
                 ${CMD_PREFIX_DESCRIPTION}`,

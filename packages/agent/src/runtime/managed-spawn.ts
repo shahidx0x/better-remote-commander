@@ -16,7 +16,13 @@ import {observeManagedChild,markNativeJobOwner} from './process-termination.js';
 
 const runnerPath=fileURLToPath(new URL('../native/winjob/BrcWinJob.dll',import.meta.url));
 type Containment='winjob'|'legacy';
-const counters={nativeSpawns:0,legacySpawns:0,nativeStartErrors:0};
+const counters={nativeSpawns:0,legacySpawns:0,nativeStartErrors:0,
+  peCacheHits:0,peCacheMisses:0,dotnetPathCacheHits:0};
+const PE_CACHE_TTL_MS=30_000,PE_CACHE_MAX=64;
+const peCache=new Map<string,{fingerprint:string;at:number;valid:boolean}>();
+let dotnetCache:{path:string;at:number;resolved:string|undefined}|undefined;
+const envPath=(env:NodeJS.ProcessEnv|undefined)=>Object.entries(env??process.env)
+  .find(([key])=>key.toLowerCase()==='path')?.[1]??'';
 const fallbackReasons=new Map<string,number>();
 function countReason(reason:string):void{
  fallbackReasons.set(reason,(fallbackReasons.get(reason)??0)+1);
@@ -47,6 +53,21 @@ function executableFromPath(cmd:string,env:NodeJS.ProcessEnv|undefined):string|u
  * Only a bounded DOS/PE signature is read; no executable code is loaded.
  */
 function isWindowsPe(candidate:string):boolean{
+ let st:fs.Stats;
+ try{st=fs.statSync(candidate);}catch{return false;}
+ const fingerprint=[st.dev,st.ino,st.size,st.ctimeMs,st.mtimeMs].join(':');
+ const hit=peCache.get(candidate);
+ if(hit&&hit.fingerprint===fingerprint&&Date.now()-hit.at<PE_CACHE_TTL_MS){
+  counters.peCacheHits++;return hit.valid;
+ }
+ counters.peCacheMisses++;
+ const valid=inspectWindowsPe(candidate);
+ peCache.delete(candidate);
+ peCache.set(candidate,{fingerprint,at:Date.now(),valid});
+ if(peCache.size>PE_CACHE_MAX)peCache.delete(peCache.keys().next().value!);
+ return valid;
+}
+function inspectWindowsPe(candidate:string):boolean{
  let fd:number|undefined;
  try{
   fd=fs.openSync(candidate,'r');
@@ -61,7 +82,15 @@ function isWindowsPe(candidate:string):boolean{
  }catch{return false;}finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{}}
 }
 function availableDotnet(env:NodeJS.ProcessEnv|undefined):string|undefined{
- return executableFromPath('dotnet',env);
+ const currentPath=envPath(env),now=Date.now();
+ if(dotnetCache&&dotnetCache.path===currentPath&&now-dotnetCache.at<(dotnetCache.resolved?60_000:3000)&&
+   (!dotnetCache.resolved||fs.existsSync(dotnetCache.resolved))){
+  counters.dotnetPathCacheHits++;
+  return dotnetCache.resolved;
+ }
+ const resolved=executableFromPath('dotnet',env);
+ dotnetCache={path:currentPath,at:now,resolved};
+ return resolved;
 }
 type SpawnClass='ordinary'|'fast-read';
 function jobLauncher(program:string,opts:SpawnOptions,spawnClass:SpawnClass='ordinary'):
@@ -125,7 +154,7 @@ export function managedSpawnStatus(){
   nativeForShortReadScans:process.env.BRC_WIN_JOB_SHORT_READS==='1',
   nativeAvailable:process.platform==='win32'&&
     process.env.BRC_WIN_JOB_OBJECT!=='0'&&fs.existsSync(runnerPath)&&!!availableDotnet(process.env),
-  ...counters,legacyReasons:Object.fromEntries(fallbackReasons),
+  ...counters,peCacheEntries:peCache.size,legacyReasons:Object.fromEntries(fallbackReasons),
   noAutomaticReplay:true,restrictedTokenSandbox:false,
   note:'Native for executable .exe without IPC/verbatim arguments. Short read-only scans stay on the lower-latency legacy path by default (BRC_WIN_JOB_SHORT_READS=1 opts in). This is not ACL/restricted-token isolation.'};
 }

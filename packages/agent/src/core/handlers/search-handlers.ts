@@ -9,6 +9,7 @@ import { ServerResult } from '../types.js';
 import { capture } from '../utils/capture.js';
 import { structuredSearchFailure, searchErrorCode } from '../../runtime/search-diagnostics.js';
 import { AgentError } from '../../runtime/errors.js';
+import {hydrateSearchSources} from '../../runtime/search-source-context.js';
 
 /**
  * Handle start_search command
@@ -191,9 +192,22 @@ async function runBlockingSearch(args: StartSearchArgs): Promise<ServerResult> {
   if(hasMoreResults)header += '\nMORE SEARCH RESULTS: use get_more_search_results with sessionId='+sessionId+
     ' offset='+returnedCount+' length=80; no new search is necessary.';
   const body = lines.length ? lines.join('\n') : 'No matches found.';
-  return { content: [{ type: "text", text: `${header.slice(0,2000)}\n\n${body}` }],
+  // Reuse this completed search's matches; no second ripgrep process.
+  // This saves a separate read_code_file call for the common "where is this code?" task.
+  const sourceContext = isContent&&args.includeSource?
+    await hydrateSearchSources(args.path,all.results).catch(()=>null):null;
+  const sourceTextRaw=sourceContext?.files.length? '\n\nFRESH SOURCE SNIPPETS (1-based lines, verified full-file hashes):\n'+
+    sourceContext.files.map(f=>f.status==='fresh'?
+      f.path+' sha256='+f.sourceSha256+' lines '+f.startLine+'-'+f.endLine+'\n'+(f.text??''):
+      f.path+' ['+f.status+': use read_code_file]').join('\n\n'):'';
+  // Preserve the original bounded search text budget even when fresh snippets
+  // are appended. The underlying search session remains available for paging.
+  const availableSourceChars=Math.max(0,48_000-header.slice(0,2000).length-body.length-4);
+  const sourceText=sourceTextRaw.slice(0,availableSourceChars);
+  return { content: [{ type: "text", text: `${header.slice(0,2000)}\n\n${body}${sourceText}` }],
     structuredContent:{sessionId,totalMatches:all.totalMatches,returnedCount,
-      isComplete:all.isComplete,hasMoreResults,outputTruncated:truncated,
+      ...(sourceContext?{sourceContext}:{}) ,
+      isComplete:all.isComplete,hasMoreResults,outputTruncated:truncated||sourceText.length<sourceTextRaw.length,
       stopReason:all.stopReason,wasIncomplete:all.wasIncomplete,
       ...(hasMoreResults?{next:{tool:'get_more_search_results',
         args:{sessionId,offset:returnedCount,length:80}}}:{})}

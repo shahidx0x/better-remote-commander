@@ -7,7 +7,7 @@ const definitions = listTools();
 const byName = new Map(definitions.map(t => [t.name, t]));
 
 test('ALL advertised agent tools have unique, actionable WHEN / USE INSTEAD rules', () => {
-  assert.equal(definitions.length, 80, 'keep the explicit coverage count intentional');
+  assert.equal(definitions.length, 81, 'keep the explicit coverage count intentional');
   assert.equal(byName.size, definitions.length, 'no duplicate tool names');
   assert.deepEqual(Object.keys(TOOL_CHOICES).sort(), [...byName.keys()].sort(),
     'a new/removed public tool requires updating the routing catalog');

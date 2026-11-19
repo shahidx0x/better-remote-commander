@@ -207,8 +207,13 @@ export const CancelJobArgsSchema = z.object({
   all: z.boolean().optional().default(false).describe('Cancel every queued or running job.'),
 });
 
+const DependenciesSchema=z.array(z.number().int().min(0).max(49)).max(20).optional().default([]);
+const ParallelStepSchema=z.union([
+  CommandStepSchema.extend({depends_on:DependenciesSchema}),
+  ToolStepSchema.extend({depends_on:DependenciesSchema})
+]);
 export const RunParallelArgsSchema = z.object({
-  calls: z.array(StepSchema).min(1).max(50).describe('Independent items scheduled with at most three workers; CPU-heavy commands are serialized while lightweight reads can continue.'),
+  calls: z.array(ParallelStepSchema).min(1).max(50).describe('Items execute concurrently when independent; optional depends_on:[0,1] names earlier zero-based call indices. Dependent calls start only when all prerequisites succeed.'),
   max_concurrency: z.number().int().min(1).max(3).optional().default(3),
   timeout_ms: z.number().int().min(1_000).max(MAX_WAIT_MS).optional().default(90_000)
     .describe('How long to wait for results. Calls still running then continue as background jobs.'),
@@ -236,6 +241,8 @@ interface Job {
   group?: string;
   /** Per-run_parallel group cap; global worker and heavy-work limits still apply. */
   groupConcurrency?: number;
+  /** Pooled run_parallel predecessor IDs. Never execute until each succeeds. */
+  dependsOn?:string[];
   status: JobStatus;
   steps: Step[];
   results: StepResult[];
@@ -283,12 +290,13 @@ function stepName(s: Step): string {
   return s.label ?? s.tool;
 }
 
-function createJob(steps: Step[], opts: { label?: string; group?: string; groupConcurrency?: number; continueOnError?: boolean; timeoutMs?: number; retainOutput?:boolean }): Job {
+function createJob(steps: Step[], opts: { label?: string; group?: string; groupConcurrency?: number; dependsOn?:string[]; continueOnError?: boolean; timeoutMs?: number; retainOutput?:boolean }): Job {
   const job: Job = {
     id: newId(),
     label: opts.label,
     group: opts.group,
     groupConcurrency: opts.groupConcurrency,
+    dependsOn:opts.dependsOn,
     status: 'queued',
     steps,
     results: [],
@@ -512,6 +520,20 @@ function pump(): void {
         queue.splice(i--, 1);
         continue;
       }
+      if(candidate.dependsOn?.length){
+        const predecessors=candidate.dependsOn.map(id=>jobs.get(id));
+        const missing=predecessors.some(item=>!item);
+        const failed=predecessors.some(item=>item&&isFinished(item)&&item.status!=='succeeded');
+        if(missing||failed){
+          queue.splice(i--,1);
+          candidate.status='failed';candidate.endedAt=Date.now();
+          candidate.results.push({index:0,name:'dependency validation',ok:false,ms:0,
+            output:'DEPENDENCY_FAILED: A required predecessor did not succeed or is missing. This step was NOT executed. Inspect the previous job; no automatic retry.'});
+          void persist(candidate).finally(()=>{candidate.resolveDone?.();pump();});
+          continue;
+        }
+        if(predecessors.some(item=>item&&!isFinished(item)))continue;
+      }
       const heavy = isHeavyJob(candidate);
       if (heavy && runningHeavy >= MAX_CONCURRENT_HEAVY_JOBS) continue;
       const access = jobFileIoAccess(candidate);
@@ -642,7 +664,9 @@ async function loadHistory(): Promise<void> {
 
 function prune(): void {
   const finished = [...jobs.values()].filter(isFinished).sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
-  for (const j of finished.slice(0, Math.max(0, finished.length - KEEP_IN_MEMORY))) jobs.delete(j.id);
+  const required=new Set([...jobs.values()].filter(j=>!isFinished(j)).flatMap(j=>j.dependsOn??[]));
+  const removable=finished.filter(j=>!required.has(j.id));
+  for (const j of removable.slice(0, Math.max(0, removable.length - KEEP_IN_MEMORY))) jobs.delete(j.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -949,6 +973,15 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
   if (bad) return jobToolError('NESTED_JOB_TOOL',
     `Tool "${(bad as { tool: string }).tool}" cannot run inside run_parallel.`,
     'Call job-control tools separately; only independent ordinary tools or commands may be grouped. Nothing was started.');
+  // Validate every dependency before creating any persistent job. Only
+  // earlier indices are allowed, so cycles and self-dependencies are impossible.
+  for(let i=0;i<a.calls.length;i++){
+    const deps=a.calls[i].depends_on;
+    if(new Set(deps).size!==deps.length||deps.some(index=>index>=i))
+      return jobToolError('INVALID_DEPENDENCY',
+        'Call #'+(i+1)+' has a duplicate, self, or future dependency.',
+        'Use zero-based depends_on indices strictly smaller than the current call index. No tasks were started.');
+  }
   await loadHistory();
 
   if (queue.length + a.calls.length > MAX_QUEUED_JOBS)
@@ -956,13 +989,16 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
       `The batch would exceed the ${MAX_QUEUED_JOBS}-job queue; no calls were started.`,
       'Wait for existing jobs to finish and inspect list_jobs before submitting another batch.',
       {tool:'list_jobs',args:{limit:50}});
-  const group = `par-${Date.now().toString(36)}`;
+  const group = `par-${Date.now().toString(36)}${randomBytes(3).toString('hex')}`;
   const batch = a.calls.map((c, i) => createJob([c], {
     label: c.label ?? `#${i + 1} ${stepName(c)}`,
     group,
     groupConcurrency: a.max_concurrency,
     retainOutput:a.retain_output,
   }));
+  // Resolve dependency IDs after all jobs exist; indices were validated above.
+  for(let i=0;i<batch.length;i++)
+    batch[i].dependsOn=a.calls[i].depends_on.map(index=>batch[index].id);
   // Save all job identities and associate the originating remote call before
   // dispatch. A lost result can be recovered by lookupCallId, with no replay.
   await Promise.all(batch.map(job=>persist(job)));
@@ -991,7 +1027,8 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
   if(shown<batch.length)
     s+=`\n[MORE PARALLEL RESULTS: ${batch.length-shown} omitted from this reply. Call wait_jobs({group:"${group}"}) for unreported results or get_job({id:"..."}) by job ID. Do not rerun already-completed mutations.]`;
   if (finished.length < batch.length) s += `\n\nUnfinished calls keep running. Collect them with wait_jobs({"group":"${group}"}).`;
-  return {content:[{type:'text',text:capJobReply(s)}],structuredContent:{group,jobIds:batch.map(j=>j.id),finished:finished.length,total:batch.length,pending:finished.length<batch.length,next:{tool:'wait_jobs',args:{group}}}};
+  return {content:[{type:'text',text:capJobReply(s)}],structuredContent:{group,jobIds:batch.map(j=>j.id),
+    dependencies:a.calls.map(c=>c.depends_on),finished:finished.length,total:batch.length,pending:finished.length<batch.length,next:{tool:'wait_jobs',args:{group}}}};
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,10 +1048,11 @@ export function buildJobToolDefinitions(): ToolDefinition[] {
     {
       name: 'run_parallel',
       description: [
-        'Run independent tool calls/shell commands concurrently on this device. Up to three workers run globally, but only one CPU-heavy command/build/check runs at a time; lightweight file reads continue while it runs.',
+        'Run independent tool calls/shell commands concurrently, or add explicit depends_on:[0,1] zero-based earlier indices for a bounded dependency-aware workflow. A dependent call runs ONLY after every predecessor succeeds. Failed or interrupted predecessors skip dependent commands and writes without execution.',
+        'Up to three workers run globally, but only one CPU-heavy command/build/check runs at a time; lightweight file reads continue while it runs.',
         'Use it for independent reads, file operations on separate paths, searches and lightweight checks.',
         'Heavy builds/tests/commands are serialized; lightweight reads can finish while a heavy job continues.',
-        'Each item is {tool, args} (any BRC tool, args exactly as for a direct call) or {command, cwd?, timeout_ms?}.',
+        'Each item is {tool,args,depends_on?:number[]} or {command,cwd?,timeout_ms?,depends_on?:number[]}. Dependencies reference earlier array items only. No model, hidden retries, or invented arguments.',
         'Results come back in input order, with bounded output and an explicit group for follow-up. Do not run writes to the same file concurrently. Items still running at timeout_ms (default 90s, max 100s) continue as',
         'background jobs; collect them with wait_jobs({group}). Heavy jobs are serialized; independent light work can run alongside them. Total combined reply is capped at 128K characters.',
       ].join('\n'),

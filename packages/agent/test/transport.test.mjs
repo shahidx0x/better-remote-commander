@@ -40,7 +40,8 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
   await t.test('new tool definitions and exact snapshots traverse MCP',async()=>{
    const d=await rpc('tools/list',{});
    assert.ok(d.tools.some(x=>x.name==='edit_block') && d.tools.some(x=>x.name==='agent_status'));
-   assert.ok(!d.tools.some(x=>x.name==='edit_files'),'duplicate public edit_files must be retired; legacy direct invocation is covered separately');
+   assert.ok(d.tools.some(x=>x.name==='edit_files'),'safe hash-checked multi-file patch must be public');
+   assert.ok(d.tools.some(x=>x.name==='lsp_query'),'lazy LSP navigation must be publicly discoverable');
    const r=await tool('read_code_file',{path:p});assert.equal(r.isError,false);assert.ok(r.structuredContent.sha256);assert.ok(r._meta.callId);assert.equal(r._meta.deviceId,'integration-pc');
   });
   await t.test('hash-checked editing and batch reads work through the relay',async()=>{
@@ -89,7 +90,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    const r=await tool('verify_project',{cwd:project,commands:[{name:'syntax check',command:'node --check sample.ts'}]});assert.equal(r.isError,false);assert.equal(r.structuredContent.passed,true);
   });
   await t.test('project context, symbol tools and safe previews traverse real MCP',async()=>{
-   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,68);assert.ok(defs.tools.some(t=>t.name==='recover_operation'));assert.ok(defs.tools.some(t=>t.name==='run_project_checks'));assert.ok(!defs.tools.some(t=>t.name==='workspace_batch'));
+   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,70);assert.ok(defs.tools.some(t=>t.name==='recover_operation'));assert.ok(defs.tools.some(t=>t.name==='run_project_checks'));assert.ok(!defs.tools.some(t=>t.name==='workspace_batch'));
    const context=await tool('project_context',{path:project,focus:'sample.ts'});assert.equal(context.isError,false);assert.equal(context.structuredContent.package.packageManager,'pnpm');assert.ok(context.structuredContent.instructions.some(x=>x.path==='AGENTS.md'));
    const outline=await tool('code_outline',{path:p});assert.equal(outline.isError,false);assert.ok(outline.structuredContent.symbols.some(s=>s.name==='value'));
    const symbol=await tool('read_symbol',{path:p,name:'value'});assert.equal(symbol.isError,false);assert.match(symbol.structuredContent.text,/value = 2/);
