@@ -265,7 +265,20 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
       try { await store.ping(); }
       catch { return res.status(503).json({ ok: false, storage: 'mongodb', error: 'database_unavailable' }); }
     }
+    const recoveryQuota=store instanceof MongoStore?
+      await store.recoveryQuotaStatus().catch(()=>null):undefined;
+    const recoveryWarnings:string[]=[];
+    if(!operationJournal.payloadsEnabled)recoveryWarnings.push('ENCRYPTED_RESULT_RETENTION_UNAVAILABLE');
+    if(store instanceof MongoStore&&!recoveryQuota)recoveryWarnings.push('RESULT_QUOTA_STATUS_UNAVAILABLE');
+    if(recoveryQuota&&recoveryQuota.usedBytes>=recoveryQuota.capBytes)
+      recoveryWarnings.push('RESULT_QUOTA_AT_CAPACITY');
+    if(recoveryQuota&&recoveryQuota.pendingReservations>0&&
+      Date.now()-recoveryQuota.lastReservationAt>5*60_000)
+      recoveryWarnings.push('RESULT_QUOTA_RESERVATIONS_MAY_BE_STALE');
     res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl,
+      recoveryReadiness:{claimsBeforeDispatch:true,encryptedResults:operationJournal.payloadsEnabled,
+        degraded:recoveryWarnings.length>0,warnings:recoveryWarnings,
+        ...(recoveryQuota?{quota:recoveryQuota}:{})},
       mcpTools: BUNDLED_AGENT_TOOL_CATALOG.filter(t=>exposeMcpAgentTool(t.name)).length + 2 + PLUGIN_RELAY_TOOLS.length + SKILL_RELAY_TOOLS.length,
       operationRecovery:operationJournal.status(),
       multiRelayRouting:crossRelay?.status()??{enabled:false,mode:'single-instance'},

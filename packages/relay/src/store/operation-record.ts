@@ -6,6 +6,8 @@ export interface OperationRow {
   args_hash:string; state:OperationState; created_at:number; updated_at:number;
   expires_at:number; encrypted_result:string|null; result_bytes:number;
   result_sha256:string|null; result_is_error:number|null; error_code:string|null;
+  /** Present for cross-relay operations; never includes command arguments. */
+  route_started_at?:number;
 }
 export interface OperationUpdate {
   state:'settled'|'uncertain'; updated_at:number;

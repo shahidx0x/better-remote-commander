@@ -16,6 +16,8 @@ const MAX_ARGS=1024*1024;
 const MAX_ENCRYPTED=1450*1024;
 const PRESENCE_REFRESH_MS=5000;
 const ROW_POLL_MS=400;
+const ROW_POLL_IDLE_MS=2500;
+const ROW_POLL_NO_DEVICE_MS=5000;
 const MAX_CONCURRENT=2;
 type Lease={userId:string;leaseId:string};
 export type RemoteDevice={deviceId:string;deviceName:string;instanceId:string};
@@ -27,9 +29,11 @@ export class CrossRelayCoordinator {
  private readonly leases=new Map<string,Lease>();
  private readonly acquisitions=new Map<string,Promise<void>>();
  private poller?:NodeJS.Timeout;private renewal?:NodeJS.Timeout;private sweeper?:NodeJS.Timeout;
+ private idlePolls=0;private currentPollDelayMs=ROW_POLL_MS;
  private stopped=false;private ticking=false;private refreshing=false;
  private workers=0;
- private counters={routed:0,executed:0,persisted:0,uncertain:0,errors:0,leaseLost:0};
+ private counters={routed:0,executed:0,persisted:0,uncertain:0,errors:0,leaseLost:0,
+  emptyQueuePolls:0,queuePollQueries:0,queuePollWakeups:0};
  constructor(private readonly hub:DeviceHub,private readonly store:MongoStore,
   private readonly journal:OperationJournal,secret:string,
   private readonly log:(level:string,msg:string)=>void=()=>{}){
@@ -41,23 +45,24 @@ export class CrossRelayCoordinator {
  }
  status(){return {enabled:this.enabled,mode:this.enabled?'mongodb-coordinated':'local-only',
   encryptedRequests:true,automaticReplay:false,staleCallsNeverReexecuted:true,
-  maxRemoteArgumentBytes:MAX_ARGS,presenceLeaseSeconds:20,pollIntervalMs:ROW_POLL_MS,
+  maxRemoteArgumentBytes:MAX_ARGS,presenceLeaseSeconds:20,
+  pollIntervalMs:this.currentPollDelayMs,idlePollMaxMs:ROW_POLL_IDLE_MS,
   inFlightWorkers:this.workers,...this.counters};}
  start():void{
   if(!this.enabled||this.poller)return;
   this.stopped=false;
   const previous=this.hub.onHello;
   this.hub.onHello=(info,tools)=>{
-   try{previous?.(info,tools);}finally{void this.acquire(info.deviceId);}
+   try{previous?.(info,tools);}finally{void this.acquire(info.deviceId).then(()=>this.wakePoll());}
   };
-  this.poller=setInterval(()=>{void this.tick();},ROW_POLL_MS);this.poller.unref();
+  this.schedulePoll(ROW_POLL_MS);
   this.renewal=setInterval(()=>{void this.refresh();},PRESENCE_REFRESH_MS);this.renewal.unref();
   this.sweeper=setInterval(()=>{void this.sweep();},60_000);this.sweeper.unref();
   void this.refresh();
  }
  async stop():Promise<void>{
   this.stopped=true;
-  clearInterval(this.poller);clearInterval(this.renewal);clearInterval(this.sweeper);
+  clearTimeout(this.poller);clearInterval(this.renewal);clearInterval(this.sweeper);
   this.poller=undefined;this.renewal=undefined;this.sweeper=undefined;
   await Promise.all([...this.acquisitions.values()].map(p=>p.catch(()=>{})));
   await Promise.all([...this.leases.entries()].map(([id,lease])=>
@@ -173,6 +178,7 @@ export class CrossRelayCoordinator {
  async wait(ctx:{userId:string;clientId:string},id:string,
   signal?:AbortSignal,timeoutMs=110_000):Promise<ToolResult>{
   const deadline=Date.now()+Math.min(Math.max(500,timeoutMs),110_000);
+  let readAttempts=0;
   while(Date.now()<deadline){
    const row=await this.journal.get(ctx,id);
    if(!row)return this.response(id,'OPERATION_NOT_FOUND',false);
@@ -184,7 +190,8 @@ export class CrossRelayCoordinator {
    }
    if(row.state==='uncertain')return this.response(id,'REMOTE_OUTCOME_UNCERTAIN',false);
    if(signal?.aborted)return this.response(id,'HOST_DISCONNECTED',true);
-   await delay(250);
+   // Fast for short operations; avoid repeated Mongo reads for longer tasks.
+   await delay(readAttempts++<5?250:readAttempts<15?500:1000);
   }
   return this.response(id,'REMOTE_OPERATION_PENDING',true);
  }
@@ -195,17 +202,41 @@ export class CrossRelayCoordinator {
     recovery:{tool:'recover_operation',args:{operationId:id}},
     error:{code,retryable:false}}};
  }
+ private nextPollDelay():number{
+  if(this.leases.size===0)return ROW_POLL_NO_DEVICE_MS;
+  if(this.workers>=MAX_CONCURRENT)return ROW_POLL_MS;
+  if(this.idlePolls<3)return ROW_POLL_MS;
+  if(this.idlePolls<10)return 1000;
+  return ROW_POLL_IDLE_MS;
+ }
+ private schedulePoll(delayMs:number):void{
+  if(this.stopped)return;
+  clearTimeout(this.poller);
+  this.currentPollDelayMs=delayMs;
+  this.poller=setTimeout(()=>{
+   void this.tick().finally(()=>this.schedulePoll(this.nextPollDelay()));
+  },delayMs);
+  this.poller.unref();
+ }
+ private wakePoll():void{
+  if(this.stopped)return;
+  this.counters.queuePollWakeups++;
+  this.idlePolls=0;
+  this.schedulePoll(0);
+ }
  private async tick():Promise<void>{
   if(this.stopped||this.ticking||this.workers>=MAX_CONCURRENT)return;
   this.ticking=true;
   try{
    const online=this.hub.list().map(d=>d.deviceId);
    const eligible=online.filter(id=>this.leases.has(id));
-   if(!eligible.length)return;
+   if(!eligible.length){this.idlePolls++;return;}
+   this.counters.queuePollQueries++;
    const route=await this.store.claimRouted(this.instanceId,eligible);
-   if(!route)return;
+   if(!route){this.counters.emptyQueuePolls++;this.idlePolls++;return;}
+   this.idlePolls=0;
    this.workers++;
-   void this.execute(route).finally(()=>{this.workers--;});
+   void this.execute(route).finally(()=>{this.workers--;this.wakePoll();});
   }catch{this.counters.errors++;}
   finally{this.ticking=false;}
  }

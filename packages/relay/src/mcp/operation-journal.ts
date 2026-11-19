@@ -43,6 +43,12 @@ export function parseOperationId(id:unknown):string {
 const scoped=(row:OperationRow,ctx:{userId:string;clientId:string})=>
  row.user_id===ctx.userId&&row.client_id===ctx.clientId;
 const safeRow=(row:OperationRow)=>({
+ timeline:[
+  {phase:'claimed',at:row.created_at},
+  ...(typeof row.route_started_at==='number'?[{phase:'remote_dispatch_started',at:row.route_started_at}]:[]),
+  ...(row.state!=='claimed'?[{phase:row.state==='settled'?'result_settled':'outcome_uncertain',at:row.updated_at}]:[])
+ ],
+ hostDeliveryConfirmed:false,
  operationId:row.id,tool:row.tool,deviceId:row.device_id,
  state:row.state,startedAt:row.created_at,updatedAt:row.updated_at,
  expiresAt:row.expires_at,resultBytes:row.result_bytes,

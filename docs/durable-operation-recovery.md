@@ -70,8 +70,11 @@ A running operation stranded for more than about 190 seconds is marked
 There are at most **128 queued/running routed operations per account** and
 **1 MiB of plaintext arguments per routed call** (encrypted at rest). The
 local relay shortcut avoids the cross-relay queue when the correct device
-is connected to the current relay. The worker polls every 400 milliseconds,
-with at most two cross-relay dispatches active per instance. Extra database
+is connected to the current relay. Queue polling starts at 400 milliseconds
+and progressively backs off to 2.5 seconds when idle (5 seconds with no
+eligible local device). New device connections and completed worker calls
+wake the queue immediately. This reduces empty MongoDB reads while retaining
+responsive active routing. At most two cross-relay dispatches run per instance. Extra database
 queries and encrypted routing add latency compared with direct local relay
 calls; no overall speedup is claimed.
 
@@ -100,8 +103,11 @@ additional authorization setup is needed.
   a persistent disk/volume. MongoDB remains the sole backend if configured.
 - Claims and metadata expire after seven days. There is a maximum of 16,384
   unexpired operation records per owner, and encrypted payloads have a global
-  64 MiB storage budget (MongoDB budget enforcement is best-effort under
-  multi-process concurrency).
+  64 MiB storage budget. MongoDB now uses atomic global reservations
+  across relay instances instead of rescanning all ciphertext on every write.
+  Reservations from ambiguous failed writes are conservatively retained until
+  safe reconciliation; this can temporarily reduce available quota rather
+  than risk admitting more encrypted data than the configured budget.
 - The **plaintext result cap is 512 KiB** per operation; results larger than
   that retain outcome metadata only. Retrieval uses 16 KiB UTF-8-aware pages.
   File paths, raw arguments, commands, OAuth tokens and source text are not
@@ -120,6 +126,32 @@ additional authorization setup is needed.
   This is **not a reason to rerun an uncertain command**.
 - A normal read-only MCP tool without `operationId` is not journaled.
   Read-only operations can safely be performed again as fresh reads.
+
+## MongoDB result quota, readiness and failure diagnostics
+
+On MongoDB, the recovery quota is reserved through a single atomic counter
+record. Normal result settlement performs no whole-collection aggregation.
+A compare-and-swap maintenance pass reconciles the counter against retained
+ciphertext about every 30 minutes, only when there are no pending reservations.
+This accounts for TTL deletion without adding load to the hot path. If a
+MongoDB write has an ambiguous outcome, its reservation stays conservative
+until it can be safely reconciled; the relay does **not** silently risk
+exceeding the 64 MiB encrypted storage cap.
+
+The existing `/health` endpoint now includes `recoveryReadiness` with
+`encryptedResults`, `degraded`, bounded quota usage and warning codes such
+as `ENCRYPTED_RESULT_RETENTION_UNAVAILABLE` and
+`RESULT_QUOTA_AT_CAPACITY`. The recovery API also returns a small, metadata-only
+operation timeline (claimed, remotely dispatched where available, and
+settled/uncertain). These are relay persistence phases; they are **not**
+ChatGPT UI-delivery acknowledgements.
+
+The local executable-only/Windows Job Object fallback is unchanged. Full
+restricted-token Windows sandboxing, tool-approval prompts and a different
+public MCP tool catalog are separate compatibility-sensitive changes, **not**
+claimed as implemented here; they need explicit device/platform validation and
+may cause a host tool refresh. No new public tool, OAuth issuer, or relay URL
+was introduced by these hot-path improvements.
 
 ## Upgrade without deleting pairing or OAuth
 
@@ -145,12 +177,18 @@ node --test packages/relay/test/operation-recovery.test.mjs
 node --test packages/relay/test/operation-mcp.test.mjs
 node --test packages/relay/test/recovery-faults.test.mjs
 node --test packages/relay/test/cross-relay.test.mjs
+node --test packages/relay/test/mongo-result-budget.test.mjs
+# With BRC_TEST_MONGODB_URI explicitly set to an isolated test server:
+node --test packages/relay/test/mongo-dual-relay.e2e.mjs
 node --test packages/agent/test/result-spool.test.mjs
 ```
 
 The cross-relay test uses a simulated MongoDB-like shared store; a live MongoDB
 cluster or replica-set e2e still requires an explicitly authorized disposable
-`BRC_TEST_MONGODB_URI`. None was available in the local environment. The
+`BRC_TEST_MONGODB_URI`. The new test creates a fresh uniquely named database,
+uses two independent MongoStore connections, and drops only its own test DB.
+Without that variable it is **skipped**, not silently reported as passed.
+No isolated URI was available in the development environment. The
 MCP integration test uses an isolated SQLite file, disposable local
 relay, fake local WebSocket device and new API keys. It does not touch
 production deployments or credentials. For MongoDB parity, run the existing

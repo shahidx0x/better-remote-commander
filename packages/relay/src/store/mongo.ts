@@ -11,7 +11,8 @@ import type { RelayStore } from './types.js';
 import { MAX_PENDING_PLUGIN_REQUESTS, type PluginRequestStatus, type PluginRequestRow } from './sqlite.js';
 import type { UsageRecord, UsageDay, McpEstimateDelta, McpEstimateDay } from '../features/usage.js';
 import type { SkillRow, SkillRequest } from '../features/skills.js';
-import { MAX_OPERATION_ROWS_PER_USER, MAX_OPERATION_STORED_BYTES, type OperationRow, type OperationUpdate } from './operation-record.js';
+import { MAX_OPERATION_ROWS_PER_USER, type OperationRow, type OperationUpdate } from './operation-record.js';
+import {MongoResultBudget} from './mongo-result-budget.js';
 import type {DevicePresence,RoutedOperation} from './cross-relay-types.js';
 
 export class MongoStore implements RelayStore {
@@ -19,8 +20,12 @@ export class MongoStore implements RelayStore {
   private liveAudit: AuditRow[] = [];
   private auditSequence = 0;
   private lastTouches = new Map<string, number>();
+  private readonly resultBudget:MongoResultBudget;
+  private lastBudgetReconcile=0;
 
-  private constructor(private readonly client: MongoClient, private readonly db: Db) {}
+  private constructor(private readonly client: MongoClient, private readonly db: Db) {
+    this.resultBudget=new MongoResultBudget(db);
+  }
 
   static async connect(uri: string, dbName?: string): Promise<MongoStore> {
     if (!/^mongodb(?:\+srv)?:\/\//i.test(uri)) throw new Error('MONGODB_URI must begin with mongodb:// or mongodb+srv://');
@@ -45,6 +50,8 @@ export class MongoStore implements RelayStore {
   /** No credentials in diagnostics. */
   get databaseName(): string { return this.db.databaseName; }
   async ping(): Promise<void> { await this.db.command({ ping: 1 }); }
+  /** Readiness-only metrics, never exposes payloads or arguments. */
+  async recoveryQuotaStatus(){return this.resultBudget.status();}
   private col(name: string) { return this.db.collection<Document & { _id: string }>(name); }
 
   private async ensureIndexes(): Promise<void> {
@@ -78,6 +85,7 @@ export class MongoStore implements RelayStore {
       indexes.push(this.col(name).createIndex({ expire_on: 1 }, { expireAfterSeconds: 0 }));
     }
     await Promise.all(indexes);
+    await this.resultBudget.initialize();
   }
 
   private static row<T>(doc: Document | null): T | undefined {
@@ -111,24 +119,44 @@ export class MongoStore implements RelayStore {
       .sort({created_at:-1}).limit(Math.max(1,Math.min(20,limit))).toArray()).map(r=>MongoStore.row<OperationRow>(r)!);
   }
   async settleOperation(id:string,update:OperationUpdate):Promise<void>{
-    let payload=update.encrypted_result;
+    let payload=update.encrypted_result,reservedBytes=0;
     if(payload!==null){
-      const rows=await this.col('durable_operations').aggregate<{bytes:number}>([
-        {$match:{encrypted_result:{$type:'string'},expires_at:{$gt:Date.now()}}},
-        {$group:{_id:null,bytes:{$sum:{$strLenBytes:'$encrypted_result'}}}}
-      ]).toArray();
+      // First durably retained result wins: a repeated acknowledgement or
+      // late replay must never replace it or consume additional quota.
       const existing=await this.getOperation(id);
-      const total=rows[0]?.bytes??0;
-      const previous=existing?.encrypted_result?Buffer.byteLength(existing.encrypted_result,'utf8'):0;
-      if(Buffer.byteLength(payload,'utf8')+total-previous>MAX_OPERATION_STORED_BYTES)payload=null;
+      if(existing?.encrypted_result)return;
+      const size=Buffer.byteLength(payload,'utf8');
+      if(await this.resultBudget.reserve(size))reservedBytes=size;
+      else payload=null; // quota full: retain metadata, never silently execute twice
     }
-    await this.col('durable_operations').updateOne({_id:id,
-      $or:[{state:{$ne:'settled'}},...(payload?[{state:'settled',encrypted_result:null,result_sha256:update.result_sha256}]:[])]},{$set:{
-      state:update.state,updated_at:update.updated_at,encrypted_result:payload,
-      result_bytes:update.result_bytes,
-      result_sha256:update.result_sha256,
-      result_is_error:update.result_is_error,error_code:update.error_code
-    }},{writeConcern:{j:true}});
+    let write;
+    try{
+      write=await this.col('durable_operations').updateOne({_id:id,
+        $or:[{state:{$ne:'settled'}},...(payload?[{
+          state:'settled',encrypted_result:null,result_sha256:update.result_sha256
+        }]:[])]},{$set:{
+        state:update.state,updated_at:update.updated_at,encrypted_result:payload,
+        result_bytes:update.result_bytes,result_sha256:update.result_sha256,
+        result_is_error:update.result_is_error,error_code:update.error_code
+      }},{writeConcern:{j:true}});
+    }catch(error){
+      if(reservedBytes){
+        // A failed/ambiguous DB response does not prove that persistence
+        // failed. Only release capacity when another settled result is known.
+        try{
+          const observed=await this.getOperation(id);
+          if(observed?.encrypted_result===payload)
+            await this.resultBudget.finish(reservedBytes,true);
+          else if(observed?.state==='settled'&&observed.encrypted_result)
+            await this.resultBudget.finish(reservedBytes,false);
+          // Otherwise keep the conservative reservation rather than risk
+          // exceeding the global cap after an ambiguous MongoDB write.
+        }catch{/* Conservative reservation remains. */}
+      }
+      throw error;
+    }
+    if(reservedBytes)
+      await this.resultBudget.finish(reservedBytes,write.matchedCount===1);
   }
   async pruneOperations(now=Date.now()):Promise<number>{
     return (await this.col('durable_operations').deleteMany({expires_at:{$lte:now}})).deletedCount;
@@ -408,6 +436,12 @@ export class MongoStore implements RelayStore {
       this.col('connection_links').deleteMany({ expires_at: { $lte: now } }),
       this.col('tokens').deleteMany({ expires_at: { $lte: now - 7 * 86_400_000 } }),
     ]);
+    // Infrequent, version-checked reconciliation accounts for Mongo TTL expiry
+    // without a full collection aggregation during every operation settlement.
+    if(now-this.lastBudgetReconcile>=30*60_000){
+      this.lastBudgetReconcile=now;
+      await this.resultBudget.reconcile(now);
+    }
   }
 
   /* ---------- plugin install requests (AI -> owner approval) ---------- */

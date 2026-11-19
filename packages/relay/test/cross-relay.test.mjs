@@ -153,3 +153,19 @@ test('fenced Mongo presence blocks stale relay after another instance acquires d
   store.close();
  }
 });
+
+test('idle cross-relay queue uses adaptive polling and wakes immediately for a newly connected agent',async()=>{
+ const store=new SharedStore(),owner=store.owner,hub=new FakeHub('adaptive-relay',owner,true);
+ const journal=new OperationJournal(store,SECRET);
+ const coordinator=new CrossRelayCoordinator(hub,store,journal,SECRET);
+ // Exercise the real tick scheduler without depending on wall-clock timing.
+ coordinator.leases.set('dev1',{userId:owner,leaseId:'local-test'});
+ assert.equal(coordinator.nextPollDelay(),400);
+ for(let n=0;n<11;n++)await coordinator.tick();
+ assert.equal(coordinator.status().queuePollQueries,11);
+ assert.equal(coordinator.status().emptyQueuePolls,11);
+ assert.equal(coordinator.nextPollDelay(),2500);
+ coordinator.wakePoll();
+ assert.equal(coordinator.nextPollDelay(),400);
+ await coordinator.stop();
+});

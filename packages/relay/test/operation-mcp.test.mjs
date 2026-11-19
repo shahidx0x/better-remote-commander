@@ -41,6 +41,9 @@ test('public MCP operation recovery survives lost agent connection and relay res
   relay=await buildRelay(config,()=>{});
   await new Promise(r=>relay.http.listen(0,'127.0.0.1',r));
   let base='http://127.0.0.1:'+relay.http.address().port;
+  const healthy=await (await fetch(base+'/health')).json();
+  assert.equal(healthy.recoveryReadiness.encryptedResults,true);
+  assert.equal(healthy.recoveryReadiness.degraded,false);
   const user=relay.store.getUserByName('admin');
   const agentToken=relay.store.issueDeviceToken('fixture-pc',user.id,'Fixture PC','win32');
   const key=relay.store.createApiKey(user.id,'Client 1');
@@ -89,6 +92,8 @@ test('public MCP operation recovery survives lost agent connection and relay res
   assert.equal(denied.structuredContent.found,false);
   const before=await rpc(base,key.raw,'recover_operation',{operationId:id});
   assert.equal(before.structuredContent.found,true);
+  assert.equal(before.structuredContent.hostDeliveryConfirmed,false);
+  assert.deepEqual(before.structuredContent.timeline.map(x=>x.phase),['claimed','result_settled']);
   assert.match(before.structuredContent.resultText,/BUILD_FINISHED_SECRET/);
   ws.close(); await new Promise(resolve=>ws.once('close',resolve));
   await waitFor(()=>relay.hub.list(user.id).length===0);
@@ -107,6 +112,29 @@ test('public MCP operation recovery survives lost agent connection and relay res
  }finally{
   try{ws?.terminate();}catch{}
   if(relay)await relay.close();
+  await rm(dir,{recursive:true,force:true});
+ }
+});
+
+test('health clearly reports degraded encrypted recovery when its stable secret is too short',async()=>{
+ const dir=mkdtempSync(path.join(os.tmpdir(),'brc-readiness-degraded-'));
+ const relay=await buildRelay({
+  port:0,host:'127.0.0.1',publicUrl:'http://127.0.0.1:3210',
+  trustProxy:false,dbFile:path.join(dir,'relay.sqlite'),
+  sessionSecret:'short-test-secret',adminUser:'admin',adminPassword:'testing',
+  relayVersion:'readiness-test'
+ },()=>{});
+ try{
+  await new Promise(resolve=>relay.http.listen(0,'127.0.0.1',resolve));
+  const base='http://127.0.0.1:'+relay.http.address().port;
+  const result=await fetch(base+'/health');
+  assert.equal(result.status,200);
+  const health=await result.json();
+  assert.equal(health.recoveryReadiness.encryptedResults,false);
+  assert.equal(health.recoveryReadiness.degraded,true);
+  assert.ok(health.recoveryReadiness.warnings.includes('ENCRYPTED_RESULT_RETENTION_UNAVAILABLE'));
+ }finally{
+  await relay.close();
   await rm(dir,{recursive:true,force:true});
  }
 });
