@@ -17,6 +17,7 @@ import { atomicWrite, sha256, withFileLocks } from '../runtime/file-safety.js';
 import { projectIndex } from '../runtime/project-index.js';
 import { searchManager } from '../core/search-manager.js';
 import { checkCancelled } from '../context.js';
+import {semanticTsManager} from '../runtime/semantic-ts-host.js';
 import { handleGitStatus, handleGitDiff } from './brc-tools.js';
 const PathSchema = z.object({ path: z.string().min(1) });
 const Hash = z.string().regex(/^[a-fA-F0-9]{64}$/);
@@ -29,7 +30,9 @@ const FindSchema = PathSchema.extend({ query: z.string().min(1).max(200), maxFil
 const SymbolSchema = PathSchema.extend({ name: z.string().min(1).max(400), line: z.number().int().min(1).optional() });
 const ReplaceSchema = SymbolSchema.extend({ expected_sha256: Hash, replacement: z.string().max(1000000), dryRun: z.boolean().default(true) });
 const LineEditSchema = PathSchema.extend({ expected_sha256: Hash, edits: z.array(z.object({ startLine: z.number().int().min(1), endLine: z.number().int().min(1), text: z.string().max(1000000) })).min(1).max(50), dryRun: z.boolean().default(true) });
-const RefsSchema = PathSchema.extend({ symbol: z.string().regex(/^[A-Za-z_$][A-Za-z0-9_$]*$/), maxResults: z.number().int().min(1).max(200).default(50), filePattern: z.string().max(500).optional() });
+const RefsSchema = PathSchema.extend({ symbol: z.string().regex(/^[A-Za-z_$][A-Za-z0-9_$]*$/), maxResults: z.number().int().min(1).max(200).default(50), filePattern: z.string().max(500).optional(),
+    mode: z.enum(['lexical','semantic']).default('lexical'), file: z.string().optional(),
+    line: z.number().int().min(1).optional(), column: z.number().int().min(1).optional() });
 const RelatedSchema = PathSchema.extend({ file: z.string().min(1), maxFiles: z.number().int().min(1).max(1000).default(300) });
 const DiagnosticsSchema = z.object({ paths: z.array(z.string().min(1)).min(1).max(20) });
 const ChecksSchema = PathSchema.extend({ scripts: z.array(z.string().regex(/^[A-Za-z0-9_.:-]+$/)).min(1).max(5), execute: z.boolean().default(false), sessionId: z.string().optional() });
@@ -160,6 +163,18 @@ async function editRanges(raw: unknown) {
 }
 async function references(raw: unknown) {
     const a = RefsSchema.parse(raw), root = await rootPath(a.path);
+    if(a.mode==='semantic'){
+        if(!a.file||!a.line||!a.column||a.filePattern)
+            throw new AgentError('SEMANTIC_ARGUMENTS',
+                'Semantic references need a TS/JS file and exact 1-based line/column (omit filePattern). To use ordinary ripgrep, mode=lexical.');
+        const semantic=await semanticTsManager.query(root,a.file,a.symbol,a.line,a.column,a.maxResults);
+        return result({root,symbol:a.symbol,mode:'semantic',matches:semantic.references,
+            definitions:semantic.definitions,totalReferences:semantic.totalReferences,
+            limited:semantic.truncated,sourceSha256:semantic.sourceSha256,
+            provider:'typescript-language-service',sourceFilesLoaded:semantic.sourceFilesLoaded,
+            projectFilesTruncated:semantic.projectFilesTruncated,
+            semantics:semantic.semantics,modelCalls:0,execution:false});
+    }
     const escaped = a.symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const pattern = `(?:^|[^A-Za-z0-9_$])${escaped}(?:$|[^A-Za-z0-9_$])`;
     const started = await searchManager.startSearch({ rootPath: root, pattern, searchType: 'content', filePattern: a.filePattern, maxResults: a.maxResults, contextLines: 0, ignoreCase: false, timeout: 15000 });
@@ -250,7 +265,7 @@ export function buildExpertToolDefinitions(): ToolDefinition[] {
         ['read_symbol', SymbolSchema, true, 'Read a named declaration and full-file SHA-256. Supported parsers return exact bodies; generic candidates return their declaration line only. Ambiguous matches require qualification/start line.'],
         ['replace_symbol', ReplaceSchema, false, 'Hash-checked multilingual declaration replacement for supported complete syntax trees. Generic/invalid/truncated trees are rejected. Atomic, preview by default, no automatic reference rename.'],
         ['edit_code_ranges', LineEditSchema, false, 'Hash-checked non-overlapping one-based line-range replacements in one file. Preserves newline style. Atomic commit; dryRun=true by default.'],
-        ['find_references', RefsSchema, true, 'Fast ripgrep identifier candidate search. Lexical, not semantic: comments/strings and unrelated same-name symbols may appear. Never use as automatic rename proof.'],
+        ['find_references', RefsSchema, true, 'Default mode=lexical uses fast ripgrep identifier candidate search; comments, strings and same-name symbols can appear. Compiler-backed mode=semantic (enabled by default; BRC_TS_SEMANTIC=0 disables) needs TS/JS file plus exact 1-based line/column and returns bounded TypeScript compiler-backed references/definitions from a lazy 160 MiB-heap child process. No automatic edits or model calls; coverage can be incomplete.'],
         ['related_files', RelatedSchema, true, 'Multilingual import/project/module relationships and reverse-import candidates via a bounded RAM graph. Includes C#, Rust, Python, Go, Java, C/C++ and generic text languages. Confidence and unresolved imports are explicit; no semantic binding claims.'],
         ['code_diagnostics', DiagnosticsSchema, true, 'Syntax diagnostics for up to 20 saved files with registered grammars. Unsupported languages return checked=false, never a false passing syntax check. Not compiler/typecheck/editor diagnostics.'],
         ['vscode_tasks', PathSchema, true, 'Inspect saved .vscode/tasks.json (JSONC supported), omit environment values and do not expand or execute task variables.'],

@@ -21,7 +21,8 @@ export interface TerminalSession {
   lastReadIndex: number;      // Track where "new" output starts for default reads
   isBlocked: boolean;
   startTime: Date;
-  bufferedChars: number;      // Joined length of outputLines (content + separators)
+  bufferedChars: number;      // Joined UTF-16 length of outputLines (content + separators)
+  bufferedBytes: number;      // Exact retained UTF-8 byte budget, including inserted separators
   evictedLines: number;       // Lines dropped from the front to enforce the buffer cap
   evictedChars: number;       // Joined length of evicted lines (keeps snapshot offsets absolute)
 }

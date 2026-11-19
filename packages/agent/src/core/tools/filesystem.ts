@@ -126,10 +126,11 @@ async function getAllowedDirs(): Promise<string[]> {
         }
         return allowedDirectories;
     } catch (error) {
-        console.error('Failed to initialize allowed directories:', error);
-        // Keep the default permissive path
+        // An empty list means explicitly unrestricted in the legacy config.
+        // It must NEVER be returned because a policy read or write failed.
+        // Do not put config or secret values into the error message.
+        throw new Error('PATH_POLICY_UNAVAILABLE: Cannot load allowed directories. Access denied until local configuration is repaired.');
     }
-    return [];
 }
 
 // Normalize all paths consistently
@@ -455,9 +456,12 @@ export async function readFileFromDisk(
     // Get file extension for telemetry
     const fileExtension = getFileExtension(validPath);
 
-    // Check if path is a directory — return listing instead of EISDIR error
+    // Reuse this metadata for the telemetry check below; avoid an
+    // unconditional second filesystem round-trip for ordinary files.
+    let fileStats: Awaited<ReturnType<typeof fs.stat>> | undefined;
     try {
         const stats = await fs.stat(validPath);
+        fileStats = stats;
         if (stats.isDirectory()) {
             const dirListOp = async () => {
                 const entries = await listDirectory(validPath);
@@ -491,7 +495,7 @@ export async function readFileFromDisk(
 
     // Check file size before attempting to read
     try {
-        const stats = await fs.stat(validPath);
+        const stats = fileStats ?? await fs.stat(validPath);
 
         // Capture file extension in telemetry without capturing the file path
         capture('server_read_file', {
@@ -705,13 +709,16 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
 }
 
 export async function readMultipleFiles(entries: MultiFileEntry[]): Promise<MultiFileResult[]> {
-    // Three concurrent reads balance batch latency against disk/cache pressure on all PCs.
-    return mapWithConcurrency(entries, 3, async (entry: MultiFileEntry) => {
+    // Coalesce only IDENTICAL path/range requests within this one batch.
+    // Do not cache across calls: files, symlinks and permissions may change.
+    const inFlight = new Map<string, Promise<MultiFileResult>>();
+    const readOne = async (entry: MultiFileEntry): Promise<MultiFileResult> => {
             const filePath = typeof entry === 'string' ? entry : entry.path;
             const range = typeof entry === 'string' ? undefined : entry;
             try {
-                const validPath = await validatePath(filePath);
-                const fileResult = await readFile(validPath, range && (range.offset !== undefined || range.length !== undefined)
+                // readFile() enforces canonical-path permissions itself.
+                // Validating here as well caused duplicate realpath/stat work.
+                const fileResult = await readFile(filePath, range && (range.offset !== undefined || range.length !== undefined)
                     ? { offset: range.offset ?? 0, length: range.length ?? await getDefaultReadLength() }
                     : undefined);
                 // Handle content conversion properly for images vs text
@@ -746,6 +753,17 @@ export async function readMultipleFiles(entries: MultiFileEntry[]): Promise<Mult
                     error: errorMessage
                 };
             }
+    };
+    // Preserve the original response order and the 3-worker I/O limit.
+    return mapWithConcurrency(entries, 3, (entry) => {
+        const filePath = typeof entry === 'string' ? entry : entry.path;
+        const range = typeof entry === 'string' ? undefined : entry;
+        const key = JSON.stringify([filePath,range?.offset??null,range?.length??null]);
+        const previous = inFlight.get(key);
+        if (previous) return previous;
+        const pending = readOne(entry);
+        inFlight.set(key, pending);
+        return pending;
     });
 }
 

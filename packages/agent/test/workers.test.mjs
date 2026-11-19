@@ -7,6 +7,9 @@ import path from 'node:path';
 import {tmpdir} from 'node:os';
 const scratch=mkdtempSync(path.join(realpathSync.native(tmpdir()),'brc-workers-test-'));
 process.env.BRC_HOME=path.join(scratch,'home');process.env.BRC_LOG_LEVEL='silent';
+// This suite tests the legacy RAM-only mode. Durable restore has dedicated
+// tests in worker-plan-checkpoints.test.mjs and is enabled by default.
+process.env.BRC_WORKER_PLAN_PERSIST='0';
 const {configManager}=await import('../dist/core/config-manager.js');await configManager.setValue('allowedDirectories',[scratch]);
 const {callTool,listTools}=await import('../dist/dispatcher.js');
 const {workerCoordinator,WorkerCoordinator,WORKER_LIMITS}=await import('../dist/runtime/worker-coordination.js');

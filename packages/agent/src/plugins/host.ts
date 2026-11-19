@@ -22,6 +22,12 @@ const loadSdk = async () => {
 };
 import { exeName, pluginPaths, uvEnv } from './paths.js';
 import { getPlugin, patchPlugin } from './store.js';
+import { pluginEnvironment } from './plugin-environment.js';
+import { cappedPluginStderr } from './capped-stderr.js';
+import {attachManagedStdio,type StdioOwnership} from './managed-stdio.js';
+import {managedLaunchSpec} from '../runtime/managed-spawn.js';
+import {pluginStartupAdmission} from '../runtime/resource-admission.js';
+import {getCallContext,checkCancelled} from '../context.js';
 import type { PluginRecord, PluginToolInfo } from './types.js';
 
 const START_TIMEOUT_MS = Number(process.env.BRC_PLUGIN_START_TIMEOUT_MS) || 60_000;
@@ -37,9 +43,8 @@ export interface LaunchSpec {
 
 /** How to start a plugin's MCP server. Throws if the source is not launchable as MCP. */
 export function resolveLaunch(rec: PluginRecord): LaunchSpec {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (typeof v === 'string') env[k] = v;
-  Object.assign(env, rec.env ?? {});
+  // Never inherit the agent's relay credentials or unrelated API keys.
+  const env=pluginEnvironment(process.env,rec.env ?? {});
   const s = rec.source;
   switch (s.type) {
     case 'npm': {
@@ -66,10 +71,12 @@ interface Running {
   lastUsed: number;
   idleTimer?: NodeJS.Timeout;
   closed: boolean;
+  managedStdio?:StdioOwnership;
 }
 
 const running = new Map<string, Running>();
 const starting = new Map<string, Promise<Running>>();
+const startingCancels=new Map<string,AbortController>();
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   let t: NodeJS.Timeout;
@@ -79,20 +86,46 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   ]);
 }
 
+function withStartAbort<T>(promise:Promise<T>,signal?:AbortSignal):Promise<T>{
+  if(!signal)return promise;
+  if(signal.aborted)return Promise.reject(signal.reason??new Error('PLUGIN_START_CANCELLED'));
+  return new Promise<T>((resolve,reject)=>{
+    const cleanup=()=>signal.removeEventListener('abort',abort);
+    const abort=()=>{cleanup();reject(signal.reason??new Error('PLUGIN_START_CANCELLED'));};
+    signal.addEventListener('abort',abort,{once:true});
+    promise.then(v=>{cleanup();resolve(v);},e=>{cleanup();reject(e);});
+    if(signal.aborted)abort();
+  });
+}
+
 function armIdle(id: string, r: Running): void {
   if (r.idleTimer) clearTimeout(r.idleTimer);
-  r.idleTimer = setTimeout(() => { void stopPlugin(id); }, IDLE_MS);
+  r.idleTimer = setTimeout(() => { if(running.get(id) === r)void stopPlugin(id); }, IDLE_MS);
   r.idleTimer.unref?.();
 }
 
-async function start(rec: PluginRecord): Promise<Running> {
+async function start(rec: PluginRecord,stopSignal?:AbortSignal): Promise<Running> {
+  const callerSignal=getCallContext()?.signal;
+  const signal=callerSignal&&stopSignal?AbortSignal.any([callerSignal,stopSignal]):callerSignal??stopSignal;
+  const checkStartup=()=>{if(signal?.aborted)throw signal.reason??new Error('PLUGIN_START_CANCELLED');};
+  // Local plugin startup can spawn external processes. Limit simultaneous
+  // startups without holding permits for persistent plugin lifetimes.
+  // Network-connected remote plugins are unaffected.
+  const releaseStartup=rec.source.type==='remote'?()=>{}:
+    await pluginStartupAdmission.acquire(signal,Math.min(10000,START_TIMEOUT_MS));
+  try{
+  checkCancelled();checkStartup();
   const { Client, StdioClientTransport, StreamableHTTPClientTransport } = await loadSdk();
+  checkStartup();
   let transport: Transport;
+  let managedStdio:StdioOwnership|undefined;
+  let stderrSink: import('node:stream').Writable | undefined;
   if (rec.source.type === 'remote') {
     transport = new StreamableHTTPClientTransport(new URL(rec.source.url), {
       requestInit: rec.source.headers ? { headers: rec.source.headers } : undefined,
     });
   } else {
+    checkStartup();
     const spec = resolveLaunch(rec);
     if (!path.isAbsolute(spec.command) || fs.existsSync(spec.command)) {
       // ok: absolute path that exists, or a bare command resolved from PATH by the OS
@@ -100,22 +133,33 @@ async function start(rec: PluginRecord): Promise<Running> {
       throw new Error(`plugin "${rec.id}" is not installed (missing ${spec.command})`);
     }
     fs.mkdirSync(pluginPaths.logDir(), { recursive: true });
-    const stdio = new StdioClientTransport({ command: spec.command, args: spec.args, env: spec.env, cwd: spec.cwd, stderr: 'pipe' });
+    // The SDK still owns the stdio transport, but BRC chooses a native
+    // suspended-create Job owner BEFORE the target can execute when possible.
+    const selected=managedLaunchSpec(spec.command,spec.args,{cwd:spec.cwd,env:spec.env,windowsHide:true});
+    const stdio = new StdioClientTransport({ command: selected.command, args: selected.args, env: spec.env, cwd: spec.cwd, stderr: 'pipe' });
+    managedStdio=attachManagedStdio(stdio,selected.nativeJob);
     // Keep the plugin's stderr in a log file (useful for "why did it fail").
-    const logStream = fs.createWriteStream(path.join(pluginPaths.logDir(), `${rec.id}.log`), { flags: 'a' });
-    stdio.stderr?.pipe(logStream);
+    stderrSink = cappedPluginStderr(path.join(pluginPaths.logDir(), `${rec.id.replace(/[^a-zA-Z0-9_-]/g,'_')}.log`));
+    stdio.stderr?.pipe(stderrSink);
     transport = stdio;
   }
   const client = new Client({ name: 'brc-agent', version: '2' }, { capabilities: {} });
-  const r: Running = { client, transport, lastUsed: Date.now(), closed: false };
-  transport.onclose = () => { r.closed = true; if (running.get(rec.id) === r) running.delete(rec.id); };
+  const r: Running = { client, transport, managedStdio, lastUsed: Date.now(), closed: false };
+  transport.onclose = () => { r.closed = true; if(r.idleTimer)clearTimeout(r.idleTimer); stderrSink?.end(); if (running.get(rec.id) === r) running.delete(rec.id); };
   try {
-    await withTimeout(client.connect(transport), START_TIMEOUT_MS, `starting plugin "${rec.id}"`);
+    checkStartup();
+    await withStartAbort(withTimeout(client.connect(transport), START_TIMEOUT_MS, `starting plugin "${rec.id}"`),signal);
   } catch (e) {
+    // A rejected/aborted MCP handshake may still have spawned a process.
+    // Mark stop even before the SDK reports the pid; the adapter applies it
+    // if the asynchronous spawn completes after the caller gave up.
+    managedStdio?.stop();
     try { await client.close(); } catch { /* ignore */ }
+    stderrSink?.end();
     throw e;
   }
   return r;
+  }finally{releaseStartup();}
 }
 
 async function ensureRunning(id: string): Promise<Running> {
@@ -130,7 +174,11 @@ async function ensureRunning(id: string): Promise<Running> {
     throw new Error(`plugin "${id}" is not ready (status: ${rec.status}${rec.error ? `: ${rec.error}` : ''}${rec.userAction ? `; to fix: ${rec.userAction}` : ''})`);
   }
   if (rec.source.type === 'binary') throw new Error(`plugin "${id}" is a program used by BRC tools, not an MCP server`);
-  const p = start(rec).then((r) => { running.set(id, r); armIdle(id, r); return r; }).finally(() => starting.delete(id));
+  const controller=new AbortController();
+  startingCancels.set(id,controller);
+  const p = start(rec,controller.signal).then((r) => { running.set(id, r); armIdle(id, r); return r; }).finally(() => {
+    starting.delete(id);startingCancels.delete(id);
+  });
   starting.set(id, p);
   return p;
 }
@@ -138,7 +186,7 @@ async function ensureRunning(id: string): Promise<Running> {
 /** Tools offered by a plugin. Uses the cache unless refresh=true (or nothing is cached). */
 export async function getPluginTools(id: string, refresh = false): Promise<PluginToolInfo[]> {
   const rec = getPlugin(id);
-  if (!refresh && rec?.toolsCache?.length) return rec.toolsCache;
+  if (!refresh && rec?.enabled && rec.status === 'installed' && rec.toolsCache?.length) return rec.toolsCache;
   const r = await ensureRunning(id);
   const res = await withTimeout(r.client.listTools(), START_TIMEOUT_MS, `listing tools of "${id}"`);
   const tools = res.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
@@ -154,33 +202,41 @@ export interface PluginCallResult {
   isError?: boolean;
 }
 
-/** Call one tool of a plugin. Reconnects once if the plugin process had died. */
+/** Safe startup recovery is allowed, but NEVER replay a call dispatched to a
+ * plugin: after a connection break a write may have already taken effect. */
 export async function callPluginTool(id: string, tool: string, args: Record<string, unknown>): Promise<PluginCallResult> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const r = await ensureRunning(id);
-    try {
-      r.lastUsed = Date.now();
-      armIdle(id, r);
-      const res = await r.client.callTool({ name: tool, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS });
-      return { content: (res.content as Array<Record<string, unknown>>) ?? [], isError: !!res.isError };
-    } catch (e) {
-      if (r.closed && attempt === 0) continue; // process died mid-call: restart once
-      throw e;
-    }
+  const r = await ensureRunning(id); // may reconnect before dispatch
+  r.lastUsed=Date.now();
+  armIdle(id,r);
+  try {
+    const res=await r.client.callTool({name:tool,arguments:args},undefined,{timeout:CALL_TIMEOUT_MS});
+    return {content:(res.content as Array<Record<string,unknown>>)??[],isError:!!res.isError};
+  } catch (e) {
+    const cause=e instanceof Error ? e.message : String(e);
+    throw new Error('PLUGIN_CALL_OUTCOME_UNCERTAIN: The plugin operation may have completed. '+
+      'Inspect external side effects before attempting another call. '+cause.slice(0,300));
   }
-  throw new Error(`plugin "${id}" could not be reached`);
 }
 
 export async function stopPlugin(id: string): Promise<void> {
+  const controller=startingCancels.get(id);
+  if(controller && !controller.signal.aborted)controller.abort(new Error('PLUGIN_START_CANCELLED'));
+  // A shutdown must also stop a plugin whose MCP handshake is still pending.
+  // Never let the previous start register as running AFTER a stop request.
+  await starting.get(id)?.catch(()=>{});
   const r = running.get(id);
   running.delete(id);
   if (!r) return;
   if (r.idleTimer) clearTimeout(r.idleTimer);
+  // The SDK only owns its root process. Request our existing tree-stop while
+  // the original child handle is still live to avoid abandoned descendants.
+  // Stop is explicit/idle-only; never replay a plugin call after this point.
+  r.managedStdio?.stop();
   try { await r.client.close(); } catch { /* ignore */ }
 }
 
 export async function stopAllPlugins(): Promise<void> {
-  await Promise.all([...running.keys()].map((id) => stopPlugin(id)));
+  await Promise.all([...new Set([...running.keys(),...starting.keys()])].map(id=>stopPlugin(id)));
 }
 
 export function runningPluginIds(): string[] {

@@ -26,12 +26,17 @@ import { recordToolFailure, failureReason } from './runtime/failure-log.js';
 import { POLYGLOT_TOOL_HANDLERS, buildPolyglotToolDefinitions } from './tools/polyglot-tools.js';
 import { codeGraph } from './runtime/code-graph.js';
 import { EXPERT_TOOL_HANDLERS, buildExpertToolDefinitions } from './tools/expert-tools.js';
-import { AgentError, failure } from './runtime/errors.js';
-import { assertHash, withFileLocks, readBounded, sha256, decodeCode } from './runtime/file-safety.js';
+import { AgentError, failure, result } from './runtime/errors.js';
+import {deferredProfileEnabled,deferredToolDefinitions,discoverNativeTools,DEFERRED_TOOL_NAMES} from './runtime/deferred-tool-catalog.js';
+import { assertHash, readBounded, sha256, decodeCode } from './runtime/file-safety.js';
 import { validatePath } from './core/tools/filesystem.js';
 import { projectIndex } from './runtime/project-index.js';
 import { getCallContext, withCallContext, checkCancelled } from './context.js';
 import { isTermuxRuntime, availableOnTermux } from './runtime/platform-capabilities.js';
+import { repeatFailureGuard } from './runtime/repeat-guard.js';
+import {executeToolKernel,attachExecutionOutcome,classifyExecution,trackExecutionOutcome,type ExecutionKind} from './runtime/execution-kernel.js';
+import {requireSourceObservation,sourceObservationMode,automaticSourcePrecondition} from './runtime/source-observations.js';
+import {compactDuplicatedToolText} from './runtime/result-presentation.js';
 
 type Args = Record<string, unknown>;
 type Handler = (args: Args) => Promise<unknown>;
@@ -75,11 +80,24 @@ const TOOL_HANDLERS: Map<string, Handler> = new Map<string, Handler>([
   ...Object.entries(DEVELOPER_TOOL_HANDLERS),
   ...Object.entries(WORKER_TOOL_HANDLERS),
   ['batch_tools', (a) => runBatch(a, callTool)],
+  ['discover_tools', async a => result(discoverNativeTools(a,fullToolCatalog()))],
+  ['invoke_tool', async a => {
+    const name=a.name,args=a.args;
+    if(typeof name!=='string'||!name||name.length>120||DEFERRED_TOOL_NAMES.has(name)||
+      EXCLUDED_TOOLS.has(name)||!fullToolCatalog().some(t=>t.name===name))
+      throw new AgentError('UNKNOWN_TOOL','Unknown or unavailable tool name. Use discover_tools to find the native tool.');
+    if(!args||typeof args!=='object'||Array.isArray(args))
+      throw new AgentError('INVALID_ARGUMENT','invoke_tool requires args to be an object.');
+    // The original dispatcher is called recursively so its mutation guards,
+    // scope checks, source hashes, cancellation and receipts remain active.
+    return callTool(name,args as Args);
+  }],
 ]);
 
 let cachedDefs: ToolDefinition[] | null = null;
+let cachedDeferredDefs: ToolDefinition[] | null = null;
 
-export function listTools(): ToolDefinition[] {
+function fullToolCatalog(): ToolDefinition[] {
   if (!cachedDefs) {
     cachedDefs = [...buildToolDefinitions(), ...buildBrcToolDefinitions(), ...buildJobToolDefinitions(), ...buildPluginToolDefinitions(), ...buildAstGrepToolDefinitions(), ...buildCodingToolDefinitions(), ...buildExpertToolDefinitions(), ...buildPolyglotToolDefinitions(), ...buildDeveloperToolDefinitions(), ...buildWorkerToolDefinitions()]
       .filter((t) => TOOL_HANDLERS.has(t.name) && !EXCLUDED_TOOLS.has(t.name))
@@ -88,6 +106,13 @@ export function listTools(): ToolDefinition[] {
       .map(addToolChoice);
   }
   return cachedDefs;
+}
+
+export function listTools(): ToolDefinition[] {
+  // Opt-in for clients that accept an indirect two-tool discovery contract.
+  // Full native names/schemas/handlers are preserved for normal clients.
+  if(deferredProfileEnabled())return cachedDeferredDefs??=deferredToolDefinitions();
+  return fullToolCatalog();
 }
 
 export function hasTool(name: string): boolean {
@@ -137,6 +162,18 @@ function safeCommandDiagnostic(cause:unknown):string{
 }
 
 const MUTATIONS = new Set(['write_file','edit_block','delete_file','move_file','create_directory','write_pdf']);
+const RECEIPT_ONLY_MUTATIONS=new Set(['edit_files','workspace_batch','edit_code_ranges','replace_symbol',
+  'worker_patch','worker_integrate','call_plugin_tool','git_stage','git_commit','git_push']);
+let readOnlyToolCache:Set<string>|null=null;
+function executionKindForTool(name:string):ExecutionKind{
+  if(MUTATIONS.has(name))return 'filesystem_mutation';
+  if(RECEIPT_ONLY_MUTATIONS.has(name))return 'external_mutation';
+  // Tool catalog schemas are stable during this agent process. Derive this
+  // once instead of scanning all advertised tool metadata on every call.
+  if(!readOnlyToolCache)readOnlyToolCache=new Set(fullToolCatalog()
+    .filter(t=>t.annotations?.readOnlyHint===true).map(t=>t.name));
+  return readOnlyToolCache.has(name)?'read':'external_mutation';
+}
 export async function callTool(name: string, args: Args): Promise<ToolResult> {
   const parent=getCallContext();
   if(!parent)return withCallContext({id:randomUUID(),client:null,remote:false},()=>callTool(name,args));
@@ -149,15 +186,20 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     activity.getConsoleMode()==='verbose'?traceToolArguments(name,args):undefined);
   let out:ToolResult;
   try{
-    checkCancelled();
     const handler=TOOL_HANDLERS.get(name);
-    if(!handler || EXCLUDED_TOOLS.has(name))throw new AgentError('UNKNOWN_TOOL',`Unknown tool: ${name}`);
-    if(isTermuxRuntime()&&!availableOnTermux(name))throw new AgentError('UNSUPPORTED_ON_TERMUX',
-      `${name} needs a desktop/native feature unavailable on Android/Termux (Bionic). Use a supported file, search or terminal tool on this device, or run it on a desktop agent.`);
     args=args??{};
-    await workerCoordinator.guardFileMutation(name,args);
+    const preflight=async()=>{
+      checkCancelled();
+      if(!handler || EXCLUDED_TOOLS.has(name))throw new AgentError('UNKNOWN_TOOL',`Unknown tool: ${name}`);
+      if(isTermuxRuntime()&&!availableOnTermux(name))throw new AgentError('UNSUPPORTED_ON_TERMUX',
+        `${name} needs a desktop/native feature unavailable on Android/Termux (Bionic). Use a supported file, search or terminal tool on this device, or run it on a desktop agent.`);
+      await workerCoordinator.guardFileMutation(name,args);
+    };
     const perform=async()=>{
       checkCancelled();
+      const freshHash=await automaticSourcePrecondition(name,args);
+      if(freshHash)args={...args,expected_sha256:freshHash};
+      await requireSourceObservation(name,args);
       if((name==='write_file'||name==='edit_block')&&args.expected_sha256!==undefined){
         if(typeof args.expected_sha256!=='string'||!/^[a-fA-F0-9]{64}$/.test(args.expected_sha256))throw new AgentError('INVALID_ARGUMENT','expected_sha256 must be 64 hex characters.');
         const target=args.file_path??args.path;
@@ -168,7 +210,7 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
         try {
           await assertHash(validated,checkedHash);
         } catch (err) {
-          if(name!=='edit_block' || !(err instanceof AgentError) || err.code!=='FILE_CONFLICT')throw err;
+          if(name!=='edit_block' || sourceObservationMode()!=='off' || !(err instanceof AgentError) || err.code!=='FILE_CONFLICT')throw err;
           const latestHash=await rebaseUnambiguousEditBlock(validated,args);
           if(!latestHash)throw err;
           checkedHash=latestHash;
@@ -176,27 +218,53 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
         }
         // Keep the validated hash authoritative for the whole mutation.
         return withCallContext({...parent,writePrecondition:{path:validated,sha256:checkedHash}},async()=>{
-          const response=await handler(args) as ToolResult;
+          const response=await handler!(args) as ToolResult;
           if(!rebased||response.isError)return response;
           return {...response,
             content:[...response.content,{type:'text' as const,text:'[BRC] Stale hash safely refreshed: all exact text anchors were unique; unrelated changes were preserved.'}],
             structuredContent:{...response.structuredContent,autoRebasedFromStaleHash:true}};
         });
       }
-      return await handler(args) as ToolResult;
+      return await handler!(args) as ToolResult;
     };
-    if(MUTATIONS.has(name)){
-      const targets=[args.file_path,args.path,args.source,args.destination,args.outputPath].filter((p):p is string=>typeof p==='string'&&!!p);
-      const checked=await Promise.all(targets.map(p=>validatePath(p)));
-      out=await withFileLocks(checked,perform);
-      projectIndex.invalidate();
-      codeGraph.invalidate();
-    }else out=await perform();
+    const kind=executionKindForTool(name);
+    const targets=kind==='filesystem_mutation'
+      ?[args.file_path,args.path,args.source,args.destination,args.outputPath]
+        .filter((p):p is string=>typeof p==='string'&&!!p)
+      :[];
+    try{
+      // Nested/batched tools may share the remote call ID. Give each
+      // individual execution a unique receipt identity to avoid collisions.
+      // The public MCP callId remains the original parent's ID.
+      out=await executeToolKernel({name,callId:parent.id+':'+randomUUID(),kind,
+        paths:targets,preflight,perform,
+        recordReceipt:MUTATIONS.has(name)||RECEIPT_ONLY_MUTATIONS.has(name)});
+    }finally{
+      // Invalidate after a failed/uncertain write too. A partial mutation
+      // might have changed a file even if no successful reply was returned.
+      if(kind==='filesystem_mutation'){projectIndex.invalidate();codeGraph.invalidate();}
+    }
     if(out.isError && !out.structuredContent?.error){out={...out,structuredContent:{...out.structuredContent,error:{code:'TOOL_FAILED',retryable:false,callId:parent.id}}};}
 
   }catch(err){out=failure(err,parent.id);}
+  const kind=executionKindForTool(name);
+  out=attachExecutionOutcome(out,name,parent.id,kind);
+  // Only proven duplicate JSON text is shortened; independent file/search
+  // output, images and full structured results remain byte-for-byte intact.
+  out=compactDuplicatedToolText(out);
+  trackExecutionOutcome(classifyExecution(out,kind));
   const durationMs=Math.round(performance.now()-start);
   const error=out.structuredContent?.error as {code?:string}|undefined;
+  const repeated=repeatFailureGuard.observe(name,args,!!out.isError,error?.code);
+  if(repeated){
+    // Advisory only: keep the original error and never execute a retry.
+    const content='BRC REPEATED FAILURE ('+repeated.count+' identical failures): '+repeated.hint;
+    const previous=out.structuredContent as Record<string,unknown>|undefined;
+    const recovery=previous?.recovery as Record<string,unknown>|undefined;
+    out={...out,content:[...out.content,{type:'text' as const,text:content}],
+      structuredContent:{...previous,repeatedFailureCount:repeated.count,
+        recovery:{...recovery,automaticRetry:false,suggestion:repeated.hint}}};
+  }
    const phase=out.isError?'ERROR':out.structuredContent?.pending===true?'PENDING':'OK';
   const managedId=out.structuredContent?.jobId;
   const note=phase==='PENDING'

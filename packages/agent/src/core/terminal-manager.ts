@@ -3,6 +3,11 @@ import path from 'path';
 import { TerminalSession, CommandExecutionResult, ActiveSession, TimingInfo, OutputEvent } from './types.js';
 import { DEFAULT_COMMAND_TIMEOUT } from './config.js';
 import { planFastExec } from '../tools/fast-exec.js';
+import {commandEnvironment} from '../runtime/command-environment.js';
+import {pluginStartupAdmission} from '../runtime/resource-admission.js';
+import {getCallContext,checkCancelled} from '../context.js';
+import {observeManagedChild,stopManagedChild} from '../runtime/process-termination.js';
+import {spawnManaged} from '../runtime/managed-spawn.js';
 import os from 'node:os';
 import { configManager } from './config-manager.js';
 import {capture} from "./utils/capture.js";
@@ -86,18 +91,36 @@ export function outputSinceSnapshot(
 // Keep a small rolling terminal-output buffer in every profile. Large builds
 // can run for a long time, but only the newest 500 KiB of text is retained.
 export const MAX_BUFFERED_OUTPUT_CHARS = 500 * 1024;
+export const MAX_BUFFERED_OUTPUT_BYTES = 500 * 1024;
 const MAX_LINE_CHARS = 8 * 1024;
 // No line-count truncation: lots of short build lines can fit inside 500 KiB.
 // Agent's interactive activity console retains a bounded share of 500 KiB of UTF-8 activity text.
 export const MAX_VISIBLE_TERMINAL_LINES = Number.POSITIVE_INFINITY;
 /** Keep the latest bounded text for the initial start_process response. */
-export function keepRecentTerminalOutput(previous:string, chunk:string):string {
-  // Slice first, then append: avoid allocating an oversized intermediate
-  // string whenever a busy command exceeds the rolling output budget.
-  const budget = MAX_WAIT_OUTPUT_CHARS;
-  if (chunk.length >= budget) return chunk.slice(-budget);
-  const keep = budget - chunk.length;
-  return previous.length > keep ? previous.slice(-keep) + chunk : previous + chunk;
+/** Return the largest valid UTF-8 suffix within a hard byte budget.
+ * Pre-clip by characters before allocating a Buffer: UTF-8 bytes are never
+ * fewer than the number of UTF-16 code units for normal text. Any partial
+ * leading UTF-8 code point is discarded, not decoded as a replacement glyph.
+ */
+function utf8Tail(text:string,budget:number):string{
+  if(budget<=0||!text)return '';
+  let source=text.length>budget?text.slice(-budget):text;
+  // A UTF-16 suffix may start halfway through an astral character. Never
+  // return a dangling low surrogate or introduce a replacement glyph.
+  if(source.length&&source.charCodeAt(0)>=0xdc00&&source.charCodeAt(0)<=0xdfff)
+    source=source.slice(1);
+  const bytes=Buffer.from(source,'utf8');
+  if(bytes.length<=budget)return source;
+  let from=bytes.length-budget;
+  while(from<bytes.length&&(bytes[from]&0xc0)===0x80)from++;
+  return bytes.subarray(from).toString('utf8');
+}
+export function keepRecentTerminalOutput(previous:string,chunk:string):string {
+  const budget=MAX_WAIT_OUTPUT_CHARS;
+  // Bound both the active wait phase and the retained line buffer by actual
+  // UTF-8 bytes, not JavaScript characters. Avoid an unbounded concatenation.
+  const incoming=utf8Tail(chunk,budget);
+  return utf8Tail(previous,budget-Buffer.byteLength(incoming,'utf8'))+incoming;
 }
 const MAX_WAIT_OUTPUT_CHARS = 500 * 1024;
 // Only one interactive terminal process is allowed at a time. It can keep
@@ -262,10 +285,7 @@ export class TerminalManager {
       // Use shell-specific configuration with login flags where appropriate
       spawnConfig = getShellSpawnArgs(shellToUse, enhancedCommand);
       spawnOptions = {
-        env: {
-          ...process.env,
-          TERM: 'xterm-256color'  // Better terminal compatibility
-        },
+        env: commandEnvironment(process.env,{TERM:'xterm-256color'}),
         windowsHide: true  // Prevent visible console windows on Windows
       };
 
@@ -282,10 +302,7 @@ export class TerminalManager {
       };
       spawnOptions = {
         shell: shellToUse,
-        env: {
-          ...process.env,
-          TERM: 'xterm-256color'
-        },
+        env: commandEnvironment(process.env,{TERM:'xterm-256color'}),
         windowsHide: true  // Prevent visible console windows on Windows
       };
     }
@@ -320,8 +337,17 @@ export class TerminalManager {
       spawnOptions.windowsVerbatimArguments = true;
     }
 
-    // Spawn the process with appropriate arguments
-    const childProcess = spawn(spawnConfig.executable, spawnConfig.args, spawnOptions);
+    // Share the short-lived startup admission with local plugins and optional
+    // semantic workers. The permit is released immediately after spawning:
+    // a long-lived interactive process retains its existing session cap but
+    // MUST NOT block unrelated short command/plugin launches.
+    const releaseStartup=await pluginStartupAdmission.acquire(getCallContext()?.signal,10000);
+    let childProcess:ReturnType<typeof spawn>;
+    try{
+      checkCancelled();
+      childProcess=spawnManaged(spawnConfig.executable, spawnConfig.args, spawnOptions);
+      observeManagedChild(childProcess);
+    }finally{releaseStartup();}
     if (process.platform === 'win32' && childProcess.pid) {
       try { os.setPriority(childProcess.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); }
       catch { /* best effort; never change unrelated processes */ }
@@ -368,6 +394,7 @@ export class TerminalManager {
       isBlocked: false,
       startTime: new Date(),
       bufferedChars: 0,
+      bufferedBytes: 0,
       evictedLines: 0,
       evictedChars: 0
     };
@@ -432,7 +459,7 @@ export class TerminalManager {
         return; // do not arm timers on an already-failed child
       }
 
-      childProcess.stdout.on('data', (data: any) => {
+      childProcess.stdout?.on('data', (data: any) => {
         const text = data.toString();
         const now = Date.now();
 
@@ -473,7 +500,7 @@ export class TerminalManager {
         }
       });
 
-      childProcess.stderr.on('data', (data: any) => {
+      childProcess.stderr?.on('data', (data: any) => {
         const text = data.toString();
         const now = Date.now();
 
@@ -594,6 +621,7 @@ export class TerminalManager {
     // Appended text contributes exactly its length to the joined buffer
     // (its newlines become the join separators).
     session.bufferedChars += text.length;
+    session.bufferedBytes += Buffer.byteLength(text, 'utf8');
 
     // A process printing without newlines grows a single line forever, which
     // eviction can't bound — force-split so no line exceeds MAX_LINE_CHARS.
@@ -601,24 +629,38 @@ export class TerminalManager {
     let lastIndex = session.outputLines.length - 1;
     while (session.outputLines[lastIndex].length > MAX_LINE_CHARS) {
       const overlong = session.outputLines[lastIndex];
-      session.outputLines[lastIndex] = overlong.slice(0, MAX_LINE_CHARS);
-      session.outputLines.push(overlong.slice(MAX_LINE_CHARS));
+      // Line wrapping must not split a UTF-16 surrogate pair; otherwise the
+      // retained text contains invalid characters after a high-volume log.
+      let at=MAX_LINE_CHARS;
+      if(at<overlong.length&&overlong.charCodeAt(at-1)>=0xd800&&
+         overlong.charCodeAt(at-1)<=0xdbff&&overlong.charCodeAt(at)>=0xdc00&&
+         overlong.charCodeAt(at)<=0xdfff)at--;
+      session.outputLines[lastIndex] = overlong.slice(0, at);
+      session.outputLines.push(overlong.slice(at));
       session.bufferedChars += 1;
+      session.bufferedBytes += 1;
       lastIndex++;
     }
 
     // Retain as many lines as fit within the 500-KiB responsive text budget;
     // do not silently discard useful compiler/build lines just to show 20.
     // Evict old lines in one batch, avoiding O(n^2) shifts on chatty output.
-    let droppedLines = 0, droppedChars = 0;
-    while (session.bufferedChars - droppedChars > MAX_BUFFERED_OUTPUT_CHARS &&
+    let droppedLines = 0, droppedChars = 0, droppedBytes = 0;
+    // UTF-16 character limits alone allow multi-byte output to exceed the
+    // advertised 500 KiB cap. Enforce both bounds without scanning all
+    // retained lines for every incoming stdout/stderr chunk.
+    while ((session.bufferedChars - droppedChars > MAX_BUFFERED_OUTPUT_CHARS ||
+            session.bufferedBytes - droppedBytes > MAX_BUFFERED_OUTPUT_BYTES) &&
            droppedLines < session.outputLines.length - 1) {
-      droppedChars += session.outputLines[droppedLines].length + 1;
+      const line = session.outputLines[droppedLines];
+      droppedChars += line.length + 1;
+      droppedBytes += Buffer.byteLength(line, 'utf8') + 1;
       droppedLines++;
     }
     if (droppedLines) {
       session.outputLines.splice(0,droppedLines);
       session.bufferedChars -= droppedChars;
+      session.bufferedBytes -= droppedBytes;
       session.evictedChars += droppedChars;
       session.evictedLines += droppedLines;
       session.lastReadIndex = Math.max(0,session.lastReadIndex-droppedLines);
@@ -834,12 +876,16 @@ export class TerminalManager {
     }
 
     try {
+        // On Windows SIGINT/SIGKILL of the shell parent do not reliably
+        // terminate descendants. Request tree stop and let the session
+        // exit/close event confirm only the parent process exit.
+        if(process.platform==='win32')
+          return stopManagedChild(session.process);
         session.process.kill('SIGINT');
-        setTimeout(() => {
-          if (this.sessions.has(pid)) {
-            session.process.kill('SIGKILL');
-          }
-        }, 1000);
+        const timer=setTimeout(()=>{
+          if(this.sessions.get(pid)===session)stopManagedChild(session.process);
+        },1000);
+        timer.unref();
         return true;
       } catch (error) {
         // Convert error to string, handling both Error objects and other types

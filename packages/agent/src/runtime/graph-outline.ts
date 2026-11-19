@@ -39,13 +39,14 @@ export function compactGraph(
   const budget = Math.min(48000, Math.max(2000, options.maxChars ?? 12000));
   const query = (options.query ?? '').trim().toLowerCase();
   const focused = (options.focus ?? '').replace(/\\/g, '/').toLowerCase();
-  const ranked = [...graph.nodes].sort((a, b) => {
-    const score = (n: typeof a) =>
-      (n.file.toLowerCase() === focused ? 1000 : 0)
-      + (query && n.file.toLowerCase().includes(query) ? 60 : 0)
-      + (query ? n.symbols.filter(s => s.qualifiedName.toLowerCase().includes(query)).length * 20 : 0);
-    return score(b) - score(a);
-  });
+  // Compute relevance once per node, not repeatedly inside sort comparisons.
+  // This matters when many files have large symbol tables.
+  const ranked = graph.nodes.map(node => ({
+    node,
+    score: (node.file.toLowerCase() === focused ? 1000 : 0)
+      + (query && node.file.toLowerCase().includes(query) ? 60 : 0)
+      + (query ? node.symbols.reduce((n, s) => n + Number(s.qualifiedName.toLowerCase().includes(query)), 0) * 20 : 0),
+  })).sort((a, b) => b.score - a.score).map(v => v.node);
   const index = new Map<string, number>();
   const out: CompactGraph = {
     format: 'graph-outline-v1', root: graph.root,
@@ -63,12 +64,23 @@ export function compactGraph(
     charactersBefore: JSON.stringify(graph).length,
   };
   const size = () => JSON.stringify(out).length;
+  // Fixed metadata is serialized once. Each appended array element increases
+  // JSON length by exactly its serialized length plus one optional comma.
+  // Reserve 64 characters for growing omission counters and "partial".
+  // The final exact size guard below still enforces the public hard budget.
+  let projected = size();
+  const addWithinBudget = <T>(items:T[], value:T): boolean => {
+    const delta=JSON.stringify(value).length + (items.length ? 1 : 0);
+    if(projected + delta > budget - 64)return false;
+    items.push(value);
+    projected += delta;
+    return true;
+  };
   // Allocate metadata by a hard character budget. Never emit an invalid index.
   for (const node of ranked) {
     const fileId = out.files.length;
     const file: FileEntry = [node.file, node.sha256, node.language];
-    out.files.push(file);
-    if (size() > budget) { out.files.pop(); out.coverage.omittedFiles++; out.partial = true; continue; }
+    if (!addWithinBudget(out.files,file)) { out.coverage.omittedFiles++; out.partial = true; continue; }
     index.set(node.file, fileId);
     const relevant = query
       ? [...node.symbols].sort((a, b) => Number(b.qualifiedName.toLowerCase().includes(query)) - Number(a.qualifiedName.toLowerCase().includes(query)))
@@ -77,21 +89,25 @@ export function compactGraph(
     for (let i = 0; i < relevant.length; i++) {
       if (i >= count) { out.coverage.omittedDeclarations++; continue; }
       const sym = relevant[i];
-      out.declarations.push([fileId, sym.qualifiedName, sym.kind, sym.line, sym.endLine]);
-      if (size() > budget) { out.declarations.pop(); out.coverage.omittedDeclarations++; out.partial = true; }
+      if (!addWithinBudget(out.declarations,
+        [fileId, sym.qualifiedName, sym.kind, sym.line, sym.endLine] as Declaration)) {
+        out.coverage.omittedDeclarations++; out.partial = true;
+      }
     }
   }
   for (const edge of graph.edges) {
     const from = index.get(edge.from), to = index.get(edge.to);
     if (from === undefined || to === undefined) { out.coverage.omittedRelations++; continue; }
-    out.relations.push([from, to, edge.kind, edge.confidence]);
-    if (size() > budget) { out.relations.pop(); out.coverage.omittedRelations++; out.partial = true; }
+    if (!addWithinBudget(out.relations,[from, to, edge.kind, edge.confidence] as Dependency)) {
+      out.coverage.omittedRelations++; out.partial = true;
+    }
   }
   for (const item of graph.unresolved) {
     const from = index.get(item.from);
     if (from === undefined) { out.coverage.omittedUnresolved++; continue; }
-    out.unresolved.push([from, item.specifier, item.line]);
-    if (size() > budget) { out.unresolved.pop(); out.coverage.omittedUnresolved++; out.partial = true; }
+    if (!addWithinBudget(out.unresolved,[from, item.specifier, item.line] as Unresolved)) {
+      out.coverage.omittedUnresolved++; out.partial = true;
+    }
   }
   out.coverage.returnedFiles = out.files.length;
   out.coverage.omittedFiles += graph.nodes.length - out.files.length - out.coverage.omittedFiles;

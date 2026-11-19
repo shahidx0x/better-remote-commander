@@ -10,6 +10,8 @@ import { lockKey, sha256, readBounded } from './file-safety.js';
 import { AgentError, result, failure } from './errors.js';
 import { checkCancelled } from '../context.js';
 import { sourceCandidate } from './languages.js';
+import {workerPlanCheckpointsEnabled,saveWorkerPlanCheckpoint,loadWorkerPlanCheckpoints,deleteWorkerPlanCheckpoint,
+  type WorkerPlanCheckpoint} from './worker-plan-checkpoints.js';
 export const WORKER_LIMITS = Object.freeze({ plans: 4, tasks: 32, maxWorkers: 10, defaultWorkers: 3, receipts: 64, appliedPaths: 512,
     patchBytes: 2 * 1024 * 1024, planPatchBytes: 8 * 1024 * 1024, totalPatchBytes: 16 * 1024 * 1024,
     idleMs: 2 * 3600000, terminalMs: 5 * 60000, leaseMs: 15 * 60000 });
@@ -86,6 +88,9 @@ interface Plan {
     receiptBytes: number;
     verification?: Verification;
     revision: number;
+    persisted?: boolean;
+    restored?: boolean;
+    resumeRequired?: boolean;
 }
 const canonicalCase = (s: string) => process.platform === 'win32' ? s.toLowerCase() : s;
 const fileId = (s: string) => canonicalCase(slash(s));
@@ -123,7 +128,73 @@ const delegatedInstructions = [
 export class WorkerCoordinator {
     private plans = new Map<string, Plan>();
     private creating = new Set<string>();
+    private checkpointsLoaded=false;
+    private checkpointsLoading?:Promise<void>;
     constructor(private readonly now: () => number = Date.now) { }
+    private async loadSavedPlans():Promise<void>{
+        if(this.checkpointsLoaded || !workerPlanCheckpointsEnabled())return;
+        if(this.checkpointsLoading)return this.checkpointsLoading;
+        this.checkpointsLoading=(async()=>{
+            const snapshots=await loadWorkerPlanCheckpoints();
+            for(const record of snapshots){
+                if(record.state==='cancelled'||this.plans.size>=WORKER_LIMITS.plans)continue;
+                if(this.plans.has(record.id))continue;
+                if([...this.plans.values()].some(p=>inside(p.root,record.root)||inside(record.root,p.root)))continue;
+                try{
+                    const tasks=new Map<string,Task>();
+                    for(const t of record.tasks){
+                        const scope=t.scope.map(s=>{
+                            safeRelative(s.relative);
+                            if(!inside(record.root,s.canonical))throw new Error('Checkpoint scope outside root');
+                            return {...s};
+                        });
+                        if(tasks.has(t.id))throw new Error('Duplicate task in checkpoint');
+                        tasks.set(t.id,{
+                            id:t.id,goal:t.goal,scope,dependsOn:[...t.dependsOn],
+                            readOnly:t.readOnly,state:t.state,generation:t.generation+1,
+                            submitting:false,
+                            note:t.state==='applied'?
+                                'Previously applied; current source must be revalidated before resume.':
+                                'Previous claim/staged patch was not restored. Re-claim and re-read fresh hashes.'
+                        });
+                    }
+                    const p:Plan={
+                        id:record.id,root:record.root,goal:record.goal,mode:record.mode,
+                        maxWorkers:record.maxWorkers,coordinatorHash:record.coordinatorHash,
+                        tasks,state:'needs_review',createdAt:record.createdAt,
+                        touchedAt:this.now(),busy:false,requiredChecks:[...record.requiredChecks],
+                        baseline:new Map(record.baseline),appliedHashes:new Map(record.appliedHashes),
+                        receipts:new Map(),receiptBytes:0,verification:undefined,revision:record.revision+1,
+                        persisted:true,restored:true,resumeRequired:true
+                    };
+                    this.plans.set(p.id,p);
+                }catch{/* corrupted/unsafe checkpoint is not trusted */}
+            }
+            this.checkpointsLoaded=true;
+        })().finally(()=>{this.checkpointsLoading=undefined;});
+        return this.checkpointsLoading;
+    }
+    private async checkpoint(p:Plan):Promise<boolean>{
+        if(!workerPlanCheckpointsEnabled())return false;
+        const snapshot:WorkerPlanCheckpoint={
+            version:1,id:p.id,root:p.root,goal:p.goal,mode:p.mode,
+            maxWorkers:p.maxWorkers,coordinatorHash:p.coordinatorHash,
+            state:p.state,createdAt:p.createdAt,touchedAt:this.now(),revision:p.revision,
+            requiredChecks:[...p.requiredChecks],
+            tasks:[...p.tasks.values()].map(t=>({
+                id:t.id,goal:t.goal,scope:t.scope.map(s=>({...s})),
+                dependsOn:[...t.dependsOn],readOnly:t.readOnly,
+                // Claims and submitted patches are intentionally volatile.
+                // A restart MUST require a new claim and fresh file hashes.
+                state:t.state==='applied'?'applied':'queued',
+                generation:t.generation
+            })),
+            baseline:[...p.baseline.entries()],
+            appliedHashes:[...p.appliedHashes.entries()]
+        };
+        p.persisted=await saveWorkerPlanCheckpoint(snapshot);
+        return p.persisted;
+    }
     private expireClaims(p: Plan) {
         for (const t of p.tasks.values())
             if (t.state === 'claimed' && !t.submitting && (t.expiresAt ?? 0) <= this.now()) {
@@ -164,15 +235,28 @@ export class WorkerCoordinator {
                 }
         }
         return { plans: this.plans.size, tasks, patches, receipts, patchBytes, estimatedRetainedBytes: patchBytes * 2 + metadataBytes,
-            limits: WORKER_LIMITS, persistent: false, spawnedModels: 0, note: 'Payload budgets are not an OS-enforced RSS limit.' };
+            limits: WORKER_LIMITS, persistent: workerPlanCheckpointsEnabled(),
+            restoredPlans:[...this.plans.values()].filter(p=>p.restored).length,
+            pendingReview:[...this.plans.values()].filter(p=>p.resumeRequired).length,
+            spawnedModels: 0, note: 'Opt-in checkpointing stores metadata and coordinator-key verifiers only; never claim keys or patch contents. Payload budgets are not an OS-enforced RSS limit.' };
     }
     clear() { this.plans.clear(); this.creating.clear(); this.pendingBytes.clear(); }
     private async get(id: string): Promise<Plan> {
+        await this.loadSavedPlans();
         this.prune();
         checkCancelled();
-        const p = this.plans.get(id);
+        let p = this.plans.get(id);
+        if(!p && workerPlanCheckpointsEnabled()){
+            // A plan may be evicted from RAM after two idle hours even without
+            // an agent restart. Reload its checkpoint on demand, in review
+            // mode, rather than falsely reporting irreversible loss.
+            this.checkpointsLoaded=false;
+            await this.loadSavedPlans();
+            p=this.plans.get(id);
+        }
         if (!p)
-            throw new AgentError('WORKER_PLAN_NOT_FOUND', 'Plan expired, was evicted, or the agent restarted. No files were deleted.');
+            throw new AgentError('WORKER_PLAN_NOT_FOUND',
+                'Plan is unavailable or has no recoverable checkpoint. No project files were deleted.');
         if (await rootPath(p.root) !== p.root)
             throw new AgentError('PROJECT_CHANGED', 'Project root moved; create a new plan.');
         if (this.plans.get(id) !== p)
@@ -203,9 +287,14 @@ export class WorkerCoordinator {
             hostModeSource: 'caller-declared, not verified by MCP', maxWorkers: p.maxWorkers, tasks,
             readyTaskIds: tasks.filter(t => t.ready).map(t => t.id), requiredChecks: p.requiredChecks,
             verification: p.verification, verificationFreshness: 'Use worker_integrate finish to recheck current files; status alone does not validate fresh source.',
-            persistent: false, spawnedModels: 0, busy: p.busy };
+            persistent: !!p.persisted, restored:!!p.restored, resumeRequired:!!p.resumeRequired,
+            resumePolicy: p.resumeRequired?
+                'An original coordinatorKey is required for resume. Recheck current source/scope; prior worker claims, staged patches and verification are invalid.':
+                undefined,
+            spawnedModels: 0, busy: p.busy };
     }
     async create(a: PlanInput) {
+        await this.loadSavedPlans();
         this.prune();
         const root = await rootPath(a.path), rootKey = canonicalCase(root);
         const occupied = [...this.plans.values()].filter(p => p.state === 'active' || p.state === 'needs_review').map(p => canonicalCase(p.root));
@@ -281,6 +370,7 @@ export class WorkerCoordinator {
                 coordinatorHash: sha256(coordinatorKey), tasks, state: 'active', createdAt: this.now(), touchedAt: this.now(), busy: false,
                 requiredChecks, baseline: normalizedHashes(baseline.hashes), appliedHashes: new Map(), receipts: new Map(), receiptBytes: 0, revision: 1 };
             this.plans.set(p.id, p);
+            await this.checkpoint(p);
             return { ...this.view(p), coordinatorKey, instructions: delegatedInstructions, coverage: baseline.coverage,
                 next: p.mode === 'native_workers' ? 'Use this host\'s real spawn/delegate feature for ready tasks; give workers read tools plus worker_tasks/worker_patch, not direct writes or host shell. Keep coordinatorKey private to the parent.' : 'Use ordinary batches or process ready tasks with the same AI. This plan does not create reasoning agents.',
                 security: 'Workflow coordination for authorized clients, not an OS sandbox. Raw terminal access retains its existing authority.' };
@@ -307,6 +397,28 @@ export class WorkerCoordinator {
         const p = await this.get(a.planId);
         if (a.action === 'status')
             return this.view(p);
+        if (a.action === 'resume') {
+            authorize(a.coordinatorKey ?? '',p.coordinatorHash);
+            if(!p.resumeRequired)return {...this.view(p),note:'Plan is already active; no files were changed.'};
+            if(p.busy)throw new AgentError('WORKER_PLAN_BUSY','Plan is being reviewed.',true);
+            p.busy=true;
+            try{
+                for(const t of p.tasks.values())for(const scope of t.scope){
+                    checkCancelled();
+                    const canonical=await projectPath(p.root,scope.relative);
+                    if(await lockKey(canonical)!==scope.key)
+                        throw new AgentError('SCOPE_CHANGED',
+                            'A checkpoint scope resolves to a different path. No task was resumed; recreate the plan after inspecting the project.');
+                }
+                await this.expectedTree(p);
+                checkCancelled();
+                p.verification=undefined;
+                p.state='active';p.resumeRequired=false;p.revision++;
+                await this.checkpoint(p);
+                return {...this.view(p),
+                    note:'Checkpoint source/scope matched. Old worker claim keys and staged patches are invalid. Claim queued tasks again and rerun final checks.'};
+            }finally{p.busy=false;}
+        }
         if (a.action === 'cancel') {
             authorize(a.coordinatorKey ?? '', p.coordinatorHash);
             if (p.busy || [...p.tasks.values()].some(t => t.submitting))
@@ -323,6 +435,13 @@ export class WorkerCoordinator {
                 t.expiresAt = undefined;
             }
             p.revision++;
+            if(workerPlanCheckpointsEnabled()){
+                // Persist a tombstone before deletion: an interrupted cleanup
+                // cannot restore a cancelled plan on next startup.
+                await this.checkpoint(p);
+                await deleteWorkerPlanCheckpoint(p.id);
+                p.persisted=false;
+            }
             return { ...this.view(p), note: 'Coordination cancelled; keys invalidated and staged patches discarded. Applied files are not reverted and host-native model sessions must be stopped by their host.' };
         }
         this.editable(p);
@@ -338,6 +457,7 @@ export class WorkerCoordinator {
                 p.requiredChecks = [...new Set(a.requiredChecks)];
                 p.verification = undefined;
                 p.revision++;
+                await this.checkpoint(p);
                 return this.view(p);
             }
             finally {
@@ -426,6 +546,7 @@ export class WorkerCoordinator {
         t.note = 'Claim released; previously applied files were not reverted.';
         p.verification = undefined;
         p.revision++;
+        await this.checkpoint(p);
         return this.view(p);
     }
     private pendingBytes = new Map<string, number>();
@@ -502,6 +623,7 @@ export class WorkerCoordinator {
             t.expiresAt = undefined;
             p.revision++;
             p.touchedAt = this.now();
+            await this.checkpoint(p);
             return { planId: p.id, taskId: t.id, submitted: true, replay: false, submissionId: a.submissionId, digest,
                 changedPaths: changes.map(c => c.path), filesWritten: 0, persistent: false,
                 next: 'Parent: preview/apply ready submissions with worker_integrate. Submitted is not applied, tested or finished.' };
@@ -581,6 +703,7 @@ export class WorkerCoordinator {
         if (a.action !== 'preview' && [...p.tasks.values()].some(t => t.state === 'claimed' || t.submitting))
             throw new AgentError('WORKERS_ACTIVE', 'Wait for or release active claims before modifying/verifying shared source.');
         p.busy = true;
+        const beforeRevision=p.revision,beforeState=p.state;
         let committed = false, mutationStarted = false;
         try {
             if (a.action === 'finish') {
@@ -698,11 +821,14 @@ export class WorkerCoordinator {
         finally {
             p.busy = false;
             p.touchedAt = this.now();
+            if(p.revision!==beforeRevision || p.state!==beforeState)
+                await this.checkpoint(p);
         }
     }
     /** Narrow defense against accidental use of ordinary file mutation tools during a plan.
      * This is not a sandbox: generic shells/external editors retain their own authority. */
     async guardFileMutation(tool: string, args: Record<string, unknown>) {
+        await this.loadSavedPlans();
         const live = [...this.plans.values()].filter(p => p.state === 'active' || p.state === 'needs_review');
         if (!live.length)
             return;

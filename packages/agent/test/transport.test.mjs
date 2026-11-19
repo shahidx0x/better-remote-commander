@@ -48,6 +48,24 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    const r=await tool('edit_files',{files:[{path:p,expected_sha256:snap.structuredContent.sha256,edits:[{old_string:'value = 1',new_string:'value = 2'}]}]});assert.equal(r.isError,false);assert.ok((await fs.readFile(p,'utf8')).includes('value = 2'));
    const b=await tool('batch_tools',{calls:[{tool:'read_code_file',arguments:{path:p}},{tool:'read_code_context',arguments:{path:project,pattern:'value = 2'}}]});assert.equal(b.isError,false);assert.equal(b.structuredContent.results.length,2);
   });
+  await t.test('completed remote command has a durable, metadata-only outcome lookup',async()=>{
+   const called=await tool('run_command',{cwd:project,command:'node -e "console.log(73)"',timeout_ms:8000});
+   assert.equal(called.isError,false,JSON.stringify(called.structuredContent));
+   const callId=called._meta?.callId;
+   assert.ok(typeof callId==='string'&&callId.length>=8);
+   const recovered=await tool('agent_status',{lookupCallId:callId});
+   assert.equal(recovered.isError,false,JSON.stringify(recovered.structuredContent));
+   assert.equal(recovered.structuredContent.found,true);
+   assert.equal(recovered.structuredContent.tool,'run_command');
+   assert.equal(recovered.structuredContent.outcome,'returned_success');
+   assert.equal(recovered.structuredContent.automaticReplay,false);
+   assert.equal(recovered.structuredContent.fullResultStored,false);
+   assert.equal(recovered.structuredContent.deliveryToRelayConfirmed,false);
+   const saved=await fs.readFile(path.join(home,'call-outcomes',
+     (await import('node:crypto')).createHash('sha256').update(callId).digest('hex')+'.json'),'utf8');
+   assert.ok(!saved.includes('console.log(73)'));
+   assert.ok(!saved.includes(callId));
+  });
   await t.test('build/test verification returns structured success',async()=>{
    const r=await tool('verify_project',{cwd:project,commands:[{name:'syntax check',command:'node --check sample.ts'}]});assert.equal(r.isError,false);assert.equal(r.structuredContent.passed,true);
   });
@@ -63,7 +81,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    const started=await tool('coding_session',{action:'start',path:project,goal:'Validate saved source',scope:['sample.ts'],requiredChecks:['test']});assert.equal(started.isError,false);const sessionId=started.structuredContent.sessionId;
    const early=await tool('coding_session',{action:'finish',sessionId});assert.equal(early.isError,true);assert.equal(early.structuredContent.error.code,'VERIFICATION_REQUIRED');
    const verify=await tool('coding_session',{action:'verify',sessionId});assert.equal(verify.isError,false,JSON.stringify(verify));assert.equal(verify.structuredContent.passed,true);
-   const finished=await tool('coding_session',{action:'finish',sessionId});assert.equal(finished.isError,false);assert.equal(finished.structuredContent.state,'finished');assert.equal(finished.structuredContent.persistent,false);
+   const finished=await tool('coding_session',{action:'finish',sessionId});assert.equal(finished.isError,false);assert.equal(finished.structuredContent.state,'finished');assert.equal(finished.structuredContent.persistent,true);
   });
   await t.test('multilingual symbols, relationships and context travel over MCP',async()=>{
    const cs=path.join(project,'App.cs'),helper=path.join(project,'Helper.cs'),rs=path.join(project,'lib.rs');

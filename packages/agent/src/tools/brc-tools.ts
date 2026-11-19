@@ -19,6 +19,10 @@ import { commandManager } from '../core/command-manager.js';
 import { configManager } from '../core/config-manager.js';
 import { getShellSpawnArgs, getRepairedPathExt } from '../core/terminal-manager.js';
 import { selectRunCommandShell } from './command-shell.js';
+import {commandEnvironment,commandEnvironmentPolicy} from '../runtime/command-environment.js';
+import {requestProcessTreeStop,observeManagedChild,stopManagedChild,managedTerminationState} from '../runtime/process-termination.js';
+import {commandCpuAdmission} from '../runtime/resource-admission.js';
+import {spawnManaged} from '../runtime/managed-spawn.js';
 import { AgentError, failure } from '../runtime/errors.js';
 import { planFastExec } from './fast-exec.js';
 import { planRtkCommand, resolveRtk, rtkEnv, annotateRtkOutput, isRtkUsageError } from './rtk.js';
@@ -78,16 +82,9 @@ export class CappedOutput {
 }
 
 export function killTree(pid: number | undefined): void {
-  if (!pid) return;
-  try {
-    if (isWindows) {
-      spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
-    } else {
-      process.kill(-pid, 'SIGKILL'); // detached => own process group
-    }
-  } catch {
-    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
-  }
+  // Shared stop request used by command and AST workers; only a subsequent
+  // child "close" event can confirm the root exited (not full tree cleanup).
+  requestProcessTreeStop(pid);
 }
 
 async function resolveShell(requested?: string): Promise<string> {
@@ -194,11 +191,7 @@ export async function runCommandCore(
   const wrapped = shellName === 'powershell' || shellName === 'pwsh'
     ? `$global:LASTEXITCODE = $null\n${command}\n$__brcOk = $?; if ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $__brcOk) { exit 1 } else { exit 0 }`
     : command;
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  // A user command is independent of the agent's test-runner process.
-  delete env.NODE_TEST_CONTEXT;
-  delete env.NODE_TEST_REPORTER;
-  env.COREPACK_ENABLE_NETWORK = '0';
+  const env=commandEnvironment(process.env,{COREPACK_ENABLE_NETWORK:'0'});
   if (isWindows) env.PATHEXT = getRepairedPathExt();
   const fast = await planFastExec(shellPath, command, env);
   const cfg = fast
@@ -209,7 +202,8 @@ export async function runCommandCore(
   type SpawnCfg = { executable: string; args: string[]; useShellOption?: string | boolean; windowsVerbatim?: boolean };
   type Outcome = {
     exitCode: number | null; signal: NodeJS.Signals | null; spawnError?: Error; spawnThrew?: boolean;
-    timedOut: boolean; cancelled: boolean; out: string; err: string; ms: number; truncated:boolean;
+    timedOut: boolean; cancelled: boolean; terminationUnconfirmed?:boolean;
+    out: string; err: string; ms: number; truncated:boolean;
   };
 
   // Spawn once and collect capped output. Never rejects.
@@ -224,7 +218,7 @@ export async function runCommandCore(
     });
     let child;
     try {
-      child = spawn(c.executable, c.args, {
+      child = spawnManaged(c.executable, c.args, {
         cwd,
         env: spawnEnv,
         windowsHide: true,
@@ -238,6 +232,7 @@ export async function runCommandCore(
       return;
     }
 
+    observeManagedChild(child);
     // Only the command spawned by BRC receives reduced scheduling priority.
     // Never alter system processes or force a CPU core affinity.
     if (isWindows && child.pid) {
@@ -254,7 +249,7 @@ export async function runCommandCore(
     };
     const abort = () => { cancelled = true; requestStop(); };
     const onAbort = () => { cancelled = true; requestStop(); };
-    const finish = (exitCode: number | null, signal: NodeJS.Signals | null, spawnError?: Error) => {
+    const finish = (exitCode: number | null, signal: NodeJS.Signals | null, spawnError?: Error, terminationUnconfirmed=false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -263,7 +258,7 @@ export async function runCommandCore(
       progress();
       abortSignal?.removeEventListener('abort', abort);
       opts.signal?.removeEventListener('abort', onAbort);
-      done({ exitCode, signal, spawnError, timedOut, cancelled });
+      done({ exitCode, signal, spawnError, timedOut, cancelled,terminationUnconfirmed });
     };
     // A delayed JS timer is not a CPU watchdog. Termination must be requested
     // only once, then the tool must release its streams/listeners even if a
@@ -271,13 +266,15 @@ export async function runCommandCore(
     const requestStop = () => {
       if (settled || stopRequested) return;
       stopRequested = true;
-      killTree(child.pid);
+      stopManagedChild(child);
       graceTimer = setTimeout(() => {
         if (settled) return;
         child.stdout?.destroy();
         child.stderr?.destroy();
         child.unref();
-        finish(null, null);
+        // The child's close event did not arrive within grace time.
+        // Never describe this as a definitively terminated process tree.
+        finish(null, null, undefined, true);
       }, 3000);
       graceTimer.unref();
     };
@@ -304,9 +301,10 @@ export async function runCommandCore(
   });
 
   const format = (r: Outcome, note?: string): ServerResult => {
-    const {exitCode,signal,cancelled,timedOut} = r;
-    const failed = cancelled || timedOut || exitCode !== 0;
-    const status = cancelled ? 'CANCELLED'
+    const {exitCode,signal,cancelled,timedOut,terminationUnconfirmed} = r;
+    const failed = !!terminationUnconfirmed || cancelled || timedOut || exitCode !== 0;
+    const status = terminationUnconfirmed ? 'TERMINATION_UNCONFIRMED'
+      : cancelled ? 'CANCELLED'
       : timedOut ? 'TIMEOUT after '+timeoutMs+'ms'
       : 'exit code '+(exitCode===null?'null':exitCode)+(signal?' (signal '+signal+')':'');
     const actualCwd=cwd??process.cwd();
@@ -319,7 +317,10 @@ export async function runCommandCore(
           ' chars; limited to '+maxOutputChars+' to protect the MCP response.\n':'')+
       (r.truncated?'[OUTPUT TRUNCATED: command completed or stopped, but some logs were omitted. Request narrower diagnostic output; do not treat this as the full log.]\n':'');
     let cause='',suggestion='';
-    if(cancelled) {
+    if(terminationUnconfirmed){
+      cause='A stop was requested, but root-process exit was not observed before the grace deadline. Side effects may still occur.';
+      suggestion='Inspect running processes and actual filesystem/external state; do not automatically repeat this command.';
+    } else if(cancelled) {
       cause='Request was cancelled; the child process tree was signaled for termination.';
       suggestion='Inspect filesystem/job state before replaying any mutation. If appropriate, start a fresh read-only diagnostic command.';
     } else if(timedOut) {
@@ -349,11 +350,13 @@ export async function runCommandCore(
       (r.out?'\n--- stdout ---\n'+r.out.trimEnd()+'\n':'\n(no stdout)\n')+
       (r.err?'\n--- stderr ---\n'+r.err.trimEnd()+'\n':'')+
       (failed?'\nDIAGNOSIS: '+cause+'\nNEXT ACTION: '+suggestion+'\n':'');
-    const code=cancelled?'CANCELLED':timedOut?'TIMEOUT':'COMMAND_FAILED';
+    const code=terminationUnconfirmed?'TOOL_OUTCOME_UNCERTAIN':cancelled?'CANCELLED':timedOut?'TIMEOUT':'COMMAND_FAILED';
     return {
       ...text(body,failed),
       structuredContent:{
         exitCode,signal,durationMs:r.ms,timedOut,cancelled,commandExecuted:true,
+        terminationState:managedTerminationState(cancelled||timedOut,!terminationUnconfirmed),
+        environmentPolicy:commandEnvironmentPolicy(),
         platform:process.platform,shell:shellPath,configuredShell,
         autoSelectedShell:shellDecision.changed,shellSelectionReason:shellDecision.reason??null,
         cwd:actualCwd,cwdProvided:!!cwd,raw:parsed.data.raw,
@@ -374,6 +377,10 @@ export async function runCommandCore(
     posix: !['cmd', 'powershell', 'pwsh'].includes(shellName),
   });
   const rtkPath = rtkArgs ? resolveRtk() : null;
+  const releaseCpu=await commandCpuAdmission.acquire(opts.signal??abortSignal,Math.min(10000,timeoutMs));
+  try {
+  if(opts.signal?.aborted||abortSignal?.aborted)
+    return failure(new AgentError('CANCELLED','Command cancelled while waiting for resource admission. No process was started.'));
   if (rtkArgs && rtkPath) {
     const r = await execOnce({ executable: rtkPath, args: rtkArgs }, rtkEnv(env));
     if (!r.spawnError && !(r.exitCode !== null && isRtkUsageError(r.exitCode, r.err))) {
@@ -389,6 +396,7 @@ export async function runCommandCore(
   if (r.spawnError) return failure(new AgentError('SHELL_START_FAILED',
     'Shell '+shellPath+' could not start the command: '+r.spawnError.message+'. Check installed shell/PATH; no command executed.'));
   return format(r);
+  }finally{releaseCpu();}
 }
 
 // ---------------------------------------------------------------------------

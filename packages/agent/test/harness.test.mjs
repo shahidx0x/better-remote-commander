@@ -105,7 +105,7 @@ test('coding session requires real current verification before finish',async()=>
  fail(await callTool('coding_session',{action:'finish',sessionId:s.sessionId}),'VERIFICATION_REQUIRED');
  const v=ok(await callTool('coding_session',{action:'verify',sessionId:s.sessionId}));assert.equal(v.passed,true);assert.equal(v.steps[0].exitCode,0);assert.match(JSON.stringify(v.steps[0].output),/source has valid sum/);assert.ok(!JSON.stringify(v).includes("skipping running files"));
  await fs.appendFile(f('src/math.ts'),'// changed after test\n');fail(await callTool('coding_session',{action:'finish',sessionId:s.sessionId}),'VERIFICATION_REQUIRED');
- ok(await callTool('coding_session',{action:'verify',sessionId:s.sessionId}));const finished=ok(await callTool('coding_session',{action:'finish',sessionId:s.sessionId}));assert.equal(finished.state,'finished');assert.equal(finished.persistent,false);
+ ok(await callTool('coding_session',{action:'verify',sessionId:s.sessionId}));const finished=ok(await callTool('coding_session',{action:'finish',sessionId:s.sessionId}));assert.equal(finished.state,'finished');assert.equal(finished.persistent,true);assert.ok(await fs.stat(path.join(home,'task-checkpoints',s.sessionId+'.json')));
  ok(await callTool('coding_session',{action:'abandon',sessionId:s.sessionId}));await fs.writeFile(f('src/math.ts'),source);
 });
 test('scope violations cannot be hidden behind a passing test',async()=>{

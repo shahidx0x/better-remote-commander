@@ -27,12 +27,14 @@ import { activity, activityAction } from '../runtime/activity.js';
 import { traceToolResult } from '../runtime/tool-trace.js';
 import { summarizeCommandActivity } from '../runtime/command-log-summary.js';
 import type { CommandActivityResult } from '../runtime/command-log-summary.js';
-import { getCallContext } from '../context.js';
+import { getCallContext, withCallContext, type CallContext } from '../context.js';
 import type { CommandProgress } from './brc-tools.js';
 import { homeDir } from '../transport/pairing.js';
 import type { ServerResult } from '../core/types.js';
 import type { ToolDefinition } from '../core/tool-definitions.js';
 import { isHeavyTool } from '../runtime/operations.js';
+import { saveJobOutput,readJobOutput,redactJobOutput,spillEnabled,type SpillRef } from '../runtime/job-output-spill.js';
+import {classifyExecution} from '../runtime/execution-kernel.js';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -52,6 +54,8 @@ const MAX_STORED_STEP_OUTPUT = 16_000;
 const KEEP_IN_MEMORY = 32;
 const MAX_MCP_JOB_OUTPUT = 128_000;
 const KEEP_ON_DISK = 100;
+const MAX_JOB_HISTORY_DISK_BYTES = 32 * 1024 * 1024;
+const CANCEL_SETTLE_GRACE_MS = Math.min(10_000,Math.max(100,Number(process.env.BRC_JOB_CANCEL_GRACE_MS)||10_000));
 
 export const JOB_TOOL_NAMES = new Set(['spawn_job', 'wait_jobs', 'get_job', 'list_jobs', 'cancel_job', 'run_parallel']);
 const FAST_PARALLEL_READS = new Set([
@@ -168,6 +172,7 @@ export const SpawnJobArgsSchema = z.object({
   label: z.string().max(120).optional().describe('Short human name shown in results, e.g. "unit tests".'),
   group: z.string().max(60).optional().describe('Group name; wait_jobs/cancel_job/list_jobs can target a whole group.'),
   continue_on_error: z.boolean().optional().default(false).describe('Keep running later steps after a failed step (default: stop).'),
+  retain_output: z.boolean().optional().describe('Opt in/out of redacted, quota-limited diagnostic output storage (up to 2 MiB per step). Default follows BRC_JOB_OUTPUT_SPILL=1.'),
   timeout_ms: z.number().int().min(1_000).max(MAX_JOB_TIMEOUT_MS).optional().default(DEFAULT_JOB_TIMEOUT_MS)
     .describe(`Whole-job time limit (default ${DEFAULT_JOB_TIMEOUT_MS / 60_000} min, max ${MAX_JOB_TIMEOUT_MS / 3_600_000} h).`),
 });
@@ -185,11 +190,13 @@ export const GetJobArgsSchema = z.object({
   output_chars: z.number().int().min(200).max(32_000).optional().default(8_000),
   step_offset: z.number().int().min(0).max(50).optional().default(0),
   step_limit: z.number().int().min(1).max(20).optional().default(10),
+  output_step: z.number().int().min(0).max(49).optional().describe('Read a retained output page for this zero-based job step, without rerunning the job.'),
+  output_byte_offset: z.number().int().min(0).optional().default(0).describe('Byte offset for output_step; use nextByteOffset from the previous page.'),
 });
 
 export const ListJobsArgsSchema = z.object({
   group: z.string().optional(),
-  status: z.enum(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'active', 'finished']).optional(),
+  status: z.enum(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted', 'active', 'finished']).optional(),
   limit: z.number().int().min(1).max(500).optional().default(50),
 });
 
@@ -205,12 +212,13 @@ export const RunParallelArgsSchema = z.object({
   timeout_ms: z.number().int().min(1_000).max(MAX_WAIT_MS).optional().default(90_000)
     .describe('How long to wait for results. Calls still running then continue as background jobs.'),
   output_chars: z.number().int().min(200).max(50_000).optional().default(4_000).describe('Max output characters shown per call.'),
+  retain_output: z.boolean().optional().describe('Opt in/out of bounded redacted diagnostic output for every call in the batch.'),
 });
 
 // ---------------------------------------------------------------------------
 // Job model
 // ---------------------------------------------------------------------------
-type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
+type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'interrupted';
 
 interface StepResult {
   index: number;
@@ -218,6 +226,7 @@ interface StepResult {
   ok: boolean;
   ms: number;
   output: string;
+  spill?: SpillRef;
 }
 
 interface Job {
@@ -232,6 +241,7 @@ interface Job {
   currentStep: number;
   continueOnError: boolean;
   timeoutMs: number;
+  retainOutput?: boolean;
   createdAt: number;
   startedAt?: number;
   endedAt?: number;
@@ -244,6 +254,8 @@ interface Job {
   consoleTrace?: string;
   progress?: CommandProgress;
   abort?: AbortController;
+  ownerClient?: CallContext['client'];
+  ownerRemote?: boolean;
   cancelRequested?: boolean;
   timedOut?: boolean;
   done?: Promise<void>;
@@ -270,7 +282,7 @@ function stepName(s: Step): string {
   return s.label ?? s.tool;
 }
 
-function createJob(steps: Step[], opts: { label?: string; group?: string; groupConcurrency?: number; continueOnError?: boolean; timeoutMs?: number }): Job {
+function createJob(steps: Step[], opts: { label?: string; group?: string; groupConcurrency?: number; continueOnError?: boolean; timeoutMs?: number; retainOutput?:boolean }): Job {
   const job: Job = {
     id: newId(),
     label: opts.label,
@@ -281,10 +293,13 @@ function createJob(steps: Step[], opts: { label?: string; group?: string; groupC
     results: [],
     currentStep: -1,
     continueOnError: !!opts.continueOnError,
+    retainOutput: opts.retainOutput,
     timeoutMs: opts.timeoutMs ?? DEFAULT_JOB_TIMEOUT_MS,
     createdAt: Date.now(),
     reported: false,
     abort: new AbortController(),
+    ownerClient:getCallContext()?.client??null,
+    ownerRemote:getCallContext()?.remote??false,
   };
   job.done = new Promise<void>((r) => { job.resolveDone = r; });
   jobs.set(job.id, job);
@@ -299,18 +314,37 @@ function resultText(r: ServerResult): string {
     : s;
 }
 
-function abortable<T>(p: Promise<T>, signal: AbortSignal, onAbort: () => T): Promise<T> {
-  if (signal.aborted) return Promise.resolve(onAbort());
-  return new Promise<T>((resolve, reject) => {
-    const h = () => resolve(onAbort());
-    signal.addEventListener('abort', h, { once: true });
-    p.then((v) => { signal.removeEventListener('abort', h); resolve(v); },
-      (e) => { signal.removeEventListener('abort', h); reject(e); });
+/** A cancelled nested tool may still commit side effects. Wait briefly for
+ * its real settlement; if it cannot confirm termination, mark it uncertain.
+ * Never report definite cancellation while a mutation may still be running. */
+function awaitToolSettlement(p:Promise<ServerResult>,signal:AbortSignal):Promise<ServerResult>{
+  return new Promise((resolve,reject)=>{
+    let settled=false,grace:NodeJS.Timeout|undefined;
+    const done=(f:()=>void)=>{
+      if(settled)return;
+      settled=true;
+      clearTimeout(grace);
+      signal.removeEventListener('abort',onAbort);
+      f();
+    };
+    const onAbort=()=>{
+      if(grace||settled)return;
+      grace=setTimeout(()=>done(()=>resolve({
+        isError:true,
+        content:[{type:'text',text:'TOOL_OUTCOME_UNCERTAIN: Cancellation was requested, but the tool did not settle within 10 seconds. It may still commit side effects. Inspect actual file/external state before retrying.'}],
+        structuredContent:{error:{code:'TOOL_OUTCOME_UNCERTAIN',retryable:false},
+          recovery:{automaticRetry:false,suggestion:'Revalidate the actual state; do not blindly replay the tool.'}}
+      })),CANCEL_SETTLE_GRACE_MS);
+    };
+    signal.addEventListener('abort',onAbort,{once:true});
+    if(signal.aborted)onAbort();
+    p.then(v=>done(()=>resolve(v)),e=>done(()=>reject(e)));
   });
 }
 
 async function execStep(step: Step, signal: AbortSignal, remainingMs: number,
-  onProgress?: (p: CommandProgress) => void): Promise<ServerResult> {
+  onProgress?: (p: CommandProgress) => void,jobCallId?:string,
+  owner?:{client:CallContext['client'];remote:boolean}): Promise<ServerResult> {
   if ('command' in step) {
     return runCommandCore(
       { command: step.command, cwd: step.cwd, shell: step.shell, raw: step.raw, maxOutputChars: step.maxOutputChars, timeout_ms: Math.max(1, Math.min(step.timeout_ms ?? remainingMs, remainingMs)) },
@@ -324,16 +358,24 @@ async function execStep(step: Step, signal: AbortSignal, remainingMs: number,
     return runCommandCore({ ...a, timeout_ms: Math.max(1, t) }, { maxTimeoutMs: remainingMs, signal, failOnNonZero: true, onProgress });
   }
   if (!executor) return text('Job executor not initialised', true);
-  return abortable(executor(step.tool, step.args as Record<string, unknown>), signal, () => text('CANCELLED', true));
+  if(signal.aborted)return text('CANCELLED: Job stopped before tool dispatch.',true);
+  // Detach from the original MCP call's deadline. A background job must not
+  // be aborted merely because ChatGPT's initial tool response has returned.
+  const invoked=withCallContext({
+    id:jobCallId??('job_'+Date.now()),client:owner?.client??null,remote:owner?.remote??false,
+    signal,deadline:Date.now()+remainingMs
+  },()=>executor!(step.tool,step.args as Record<string,unknown>));
+  return awaitToolSettlement(invoked,signal);
 }
 
 async function runJob(job: Job): Promise<void> {
   if (job.status !== 'queued') return;
   job.status = 'running';
   job.startedAt = Date.now();
+  void persist(job); // restart recovery can identify an interrupted in-flight step
   const signal = job.abort!.signal;
   const timer = setTimeout(() => { job.timedOut = true; job.abort!.abort(); }, job.timeoutMs);
-  let anyFailed = false;
+  let anyFailed = false, uncertain = false;
   try {
     for (let i = 0; i < job.steps.length; i++) {
       if (signal.aborted) break;
@@ -342,7 +384,8 @@ async function runJob(job: Job): Promise<void> {
       const t0 = Date.now();
       let res: ServerResult;
       try {
-        res = await execStep(step, signal, Math.max(1, job.timeoutMs - (t0 - job.startedAt)), p => { job.progress = p; });
+        res = await execStep(step, signal, Math.max(1, job.timeoutMs - (t0 - job.startedAt)), p => { job.progress = p; },job.id+'-step'+i,
+          {client:job.ownerClient??null,remote:job.ownerRemote??false});
       } catch (e) {
         res = text(`Error: ${e instanceof Error ? e.message : String(e)}`, true);
       }
@@ -351,16 +394,35 @@ async function runJob(job: Job): Promise<void> {
         job.consoleOutcome = summarizeCommandActivity(res);
         job.consoleTrace = activity.getConsoleMode()==='verbose' ? traceToolResult('run_command',res) : undefined;
       }
+      const isRead='tool' in step && FAST_PARALLEL_READS.has(step.tool);
+      const rawCommand='command' in step || ('tool' in step && step.tool==='run_command');
+      const stepError=(res.structuredContent as {error?:{code?:string}}|undefined)?.error?.code;
+      const observed=classifyExecution(res,isRead?'read':'external_mutation');
+      // The native command runner confirms process-tree termination on
+      // cooperative cancel/timeout; keep its existing CANCELLED/TIMED_OUT
+      // job statuses. This never means prior filesystem effects rolled back.
+      // A plugin/tool that explicitly reports an uncertain outcome still
+      // makes the entire multi-step job INTERRUPTED, even after cancellation.
+      const confirmedCommandStop=rawCommand && (job.cancelRequested||job.timedOut) &&
+        ['CANCELLED','TIMEOUT','ETIMEDOUT'].includes(stepError??'');
+      if(observed==='uncertain'&&!confirmedCommandStop)uncertain=true;
       const ok = !res.isError;
-      job.results.push({ index: i, name: stepName(step), ok, ms: Date.now() - t0, output: resultText(res) });
+      const full=(res.content??[]).map((c:any)=>c?.type==='text'?String(c.text??''):'[non-text content omitted]').join('\n');
+      const spill=await saveJobOutput(job.id,i,full,job.retainOutput);
+      job.results.push({ index: i, name: stepName(step), ok, ms: Date.now() - t0,
+        output: resultText(res),...(spill?{spill}:{}) });
+      void persist(job); // durable progress after each settled step
       if (!ok) {
         anyFailed = true;
-        if (!job.continueOnError) break;
+        // A previous mutation may have committed despite its failed reply.
+        // Subsequent steps must not run against uncertain state, even when
+        // continue_on_error=true was requested for ordinary failures.
+        if (uncertain || !job.continueOnError) break;
       }
     }
   } finally {
     clearTimeout(timer);
-    job.status = job.cancelRequested ? 'cancelled' : job.timedOut ? 'timed_out' : anyFailed ? 'failed' : 'succeeded';
+    job.status = uncertain ? 'interrupted' : job.cancelRequested ? 'cancelled' : job.timedOut ? 'timed_out' : anyFailed ? 'failed' : 'succeeded';
     job.endedAt = Date.now();
     job.currentStep = -1;
     // If it finished inside the synchronous window, the original run_command
@@ -382,8 +444,10 @@ async function runJob(job: Job): Promise<void> {
     }
     job.consoleOutcome=undefined;
     job.consoleTrace=undefined;
+    // A completed wait_jobs/get_job receipt must not race the final disk
+    // checkpoint. Persist atomically before notifying waiting callers.
+    await persist(job);
     job.resolveDone!();
-    void persist(job);
     prune();
   }
 }
@@ -499,30 +563,74 @@ function cancel(job: Job): boolean {
 // ---------------------------------------------------------------------------
 function serialisable(job: Job) {
   const { abort, done, resolveDone, cancelRequested, timedOut, quickReturnPending, quickResult,
-    progress, consoleOutcome, consoleTrace, ...rest } = job;
-  return rest;
+    progress, consoleOutcome, consoleTrace, ownerClient, ownerRemote, ...rest } = job;
+  // Completed/interrupted jobs are never replayed from disk. Do not persist
+  // arbitrary shell strings, plugin args, edit text, or secrets in job history.
+  const safeSteps=rest.steps.map(s=>('command' in s)
+    ?{command:'[command omitted from persisted history]',label:s.label?redactJobOutput(s.label).slice(0,120):undefined}
+    :{tool:s.tool,args:{},label:s.label?redactJobOutput(s.label).slice(0,120):undefined});
+  return {...rest,steps:safeSteps,
+    results:rest.results.map(r=>({...r,
+      name:r.name.startsWith('$ ')?'$ [command omitted]':redactJobOutput(r.name).slice(0,150),
+      output:redactJobOutput(r.output)}))};
 }
 
-async function persist(job: Job): Promise<void> {
-  try {
-    const dir = jobsDir();
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, `${job.id}.json`), JSON.stringify(serialisable(job)), 'utf8');
-    const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.json')).sort();
-    for (const f of files.slice(0, Math.max(0, files.length - KEEP_ON_DISK))) await fs.unlink(path.join(dir, f)).catch(() => {});
-  } catch { /* ignore */ }
+const diskWrites=new Map<string,Promise<void>>();
+async function persist(job:Job):Promise<void>{
+  // Freeze the snapshot before scheduling I/O: writes for one job may be
+  // triggered from the running step and completion at nearly the same time.
+  let body:string;
+  try{body=JSON.stringify(serialisable(job));}catch{return;}
+  if(Buffer.byteLength(body)>1024*1024)return;
+  const prior=diskWrites.get(job.id)??Promise.resolve();
+  const id=job.id;
+  const current=prior.catch(()=>{}).then(async()=>{
+    const dir=jobsDir();
+    const dest=path.join(dir,id+'.json');
+    const tmp=path.join(dir,id+'.'+process.pid+'.'+Math.random().toString(16).slice(2)+'.tmp');
+    try{
+      await fs.mkdir(dir,{recursive:true,mode:0o700});
+      await fs.writeFile(tmp,body,{mode:0o600,flag:'wx'});
+      await fs.rename(tmp,dest);
+      if(!isFinished(job))return;
+      const names=(await fs.readdir(dir)).filter(n=>n.endsWith('.json'));
+      const entries=(await Promise.all(names.map(async name=>{
+        try{const st=await fs.stat(path.join(dir,name));return{name,time:st.mtimeMs,bytes:st.size};}
+        catch{return null;}
+      }))).filter((e):e is {name:string;time:number;bytes:number}=>!!e).sort((a,b)=>b.time-a.time);
+      let total=0;
+      for(let i=0;i<entries.length;i++){
+        const e=entries[i];total+=e.bytes;
+        if(i>=KEEP_ON_DISK || (total>MAX_JOB_HISTORY_DISK_BYTES && i>=1))
+          await fs.unlink(path.join(dir,e.name)).catch(()=>{});
+      }
+    }finally{await fs.unlink(tmp).catch(()=>{});}
+  });
+  diskWrites.set(id,current);
+  try{await current;}catch{/* persistence is best effort */}
+  finally{if(diskWrites.get(id)===current)diskWrites.delete(id);}
 }
 
 async function loadHistory(): Promise<void> {
   if (historyLoaded) return;
   historyLoaded = true;
   try {
-    const files = (await fs.readdir(jobsDir())).filter((f) => f.endsWith('.json')).sort().slice(-100);
-    for (const f of files) {
+    const dir=jobsDir();
+    const names=(await fs.readdir(dir)).filter(f=>f.endsWith('.json'));
+    const ordered=(await Promise.all(names.map(async name=>{
+      try{return{name,mtime:(await fs.stat(path.join(dir,name))).mtimeMs};}
+      catch{return null;}
+    }))).filter((v):v is {name:string;mtime:number}=>!!v).sort((a,b)=>b.mtime-a.mtime).slice(0,KEEP_ON_DISK);
+    for (const {name:f} of ordered) {
       try {
         const j = JSON.parse(await fs.readFile(path.join(jobsDir(), f), 'utf8')) as Job;
         if (!j?.id || jobs.has(j.id)) continue;
-        if (j.status === 'queued' || j.status === 'running') j.status = 'cancelled';
+        if (j.status === 'queued' || j.status === 'running') {
+          j.status = 'interrupted'; // completion/side effects were never confirmed
+          j.endedAt = j.endedAt ?? Date.now();
+          j.results.push({index:j.currentStep,name:'Interrupted by agent restart',ok:false,ms:0,
+            output:'Previous agent stopped before this job settled. Inspect files/external effects before retrying any work.'});
+        }
         j.reported = true;
         j.done = Promise.resolve();
         jobs.set(j.id, j);
@@ -579,7 +687,9 @@ function detail(j: Job, outputChars: number, stepOffset=0, stepLimit=10): string
     const head=`\n  ${r.index + 1}. ${r.ok ? 'OK ' : 'ERR'} ${r.name} (${secs(r.ms)})`;
     const body=r.output ? '\n'+clip(r.output,Math.min(outputChars,32_000)).split('\n').map(l=>'     '+l).join('\n') : '';
     if(s.length+head.length+body.length>MAX_MCP_JOB_OUTPUT-600)break;
-    s+=head+body;rendered++;
+    s+=head+body;
+    if(r.spill)s+=`\n     [Retained output: ${r.spill.bytes} bytes${r.spill.partial?', partial':''}. Read with get_job({id:"${j.id}",output_step:${r.index},output_byte_offset:0,output_chars:${Math.min(outputChars,8000)}}).]`;
+    rendered++;
   }
   const next=stepOffset+rendered;
   if(next<j.results.length)s+=`\n[MORE JOB STEPS: ${j.results.length-next} results remain. Call get_job({id:"${j.id}",step_offset:${next},step_limit:${stepLimit},output_chars:${Math.min(outputChars,8000)}}).]`;
@@ -719,7 +829,7 @@ export async function handleSpawnJob(args: unknown): Promise<ServerResult> {
       `${MAX_QUEUED_JOBS} jobs are already queued; no job was started.`,
       'Wait for existing jobs to finish, then inspect list_jobs before scheduling another.',
       {tool:'list_jobs',args:{limit:50}});
-  const job = createJob(steps, { label: a.label, group: a.group, continueOnError: a.continue_on_error, timeoutMs: a.timeout_ms });
+  const job = createJob(steps, { label: a.label, group: a.group, continueOnError: a.continue_on_error, timeoutMs: a.timeout_ms, retainOutput:a.retain_output });
   enqueue(job);
   const pos = job.status === 'queued' ? ` (queued: ${MAX_CONCURRENT_JOBS} jobs run at once)` : '';
   return text(`Started job ${job.id}${job.label ? ` "${job.label}"` : ''}${job.group ? ` in group ${job.group}` : ''} with ${steps.length} step(s)${pos}.\nUse wait_jobs to collect the result.`);
@@ -757,6 +867,30 @@ export async function handleGetJob(args: unknown): Promise<ServerResult> {
     `Unknown or expired job id: ${parsed.data.id}`,
     'Call list_jobs to find retained job IDs. A job may have been pruned; do not replay a previous command or mutation without checking its effects.',
     {tool:'list_jobs',args:{limit:50}});
+  if(parsed.data.output_step!==undefined){
+    const step=parsed.data.output_step;
+    const result=j.results.find(r=>r.index===step);
+    if(!result)return jobToolError('JOB_STEP_NOT_FOUND','No settled result for job step '+step,
+      'Inspect get_job for completed step indices. Do not repeat the job.');
+    if(!result.spill)return jobToolError('JOB_OUTPUT_NOT_RETAINED',
+      'No retained large output exists for this job step.',
+      'Use get_job normal preview. Future long jobs can explicitly set retain_output:true; no command was rerun.');
+    let page;
+    try{page=await readJobOutput(j.id,step,parsed.data.output_byte_offset,parsed.data.output_chars,result.spill.sha256);}
+    catch{return jobToolError('JOB_OUTPUT_READ_FAILED','Could not read retained output.',
+      'Inspect the job preview. The output store may be unavailable; do not replay the job.');}
+    if(!page)return jobToolError('JOB_OUTPUT_NOT_FOUND',
+      'Retained output was evicted, corrupted, or the requested offset is beyond its end.',
+      'Inspect the available preview and existing job effects; do not rerun mutations blindly.');
+    const next=page.hasMore?{tool:'get_job',args:{id:j.id,output_step:step,output_byte_offset:page.nextByteOffset,output_chars:parsed.data.output_chars}}:null;
+    return {content:[{type:'text',text:'JOB OUTPUT '+j.id+' step='+step+
+      ' bytes '+page.byteOffset+'..'+page.nextByteOffset+'/'+page.totalBytes+
+      (result.spill.partial?' (retained output was size-capped)':'')+'\n'+page.text+
+      (page.hasMore?'\n[MORE OUTPUT: call get_job with output_byte_offset='+page.nextByteOffset+']':'')}],
+      structuredContent:{jobId:j.id,step,byteOffset:page.byteOffset,
+        nextByteOffset:page.nextByteOffset,totalBytes:page.totalBytes,hasMore:page.hasMore,
+        retainedOutputPartial:result.spill.partial, ...(next?{next}:{})}};
+  }
   const out = detail(j, parsed.data.output_chars,parsed.data.step_offset,parsed.data.step_limit);
   if (isFinished(j) && !out.includes('[MORE JOB STEPS:')) j.reported = true;
   return text(out);
@@ -819,6 +953,7 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
     label: c.label ?? `#${i + 1} ${stepName(c)}`,
     group,
     groupConcurrency: a.max_concurrency,
+    retainOutput:a.retain_output,
   }));
   // Feed the shared scheduler: at most three workers globally, one CPU-heavy
   // job at a time, and lightweight work can pass a queued heavy job.
@@ -901,7 +1036,7 @@ export function buildJobToolDefinitions(): ToolDefinition[] {
     },
     {
       name: 'get_job',
-      description: 'Get the status and full step outputs of one background job (larger output limit than wait_jobs).',
+      description: 'Get job status and bounded step previews. For long output retained via retain_output:true or BRC_JOB_OUTPUT_SPILL=1, page safely using output_step (zero-based), output_byte_offset and output_chars; pages are read-only and never repeat execution.',
       inputSchema: zodToJsonSchema(GetJobArgsSchema),
       annotations: { title: 'Get job', readOnlyHint: true },
     },

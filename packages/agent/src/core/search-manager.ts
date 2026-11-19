@@ -7,6 +7,9 @@ import { capture } from './utils/capture.js';
 import { getRipgrepPath } from './utils/ripgrep-resolver.js';
 import { isExcelFile } from './utils/files/index.js';
 import { getCallContext, checkCancelled } from '../context.js';
+import {searchIoAdmission} from '../runtime/resource-admission.js';
+import {observeManagedChild,stopManagedChild} from '../runtime/process-termination.js';
+import {spawnManaged} from '../runtime/managed-spawn.js';
 
 export interface SearchResult {
   file: string;
@@ -150,7 +153,11 @@ export interface SearchSessionOptions {
     checkCancelled();
     options = {...options, maxResults: Math.min(10000, Math.max(1, options.maxResults ?? 1000))};
     const releaseSlot = await this.reserveStartSlot();
+    let releaseIo:(()=>void)|undefined,sessionOwnsIo=false;
     try {
+    // I/O permit is held until ripgrep CLOSES, not until startSearch
+    // returns. It is distinct from the existing two-session search cap.
+    releaseIo=await searchIoAdmission.acquire(getCallContext()?.signal,10000);
     checkCancelled();
     if (this.sessions.size >= 32) {
       for (const [id, old] of this.sessions) { if (old.isComplete) this.sessions.delete(id); if (this.sessions.size < 32) break; }
@@ -176,7 +183,8 @@ export interface SearchSessionOptions {
     // classified SEARCH_START_FAILED, not kill the agent or leak worker slots.
     let rgProcess: ChildProcess;
     try {
-      rgProcess = spawn(rgPath, args, { windowsHide: true });
+      rgProcess = spawnManaged(rgPath, args, { windowsHide: true }, 'fast-read');
+      observeManagedChild(rgProcess);
     } catch (error) {
       throw new Error('Failed to start ripgrep process: '+
         (error instanceof Error ? error.message : String(error)));
@@ -214,6 +222,13 @@ export interface SearchSessionOptions {
 
     // Set up process event handlers
     this.setupProcessHandlers(session);
+    const releaseOnExit=()=>{
+      releaseIo?.();
+      releaseIo=undefined;
+    };
+    rgProcess.once('close',releaseOnExit);
+    rgProcess.once('error',releaseOnExit);
+    sessionOwnsIo=true;
     // The manager's close/error handlers update isComplete first, so waiting
     // callers are released only after a worker actually exits.
     rgProcess.once('close', () => this.grantSearchSlots());
@@ -336,6 +351,7 @@ export interface SearchSessionOptions {
     } finally {
       // A failed path/regex check or failed spawn must never leak a slot.
       releaseSlot();
+      if(!sessionOwnsIo)releaseIo?.();
     }
   }
 
@@ -441,9 +457,7 @@ export interface SearchSessionOptions {
       return false;
     }
 
-    if (!session.process.killed) {
-      session.process.kill('SIGTERM');
-    }
+    if (!session.isComplete) stopManagedChild(session.process);
 
     // Don't delete session immediately - let user read final results
     // It will be cleaned up by cleanup process
@@ -1064,7 +1078,7 @@ export interface SearchSessionOptions {
     if (!session.stopReason) session.stopReason = reason;
     session.wasIncomplete = true;
     session.buffer = '';
-    if (!session.process.killed) session.process.kill('SIGTERM');
+    if (!session.isComplete) stopManagedChild(session.process);
   }
   private addResult(session: SearchSession, result: SearchResult): boolean {
     if (session.stopReason) return false;
@@ -1111,9 +1125,7 @@ export interface SearchSessionOptions {
           if (ends) {
             // Found exact match, terminate search early
             setTimeout(() => {
-              if (!session.process.killed) {
-                session.process.kill('SIGTERM');
-              }
+              if (!session.isComplete) stopManagedChild(session.process);
             }, 100); // Small delay to allow any remaining results
             break;
           }

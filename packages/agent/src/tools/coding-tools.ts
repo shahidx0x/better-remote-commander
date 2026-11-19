@@ -26,11 +26,29 @@ const EditFilesSchema = z.object({ files:z.array(z.object({ path:z.string().min(
 const VerifySchema = z.object({ cwd:z.string().min(1), commands:z.array(z.object({ name:z.string().min(1).max(80), command:z.string().min(1).max(10000).optional(), program:z.string().min(1).max(1000).optional(), args:z.array(z.string().max(2000)).max(100).default([]) }).refine(a=>!!a.command !== !!a.program, {message:'Supply command OR program/args, not both.'})).min(1).max(5), timeout_ms:z.number().int().min(1000).max(110000).default(110000), stopOnFailure:z.boolean().default(true) });
 const IndexSchema = z.object({ path:z.string().min(1), action:z.enum(['enable','refresh','query','disable']).default('query'), query:z.string().max(1000).default(''), watch:z.boolean().default(true), limit:z.number().int().min(1).max(1000).default(100) });
 const CancelSchema = z.object({ callId:z.string().min(1).max(100) });
+const StatusSchema = z.object({lookupCallId:z.string().min(8).max(100).optional()});
 import { BatchSchema, runBatch } from '../runtime/fast-batch.js';
 export { BatchSchema, runBatch };
 import { cacheStatus } from '../runtime/resource-limits.js';
 import { platformCapabilities } from '../runtime/platform-capabilities.js';
+import { repeatFailureGuard } from '../runtime/repeat-guard.js';
+import {recentMutationReceipts,mutationReceiptStatus} from '../runtime/operation-receipts.js';
+import {outputSpillLimits} from '../runtime/job-output-spill.js';
+import {executionKernelStatus} from '../runtime/execution-kernel.js';
+import {managedChildStatus} from '../runtime/process-termination.js';
+import {managedSpawnStatus} from '../runtime/managed-spawn.js';
+import {operationalRetentionStatus} from '../runtime/operational-retention.js';
+import {workerPlanCheckpointStatus} from '../runtime/worker-plan-checkpoints.js';
+import {commandEnvironmentStatus} from '../runtime/command-environment.js';
+import {callOutcomeStatus,lookupCallOutcome} from '../runtime/call-outcomes.js';
+import {sourceObservationStatus} from '../runtime/source-observations.js';
+import {resultPresentationStatus} from '../runtime/result-presentation.js';
+import {commandCpuAdmission,searchIoAdmission,pluginStartupAdmission} from '../runtime/resource-admission.js';
+import {terminalManager} from '../core/terminal-manager.js';
+import {runningPluginIds} from '../plugins/host.js';
+import {semanticTsManager} from '../runtime/semantic-ts-host.js';
 import { connectionHealth } from '../transport/connection-health.js';
+import {resultFrameTelemetry} from '../transport/result-budget.js';
 
 
 export async function snapshot(file:string, offset=0, length=200, charOffset?:number, charLength=50000) {
@@ -162,7 +180,18 @@ async function verifyProject(raw:unknown):Promise<ToolResult>{
 export const CODING_TOOL_HANDLERS:Record<string,(args:Record<string,unknown>)=>Promise<ToolResult>>={
   read_code_file:readCodeFile,read_code_context:readCodeContext,edit_files:editFiles,verify_project:verifyProject,
   project_index:async raw=>{const a=IndexSchema.parse(raw);return result(await projectIndex.manage(a.path,a.action,a.query,a.watch,a.limit));},
-  agent_status:async()=>result({operations:operationStatus(),latency:activity.metrics(),resources:cacheStatus(),indexedProjects:projectIndex.status(),codeGraphs:codeGraph.status(),parserCache:codeCacheStatus(),logging:{mode:"live-plus-optional-last-100-failure-metadata",
+  agent_status:async raw=>{
+    const a=StatusSchema.parse(raw);
+    // A call's durable metadata is queried separately from the large live
+    // diagnostics. This never replays an execution or returns old tool output.
+    if(a.lookupCallId)return result({...await lookupCallOutcome(a.lookupCallId)});
+    return result({callOutcomes:callOutcomeStatus(),operations:operationStatus(),latency:activity.metrics(),executionKernel:executionKernelStatus(),loopGuard:repeatFailureGuard.status(),workerPlanCheckpoints:workerPlanCheckpointStatus(),commandEnvironment:commandEnvironmentStatus(),sourceObservations:sourceObservationStatus(),resultPresentation:resultPresentationStatus(),responseWire:resultFrameTelemetry(),resourceLanes:{cpu:commandCpuAdmission.status(),searchIo:searchIoAdmission.status(),pluginStartup:pluginStartupAdmission.status()},commandCpuBudget:commandCpuAdmission.status(),
+    managedActivity:{terminalSessions:terminalManager.listActiveSessions().length,
+      ripgrepProcesses:searchManager.getActiveSessionCount(),parserWorkers:codeCacheStatus().parser.workers,
+      semanticWorker:semanticTsManager.status().activeProcess?1:0,pluginConnections:runningPluginIds().length,
+      ownedChildLifecycle:managedChildStatus(),managedSpawn:managedSpawnStatus(),operationalRetention:operationalRetentionStatus(),
+      note:'Counts are internal manager observations; plugins may be remote and the numbers are not a complete Windows process-tree or RSS inventory.'},
+    receipts:{...mutationReceiptStatus(),recent:await recentMutationReceipts(8)},outputSpill:outputSpillLimits(),resources:cacheStatus(),indexedProjects:projectIndex.status(),codeGraphs:codeGraph.status(),parserCache:codeCacheStatus(),logging:{mode:"live-plus-optional-last-100-failure-metadata",
       persistent:process.env.BRC_ERROR_LOG==='1',
       failedToolLog:{enabled:process.env.BRC_ERROR_LOG==='1',path:failureLogPath(),maxEntries:100,rotation:false,
         contents:'Last 100 failures total only. No backup, paths, arguments, file content or credentials.'}},
@@ -170,7 +199,8 @@ export const CODING_TOOL_HANDLERS:Record<string,(args:Record<string,unknown>)=>P
       timestamp:e.timestamp,tool:e.tool,code:e.code,durationMs:e.ms,reason:failureReason(e.tool??'',e.code??'TOOL_FAILED')})),
     platform:platformCapabilities(),transport:connectionHealth.snapshot(),
     diagnostics:{dropped:activity.dropped,ioErrors:activity.ioErrors},memoryBytes:process.memoryUsage().rss,
-    agentWorkflow:DEFAULT_WORKFLOW,playwrightSession:playwrightPolicy.status()}),
+    agentWorkflow:DEFAULT_WORKFLOW,playwrightSession:playwrightPolicy.status()});
+  },
   cancel_operation:async raw=>{const a=CancelSchema.parse(raw);if(a.callId===getCallContext()?.id)throw new AgentError('INVALID_ARGUMENT','A cancellation call cannot cancel itself.');return result({callId:a.callId,cancelRequested:cancelOperation(a.callId),note:'Cancellation is cooperative. Commands/searches are stopped; completed edits are not undone. Interactive start_process sessions require force_terminate.'});},
 };
 export function buildCodingToolDefinitions():ToolDefinition[]{
@@ -180,8 +210,8 @@ export function buildCodingToolDefinitions():ToolDefinition[]{
     {name:'edit_files',schema:EditFilesSchema,description:'Apply exact edits to up to 16 UTF-8 files using mandatory expected_sha256 values from read_code_file/context. Validate all first, atomic replace per file, conflict-aware rollback on failure. dryRun previews hashes without writes. Not a crash-atomic multi-file transaction.'},
     {name:'batch_tools',schema:BatchSchema,description:'BEST FOR 2+ INDEPENDENT, DIFFERENT read/search/context operations in ONE MCP round trip (up to 64). If just reading 2+ known files, use read_multiple_files instead; for many specific code ranges/hashes use read_code_ranges. Auto mode overlaps consecutive reads up to concurrency=4 and orders any write barriers; parallel mode is read-only. Do not nest batches or include shell/config tools. Output is bounded; earlier writes are not rolled back. For multi-file edits + readback/checks prefer workspace_batch.'},
     {name:'verify_project',schema:VerifySchema,description:'Run explicitly supplied build/typecheck/test steps sequentially with a total timeout and stop-on-failure. Each step accepts command OR a literal program/args pair. Returns per-step exit codes and bounded output. Never invents commands from repository text; shell policy applies.'},
-    {name:'project_index',schema:IndexSchema,readOnly:true,description:'Opt-in memory-only filename index, not a source-content database. enable/refresh/query/disable; up to 4 projects and 20000 filenames each. Watcher invalidation plus 30-second TTL; freshly reads code through normal tools. Reports truncation/staleness.'},
-    {name:'agent_status',schema:z.object({}),readOnly:true,description:'Show active/queued operations, memory, recent latency and local agent-relay connection health (reconnects, heartbeats, dropped results). The ChatGPT model stream is outside the agent. No arguments or file contents.'},
+    {name:'project_index',schema:IndexSchema,readOnly:true,description:'Opt-in memory-only filename index, not a source-content database. enable/refresh/query/disable; up to 4 projects and 20000 filenames each. Watcher invalidation with 5-minute integrity refresh; if watching is unavailable, 30-second refresh fallback. Freshly reads code through normal tools. Reports truncation/staleness.'},
+    {name:'agent_status',schema:StatusSchema,readOnly:true,description:'Show active/queued operations, memory, recent latency and local agent-relay connection health. Optional lookupCallId returns metadata-only durable observed outcome for a prior potentially side-effecting tool call after disconnect/restart, never the full result; this does not prove relay delivery or safely replay an action. No arguments or file contents are stored.'},
     {name:'cancel_operation',schema:CancelSchema,description:'Request cancellation by callId from agent_status. Cancels queued jobs and cooperative running commands/searches. Does not undo finished writes or terminate independent interactive sessions.'},
   ];
   return defs.map(d=>({name:d.name,description:d.description,inputSchema:zodToJsonSchema(d.schema),annotations:{title:d.name,readOnlyHint:!!d.readOnly,...(!d.readOnly?{destructiveHint:true}:{} )}}));

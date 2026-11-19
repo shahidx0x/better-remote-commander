@@ -34,7 +34,7 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   read_multiple_files: {
     use: 'Read 2+ already-known files or specific per-file ranges in ONE MCP request.',
     instead: 'If names are unknown use start_search; if you need multiple code ranges with hashes use read_code_ranges; do not issue repeated read_file calls.',
-    caveat: 'Up to 8 reads overlap internally; individual errors are isolated. Use batch.continuations when truncated; images/PDFs have a small shared media budget.',
+    caveat: 'Up to 3 file reads overlap internally; individual errors are isolated. Use batch.continuations when truncated; images/PDFs have a small shared media budget.',
   },
   write_file: {
     use: 'Create, replace, or append ONE selected file.',
@@ -146,7 +146,7 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   run_command: {
     use: 'Run a ONE-SHOT command (git, build, test, package manager) and get its final exit code and bounded output.',
     instead: 'For interactive or long-running sessions use start_process; for discovered project checks use run_project_checks; for ordinary reads use read_multiple_files.',
-    caveat: 'Default Windows shell is PowerShell 5.1: no && or ||. For a native git/node/pnpm chain, run_command safely selects cmd.exe if shell omitted; explicit CMD syntax requires shell:"cmd.exe". Give absolute cwd, use raw:true for debugging, distinguish COMMAND_FAILED vs TIMEOUT vs SHELL_SYNTAX and inspect exit code before success.',
+    caveat: 'Windows uses the selected/configured shell; PowerShell 5.1 has no && or ||. For a safe native git/node/pnpm chain on PS5.1, run_command may select cmd.exe if shell omitted; explicit CMD syntax requires shell:"cmd.exe". Give absolute cwd, use raw:true for debugging, distinguish COMMAND_FAILED vs TIMEOUT vs SHELL_SYNTAX and inspect exit code before success.',
   },
   delete_file: {
     use: 'Delete an explicitly named file, empty directory or approved recursive directory.',
@@ -194,8 +194,8 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
     instead: 'For one search use start_search / project_map; this is not a persisted source-code database.',
   },
   agent_status: {
-    use: 'Inspect agent operation IDs, latency, memory and in-memory cache state.',
-    instead: 'For OS processes use list_processes; for relay devices use list_devices.',
+    use: 'Inspect agent operation IDs, latency, memory, cache state and durable metadata-only call outcomes by supplying lookupCallId.',
+    instead: 'For OS processes use list_processes; for relay devices use list_devices. A call-outcome receipt never contains the full output or proves relay delivery.',
   },
   cancel_operation: {
     use: 'Cancel a known active BRC operation by callId.',
@@ -247,9 +247,9 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
     caveat: 'Hash-preconditioned and preview-first.',
   },
   find_references: {
-    use: 'Find lexical identifier reference CANDIDATES using ripgrep.',
-    instead: 'Not a semantic language-server rename or definitive cross-project reference list.',
-    caveat: 'Comments, strings and unrelated symbols may appear; inspect results.',
+    use: 'Find lexical identifier reference CANDIDATES using ripgrep (default), or TypeScript compiler-backed references/definitions with mode=semantic, file, line, column (enabled by default; BRC_TS_SEMANTIC=0 disables).',
+    instead: 'This is not a general semantic language-server rename or definitive cross-project reference list. Optional TS/JS compiler mode is read-only and bounded.',
+    caveat: 'In lexical mode, comments, strings and unrelated symbols may appear; semantic mode starts one bounded lazy worker and marks truncated project coverage.',
   },
   related_files: {
     use: 'Explore import/project/module links and reverse-import candidates across supported languages.',
@@ -336,7 +336,7 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
   run_parallel: {
     use: 'Run multiple INDEPENDENT commands or BRC tool operations concurrently on the same device.',
     instead: 'For lengthy background work use spawn_job and wait_jobs; for small independent existing tool reads use batch_tools.',
-    caveat: 'Four concurrent by default, max eight. Combined 128K-character output may truncate: retrieve remaining reports using wait_jobs(group) or get_job(id), NEVER rerun completed writes.',
+    caveat: 'Three concurrent by default, maximum three. Combined 128K-character output may truncate: retrieve remaining reports using wait_jobs(group) or get_job(id), NEVER rerun completed writes.',
   },
   spawn_job: {
     use: 'Start a bounded background command or sequence of BRC tools that may exceed the normal MCP call timeout.',
@@ -407,14 +407,14 @@ export const TOOL_WORKFLOWS: Record<string,string> = {
   read_multiple_files: 'START: paths[] for known files, or files[{path,offset,length}] for precise ranges. NEXT: batch.continuations, or smaller batches if the shared reply budget is reached. Do not treat a truncated batch as the complete files.',
   read_code_file: 'START: path,offset,length for code + SHA-256; if a single line is oversized use charOffset/charLength, then follow nextCharOffset. Keep the full-file hash for edits.',
   read_code_ranges: 'START: multiple exact known line ranges; check returned hashes. NEXT: narrow or paginate if snippets are truncated.',
-  write_file: 'START: mode=rewrite for a new file; explicit mode=append for subsequent chunks (or mode=rewrite for deliberate replacement). NEXT: if WRITE_*_LIMIT, nothing changed: split. If SUCCESS, only that chunk completed. If transport outcome is uncertain, inspect file/hash BEFORE retrying. Never append the same chunk twice.',
+  write_file: 'START: mode=rewrite for a new file; explicit mode=append for subsequent chunks (or mode=rewrite for deliberate replacement). NEXT: if WRITE_*_LIMIT, nothing changed: split. If SUCCESS, only that chunk completed. If transport outcome is uncertain, inspect file/hash BEFORE retrying. Never append the same chunk twice. Optional strict source mode requires expected_sha256 for existing code/config files.',
   edit_block: 'START: read the current file and provide an exact old_string/new_string; prefer expected_sha256 or expected replacement counts. NEXT: inspect changed content/diff; on conflict reread source, never force an uncertain edit.',
   workspace_batch: 'START: hash-checked changes with dryRun=true; inspect validation. APPLY: dryRun=false only with user authorization. NEXT: inspect per-file hashes and actual check results. Rollback is best effort; never replay an uncertain commit.',
   batch_tools: 'START: group INDEPENDENT reads in mode=auto; use maxChars. Writes are ordered barriers; a prior successful write is not rolled back if a later step fails. NEXT: read skipped/truncated results separately.',
-  run_command: 'START: one-shot command, preferably absolute cwd; default Windows shell is PowerShell 5.1 (cannot parse &&/||). Safe native chains auto-select cmd.exe when shell is omitted; for CMD syntax pass shell:"cmd.exe", and raw:true for diagnostics. NEXT: inspect structuredContent.exitCode/error.code/recovery; COMMAND_FAILED is a real nonzero exit, TIMEOUT exceeded execution time, SHELL_SYNTAX changed nothing. Never retry identically without correction. Use start_process for interactive/long-running work.',
+  run_command: 'START: one-shot command, preferably absolute cwd; Windows uses the configured shell (often cmd.exe); PowerShell 5.1 cannot parse &&/||. Safe native chains auto-select cmd.exe when PowerShell 5.1 was selected implicitly; for CMD syntax pass shell:"cmd.exe", and raw:true for diagnostics. NEXT: inspect structuredContent.exitCode/error.code/recovery; COMMAND_FAILED is a real nonzero exit, TIMEOUT exceeded execution time, SHELL_SYNTAX changed nothing. Never retry identically without correction. Use start_process for interactive/long-running work.',
   start_process: 'START: long-running/interactive command. Returned PID means STARTED, not successful. NEXT: read_process_output, then interact_with_process if waiting for input; inspect final exit code.',
   read_process_output: 'START: known PID, offset=0 for new output; positive absolute offset or negative tail. NEXT: follow remaining output, or stop polling when process has exited.',
-  run_parallel: 'START: independent operations only, default concurrency=4. NEXT: MORE PARALLEL RESULTS => wait_jobs({group}) or get_job(id); never replay a completed mutation just to retrieve its output.',
+  run_parallel: 'START: independent operations only, default concurrency=3 (max 3). NEXT: MORE PARALLEL RESULTS => wait_jobs({group}) or get_job(id); never replay a completed mutation just to retrieve its output.',
   spawn_job: 'START: lengthy job returning an ID immediately. NEXT: wait_jobs({ids}) or get_job({id}); do not confuse started with succeeded.',
   wait_jobs: 'START: known group or IDs. NEXT: for omitted output call again on the same group or get_job(id); never spawn duplicate jobs because output is truncated.',
   get_job: 'START: known ID. NEXT: follow step_offset from MORE JOB STEPS; no rerun necessary.',
@@ -424,7 +424,9 @@ export const TOOL_WORKFLOWS: Record<string,string> = {
   project_context: 'START: existing project root and optional planned focus file. A nonexistent focus is normal; a nonexistent root is not. NEXT: use returned instruction scopes and read needed files.',
   read_images: 'START: list/metadata or bounded image previews; avoid returning original full-size images. NEXT: request smaller sets or file transfer if exact bytes are required.'
 };
-export const MAX_DISCOVERY_DESCRIPTION_CHARS=2200;
+// Tool schemas remain available in full; route text stays complete, while
+// verbose details receive a smaller bounded token/metadata budget.
+export const MAX_DISCOVERY_DESCRIPTION_CHARS=1050;
 /** Prefix use / avoid / next-step rules. Never mutate tool schemas, names or permissions. */
 export function addToolChoice<T extends { name: string; description: string }>(tool: T): T {
   const rule = TOOL_CHOICES[tool.name];
@@ -438,10 +440,17 @@ export function addToolChoice<T extends { name: string; description: string }>(t
   const details = tool.description.trim().replace(/[ \t]{2,}/g, ' ')
     .replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n');
   const prefix = guide + '\nDETAILS: ';
-  const maxLength = ['edit_block','write_pdf','read_file'].includes(tool.name) ? 3000 : MAX_DISCOVERY_DESCRIPTION_CHARS;
-  const remaining = maxLength - prefix.length;
+  const maxLength = ['edit_block','write_pdf','read_file'].includes(tool.name) ? 1700 : MAX_DISCOVERY_DESCRIPTION_CHARS;
+  // Do not truncate the authoritative WHEN / INSTEAD / NEXT guidance even
+  // for long specialized tools. Only clip upstream DETAILS; schemas remain
+  // byte-for-byte identical and are always available to the host.
+  const remaining = Math.max(0,maxLength-prefix.length);
   const clipped = details.length > remaining;
-  const suffix = '\n[More details are in the tool input schema. Prefer bounded ranges and check result metadata.]';
-  const shown = clipped ? details.slice(0, Math.max(0,remaining-suffix.length-1)).trimEnd() + suffix : details;
+  const suffix = '[Full parameter details: tool input schema.]';
+  const shown = clipped
+    ? remaining>suffix.length+12
+      ? details.slice(0,remaining-suffix.length-1).trimEnd()+'\n'+suffix
+      : details.slice(0,remaining)
+    : details;
   return { ...tool, description: prefix + shown };
 }

@@ -22,7 +22,9 @@ import { commandManager } from '../core/command-manager.js';
 import { getPlugin } from '../plugins/store.js';
 import { pluginPaths } from '../plugins/paths.js';
 import { findOnPath } from './fast-exec.js';
-import { killTree } from './brc-tools.js';
+import {stopManagedChild} from '../runtime/process-termination.js';
+import {spawnManaged} from '../runtime/managed-spawn.js';
+import {guardedAstRewrite,type MatchedRewrite} from '../runtime/ast-rewrite-guard.js';
 import type { ServerResult } from '../core/types.js';
 import type { ToolDefinition } from '../core/tool-definitions.js';
 
@@ -170,7 +172,7 @@ function runAstGrep(exe: AstGrepExe, args: string[], cwd: string, limit: number,
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(exe.command, [...exe.prefixArgs, ...args], {
+      child = spawnManaged(exe.command, [...exe.prefixArgs, ...args], {
         cwd,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -187,7 +189,7 @@ function runAstGrep(exe: AstGrepExe, args: string[], cwd: string, limit: number,
     let settled = false;
     let buf = '';
     let stderr = '';
-    const timer = setTimeout(() => { timedOut = true; killTree(child.pid); }, timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; stopManagedChild(child); }, timeoutMs);
     child.stdout!.setEncoding('utf8');
     child.stderr!.setEncoding('utf8');
     child.stdout!.on('data', (d: string) => {
@@ -199,7 +201,7 @@ function runAstGrep(exe: AstGrepExe, args: string[], cwd: string, limit: number,
         buf = buf.slice(nl + 1);
         if (!line) continue;
         try { matches.push(JSON.parse(line) as AstMatch); } catch { /* ignore partial/non-JSON */ }
-        if (matches.length >= limit) { truncated = true; killTree(child.pid); return; }
+        if (matches.length >= limit) { truncated = true; stopManagedChild(child); return; }
       }
     });
     child.stderr!.on('data', (d: string) => { if (stderr.length < MAX_STDERR) stderr += d; });
@@ -455,7 +457,8 @@ export const AstRewriteArgsSchema = z.object({
   lang: z.string().optional().describe('Language of the pattern (required with pattern), e.g. ts, tsx, js, py, rust, go, java.'),
   path: z.string().min(1).describe('Directory or file to rewrite (absolute; inside allowed directories).'),
   globs: z.array(z.string()).optional().describe('Include/exclude globs, e.g. ["src/**/*.ts", "!**/*.d.ts"].'),
-  dry_run: z.boolean().optional().default(true).describe('Default true: only preview (diff + counts). Set false to write the files.'),
+  dry_run: z.boolean().optional().default(true).describe('Default true: preview plus SHA-256 hashes. Set false for guarded atomic per-file writes.'),
+  expected_sha256_by_file: z.record(z.string().regex(/^[a-fA-F0-9]{64}$/)).optional().describe('Optional exact source hashes keyed by path displayed in dry run. Required when BRC_REQUIRE_SOURCE_HASH=1. Reject stale edits rather than rebasing.'),
   contextLines: z.number().int().min(0).max(10).optional().default(2).describe('Context lines in the diff.'),
   timeout_ms: z.number().int().min(1_000).max(MAX_TIMEOUT_MS).optional().default(DEFAULT_TIMEOUT_MS),
 });
@@ -485,13 +488,12 @@ export async function handleAstRewrite(args: unknown): Promise<ServerResult> {
   if (r.truncated) return text(`More than ${MAX_REWRITE_MATCHES} matches; nothing was changed. Narrow path or globs.`, true);
 
   // Group edits per file.
-  const byFile = new Map<string, Edit[]>();
+  const byFile = new Map<string, MatchedRewrite[]>();
   let noFix = 0;
   for (const m of r.matches) {
     if (m.replacement === undefined) { noFix++; continue; }
-    const off = m.replacementOffsets ?? m.range.byteOffset;
     const list = byFile.get(m.file) ?? [];
-    list.push({ start: off.start, end: off.end, replacement: Buffer.from(m.replacement, 'utf8') });
+    list.push({text:m.text,range:m.range,replacement:m.replacement,replacementOffsets:m.replacementOffsets});
     byFile.set(m.file, list);
   }
   const head = `ast_rewrite ${a.rule ? 'rule' : `${JSON.stringify(a.pattern)} -> ${JSON.stringify(a.rewrite)}`}${a.lang ? ` (${a.lang})` : ''} in ${t.abs}`;
@@ -502,36 +504,26 @@ export async function handleAstRewrite(args: unknown): Promise<ServerResult> {
     return text(out);
   }
 
-  let diffs = '';
-  let edits = 0, changedFiles = 0;
-  const written: string[] = [];
-  const errors: string[] = [];
-  for (const [file, list] of byFile) {
-    const abs = path.resolve(t.cwd, file);
-    try {
-      const safe = await validatePath(abs);
-      const old = await fsp.readFile(safe);
-      const res = applyEdits(old, list, displayFile(file), a.contextLines);
-      if (!res.applied || res.content.equals(old)) continue;
-      edits += res.applied;
-      changedFiles++;
-      diffs += res.diff;
-      if (!a.dry_run) {
-        await fsp.writeFile(safe, res.content);
-        written.push(displayFile(file));
-      }
-    } catch (e) {
-      errors.push(`${displayFile(file)}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
-  let out = `${head}\n`;
-  out += a.dry_run
-    ? `DRY RUN: ${edits} replacement(s) in ${changedFiles} file(s) would be made. Nothing was written; call again with dry_run=false to apply.\n`
-    : `APPLIED: ${edits} replacement(s) written to ${written.length} file(s).\n`;
-  if (errors.length) out += `Errors (${errors.length}):\n${errors.map((x) => `  ${x}`).join('\n')}\n`;
-  out += `\n${diffs}`;
-  return text(capOutput(out), !!errors.length && !changedFiles);
+  // Scanner byte offsets are only hints. Under per-file write locks, first
+  // revalidate every exact matched byte span and any caller-observed SHA-256;
+  // atomicWrite then compares the same fresh snapshot again before commit.
+  // Preflight all files before writing any file; never use raw writeFile().
+  const prepared=await guardedAstRewrite(
+    [...byFile].map(([file,matches])=>({
+      file:path.resolve(t.cwd,file),display:displayFile(file),matches
+    })),
+    {dryRun:a.dry_run,contextLines:a.contextLines,
+      expectedSha256ByFile:a.expected_sha256_by_file},applyEdits);
+  let out=`${head}\n`;
+  out+=a.dry_run
+    ? `DRY RUN: ${prepared.totalEdits} replacement(s) in ${prepared.prepared.length} file(s). Nothing was written.\n`
+    : `APPLIED: ${prepared.totalEdits} replacement(s) in ${prepared.written.length} file(s) through guarded atomic writes.\n`;
+  out+='Source SHA-256 snapshots (pass as expected_sha256_by_file to require exact version):\n';
+  for(const item of prepared.prepared)
+    out+=`  ${item.display}: ${item.beforeHash}\n`;
+  out+='The preview protects exact matched bytes; never assume a multi-file write is a crash-atomic transaction.\n';
+  out+='\n'+prepared.prepared.map(item=>item.diff).join('');
+  return text(capOutput(out));
 }
 
 // ---------------------------------------------------------------------------

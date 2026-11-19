@@ -2,6 +2,7 @@
 import { Worker } from 'node:worker_threads';
 import { AgentError } from './errors.js';
 import { getCallContext, checkCancelled } from '../context.js';
+import {commandCpuAdmission} from './resource-admission.js';
 interface Job {
     id: number;
     grammar: string;
@@ -82,7 +83,18 @@ function pump() {
         }
     }
 }
-export function parseInWorker(grammar: string, language: string, text: string): Promise<any> {
+export async function parseInWorker(grammar:string,language:string,text:string):Promise<any>{
+    checkCancelled();
+    // Acquire CPU permit before assigning a bounded parser thread. Do not
+    // hold the permit for the caller's whole graph operation or double-gate
+    // background job wrappers that delegate to these tools.
+    const release=await commandCpuAdmission.acquire(getCallContext()?.signal,8000);
+    try{
+        checkCancelled();
+        return await queueParserWork(grammar,language,text);
+    }finally{release();}
+}
+function queueParserWork(grammar: string, language: string, text: string): Promise<any> {
     checkCancelled();
     if (queue.length >= 16)
         return Promise.reject(new AgentError('PARSER_BUSY', 'Parser queue is full; retry a smaller batch.', true));

@@ -69,7 +69,9 @@ test('tool descriptions lead with actionable next calls and enforce discovery bu
   assert.match(byName.get('write_file').description,/chunk/);
   assert.match(byName.get('run_parallel').description,/wait_jobs/);
   const total=definitions.reduce((n,x)=>n+x.description.length,0);
-  assert.ok(total<72000,'the model-facing tool descriptions are oversized: '+total);
+  assert.ok(total<61500,'the model-facing tool descriptions regressed: '+total);
+  const advertisedBytes=Buffer.byteLength(JSON.stringify(definitions),'utf8');
+  assert.ok(advertisedBytes<112500,'tool catalog metadata grew unexpectedly: '+advertisedBytes);
 });
 
 test('the tool-routing helper changes descriptions ONLY, not names, schema or access annotations', () => {

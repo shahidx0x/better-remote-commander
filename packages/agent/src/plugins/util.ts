@@ -3,7 +3,9 @@
  * timeouts, sha256-verified downloads and single-file extraction from zip / tar.gz archives.
  * Pure Node (no extra dependencies, no external unzip/tar programs).
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import {observeManagedChild,stopManagedChild,managedTerminationState,type ManagedTerminationState} from '../runtime/process-termination.js';
+import {spawnManaged} from '../runtime/managed-spawn.js';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -21,6 +23,8 @@ export interface RunResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** Root close is observed; this never proves all descendants exited. */
+  terminationState?: ManagedTerminationState;
 }
 
 export interface RunOptions {
@@ -32,15 +36,6 @@ export interface RunOptions {
   shell?: boolean;
 }
 
-function killTree(pid: number | undefined): void {
-  if (!pid) return;
-  if (isWindows) {
-    try { spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 }); } catch { /* ignore */ }
-  } else {
-    try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* ignore */ } }
-  }
-}
-
 /** Run a program to completion (stdin closed, output captured, killed on timeout). Never throws. */
 export function runProcess(command: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
   return new Promise((resolve) => {
@@ -49,7 +44,7 @@ export function runProcess(command: string, args: string[], opts: RunOptions = {
     let timedOut = false;
     let child;
     try {
-      child = spawn(command, args, {
+      child = spawnManaged(command, args, {
         cwd: opts.cwd,
         env: opts.env as NodeJS.ProcessEnv | undefined,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -61,21 +56,43 @@ export function runProcess(command: string, args: string[], opts: RunOptions = {
       resolve({ code: null, stdout: '', stderr: e instanceof Error ? e.message : String(e), timedOut: false });
       return;
     }
+    observeManagedChild(child);
+    let settled = false, fallback: NodeJS.Timeout | undefined;
+    const finish = (code: number | null, unconfirmed = false) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (fallback) clearTimeout(fallback);
+      resolve({code, stdout, stderr, timedOut,
+        terminationState:managedTerminationState(timedOut,!unconfirmed)});
+    };
     const timer = opts.timeoutMs
-      ? setTimeout(() => { timedOut = true; killTree(child.pid); }, opts.timeoutMs)
+      ? setTimeout(() => {
+          timedOut = true;
+          stopManagedChild(child);
+          fallback = setTimeout(() => {
+            // A hung pipe or OS child must not hold installer control forever.
+            // Do not claim confirmed termination when close was never seen.
+            child.stdout?.destroy(); child.stderr?.destroy(); child.unref();
+            finish(null,true);
+          },3000);
+          fallback.unref();
+        }, opts.timeoutMs)
       : undefined;
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', (d: string) => { if (stdout.length < MAX_CAPTURE) stdout += d; });
-    child.stderr?.on('data', (d: string) => {
-      if (stderr.length < MAX_CAPTURE) stderr += d;
-      if (opts.log) for (const line of d.split(/\r?\n/)) if (line.trim()) opts.log('debug', line.trim());
+    child.stdout?.on('data', (data: string) => {
+      if (stdout.length < MAX_CAPTURE) stdout += data.slice(0,MAX_CAPTURE-stdout.length);
     });
-    child.on('error', (e) => { stderr += `${stderr ? '\n' : ''}${e.message}`; });
-    child.on('close', (code) => {
-      if (timer) clearTimeout(timer);
-      resolve({ code, stdout, stderr, timedOut });
+    child.stderr?.on('data', (data: string) => {
+      if (stderr.length < MAX_CAPTURE) stderr += data.slice(0,MAX_CAPTURE-stderr.length);
+      if (opts.log) for (const line of data.split(/\r?\n/)) if (line.trim()) opts.log('debug', line.trim());
     });
+    child.on('error', (e) => {
+      stderr = (stderr + (stderr?'\n':'') + e.message).slice(0,MAX_CAPTURE);
+      if (!child.pid) finish(null);
+    });
+    child.on('close', code => finish(code));
   });
 }
 

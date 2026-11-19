@@ -6,8 +6,9 @@ import { OperationScheduler,cancelOperation } from '../runtime/operations.js';
 import { AgentError,failure } from '../runtime/errors.js';
 import { PluginAdmin } from './plugin-admin.js';
 import { isTermuxRuntime } from '../runtime/platform-capabilities.js';
-import { boundedAgentFrame } from './result-budget.js';
+import { boundedAgentFrame,recordResultFrameQueued } from './result-budget.js';
 import { connectionHealth } from './connection-health.js';
+import {beginCallOutcome,settleCallOutcome,lookupCallOutcome,type CallOutcomeRecord} from '../runtime/call-outcomes.js';
 export interface WsClientOptions {
  relayUrl:string;token:string;deviceId:string;name:string;agentVersion:string;coreVersion:string;tools:ToolDefinition[];
  callTool:(name:string,args:Record<string,unknown>)=>Promise<unknown>;
@@ -96,16 +97,36 @@ export class WsClient {
   this.callsInFlight++;
   try {
   const received=performance.now();let executionStarted=received;
-  let out:ToolResult;
+  let out:ToolResult,receipt:CallOutcomeRecord|null=null;
+  // Read-only commands can safely be reissued as fresh reads after a
+  // disconnect. Only potentially side-effecting calls need durable metadata.
+  const maybeMutation=this.opts.tools.find(t=>t.name===msg.tool)?.annotations?.readOnlyHint!==true;
   try{
-   if(this.seen.has(msg.id))throw new AgentError('DUPLICATE_CALL','This request was already received; not executing it twice.');
+   if(this.seen.has(msg.id))throw new AgentError('DUPLICATE_CALL',
+     'This request was already received; never re-run a mutation based on a duplicate call id.');
+   // Survive a local-agent restart without replaying a potentially
+   // side-effecting tool with the same remote call id.
+   if(maybeMutation&&(await lookupCallOutcome(msg.id)).found)
+     throw new AgentError('DUPLICATE_CALL',
+       'A prior call receipt exists. Query agent_status with lookupCallId; inspect actual state before any new mutation.');
    this.seen.set(msg.id,Date.now());
    for(const [id,time]of this.seen){if(time<Date.now()-300000||this.seen.size>1000)this.seen.delete(id);else break;}
    const timeout=Math.min(115000,Math.max(100,Number(msg.timeoutMs)||DEFAULTS.callTimeoutMs));
    const deadline=Date.now()+timeout;
-   const run=(signal?:AbortSignal)=>{executionStarted=performance.now();return withCallContext({id:msg.id,client:msg.client??null,remote:true,signal,deadline},()=>this.opts.callTool(msg.tool,msg.args)) as Promise<ToolResult>;};
+   const run=(signal?:AbortSignal)=>{
+     executionStarted=performance.now();
+     return withCallContext({id:msg.id,client:msg.client??null,remote:true,signal,deadline},async()=>{
+       if(maybeMutation)receipt=await beginCallOutcome(msg.id,msg.tool);
+       if(signal?.aborted)throw signal.reason??new AgentError('CANCELLED','Remote call cancelled before execution.');
+       return await this.opts.callTool(msg.tool,msg.args) as ToolResult;
+     });
+   };
    out=['agent_status','cancel_operation','stop_search','force_terminate'].includes(msg.tool)?await run():await this.scheduler.run(msg.id,msg.tool,timeout,run);
   }catch(err){out=failure(err,msg.id);}
+  // Persist ONLY the observed outcome, not any arguments or payload.
+  // Await settlement before the socket send: disconnect between these
+  // steps must still permit lookup after reconnect or an agent restart.
+  if(receipt)await settleCallOutcome(receipt,out,performance.now()-executionStarted);
   out={...out,_meta:{...out._meta,agentQueueMs:Math.max(0,Math.round(executionStarted-received)),agentTotalMs:Math.round(performance.now()-received)}};
   // Never route an old connection's result onto a new connection.
   if(this.ws===ws)this.send({type:'result',id:msg.id,result:out},ws);
@@ -114,9 +135,10 @@ export class WsClient {
  }
  private send(msg:AgentMessage,ws=this.ws):void{
   if(ws?.readyState!==WebSocket.OPEN){if(msg.type==='result')connectionHealth.record('result_dropped','NOT_CONNECTED',this.callsInFlight);return;}
-  let encoded:string;
+  let encoded:string,replaced=false;
   try {
     const frame=boundedAgentFrame(msg);
+    replaced=frame.replaced;
     encoded=frame.encoded;
     if(frame.replaced){connectionHealth.record('result_dropped','OVERSIZED_RESULT',this.callsInFlight);this.log('warn','Oversized/invalid result replaced with bounded recovery error; call '+(msg.type==='result'?msg.id:'?'));}
   } catch(e) {
@@ -125,7 +147,10 @@ export class WsClient {
     return;
   }
   if(ws.bufferedAmount>8*1024*1024){connectionHealth.record('send_backpressure','BUFFER_LIMIT',this.callsInFlight);ws.terminate();return;}
-  try{ws.send(encoded);}catch{connectionHealth.record('socket_error','SEND_FAILED');ws.terminate();}
+  try{
+    ws.send(encoded);
+    if(msg.type==='result')recordResultFrameQueued(encoded,replaced);
+  }catch{connectionHealth.record('socket_error','SEND_FAILED');ws.terminate();}
  }
  private deviceInfo():DeviceInfo{return{deviceId:this.opts.deviceId,name:this.opts.name,platform:isTermuxRuntime()?'android':process.platform,arch:process.arch,hostname:os.hostname(),agentVersion:this.opts.agentVersion,coreVersion:this.opts.coreVersion};}
  private armHeartbeat(ws:WebSocket):void{clearTimeout(this.pongTimer);this.pongTimer=setTimeout(()=>{

@@ -8,6 +8,9 @@ import { getRipgrepPath } from '../core/utils/ripgrep-resolver.js';
 import { readBounded, decodeCode, sha256, atomicWrite, withFileLocks } from './file-safety.js';
 import { AgentError } from './errors.js';
 import { checkCancelled, getCallContext } from '../context.js';
+import {sharedManifestEnabled,sharedProjectManifest} from './project-manifest.js';
+import {observeManagedChild,stopManagedChild} from './process-termination.js';
+import {spawnManaged} from './managed-spawn.js';
 export const IGNORED_DIRS = ['.git', 'node_modules', '.next', 'dist', 'build', 'coverage', '.turbo', '.venv', 'venv', '__pycache__', 'target', 'obj', '.vs', '.gradle', '.dart_tool', '.pub-cache'];
 export const PreferencesSchema = z.object({
     packageManager: z.enum(['pnpm', 'npm', 'yarn', 'bun']).optional(),
@@ -94,31 +97,41 @@ export async function jsoncFile(file: string): Promise<{
         throw new AgentError('INVALID_JSON', ts.flattenDiagnosticMessageText(parsed.error.messageText, ' '));
     return { value: parsed.config, sha256: f.sha256 };
 }
-export async function listProjectFiles(root: string, limit = 5000): Promise<{
+export async function listProjectFiles(root: string, limit = 5000, opts:{fresh?:boolean}={}): Promise<{
     files: string[];
     truncated: boolean;
 }> {
     root = await rootPath(root);
+    if(sharedManifestEnabled()){
+      const listing=await sharedProjectManifest.list(root,'source',limit,{
+        fresh:opts.fresh,signal:getCallContext()?.signal
+      });
+      // If a large generated tree exhausted the broader shared listing,
+      // use the original profile-specific scan rather than report fewer
+      // relevant files merely because source and index have different ignores.
+      if(!listing.baseTruncated)return {files:listing.files,truncated:listing.truncated};
+    }
     const rg = await getRipgrepPath();
     checkCancelled();
     const signal = getCallContext()?.signal;
     return new Promise((resolve, reject) => {
         const args = ['--files', '--hidden', '--null', '--no-config', ...IGNORED_DIRS.flatMap(d => ['-g', `!**/${d}/**`]), '-g', '!**/bin/Debug/**', '-g', '!**/bin/Release/**', '--', '.'];
-        const child = spawn(rg, args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        const child = spawnManaged(rg, args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }, 'fast-read');
+        observeManagedChild(child);
         const files: string[] = [];
         let buffer = '', bytes = 0, truncated = false, error = '', timedOut = false;
-        const abort = () => child.kill();
-        const timer = setTimeout(() => { timedOut = true; child.kill(); }, 15000);
+        const abort = () => { stopManagedChild(child); };
+        const timer = setTimeout(() => { timedOut = true; abort(); }, 15000);
         signal?.addEventListener('abort', abort, { once: true });
         const clean = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
-        child.stdout.setEncoding('utf8');
-        child.stdout.on('data', (chunk: string) => {
+        child.stdout!.setEncoding('utf8');
+        child.stdout!.on('data', (chunk: string) => {
             if (truncated)
                 return;
             bytes += Buffer.byteLength(chunk);
             if (bytes > 4 * 1024 * 1024) {
                 truncated = true;
-                child.kill();
+                abort();
                 return;
             }
             buffer += chunk;
@@ -130,13 +143,13 @@ export async function listProjectFiles(root: string, limit = 5000): Promise<{
                     continue;
                 if (files.length >= limit) {
                     truncated = true;
-                    child.kill();
+                    abort();
                     break;
                 }
                 files.push(name);
             }
         });
-        child.stderr.on('data', (b: Buffer) => { error = (error + b).slice(0, 1000); });
+        child.stderr!.on('data', (b: Buffer) => { error = (error + b).slice(0, 1000); });
         child.on('error', e => { clean(); reject(e); });
         child.on('close', code => {
             clean();

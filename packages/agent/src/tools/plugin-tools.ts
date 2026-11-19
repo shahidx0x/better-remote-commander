@@ -146,6 +146,11 @@ export async function handleCallPluginTool(args: unknown): Promise<ServerResult>
         ...(needsSnapshot?{nextTool:'browser_snapshot'}:{})}}};
     }catch(e){
       const message=e instanceof Error?e.message:String(e);
+      if(message.startsWith('PLUGIN_CALL_OUTCOME_UNCERTAIN:')){
+        if(browser)playwrightPolicy.after(tool,toolArgs,{isError:true});
+        return policyError('PLUGIN_CALL_OUTCOME_UNCERTAIN',
+          'Plugin '+plugin+'.'+tool+' may already have executed before its connection failed. Inspect external state and do not automatically repeat the call.');
+      }
       if(browser) {
         playwrightPolicy.after(tool,toolArgs,{isError:true});
         const kind=classifyBrowserError(message);

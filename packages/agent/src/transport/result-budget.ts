@@ -42,3 +42,28 @@ export function boundedAgentFrame(msg:AgentMessage, maxBytes=maxResultFrameBytes
   };
   return {encoded:JSON.stringify(fallback),replaced:true};
 }
+
+/** Bounded, aggregate-only on-wire result measurements.
+ * Called only after ws.send accepts an encoded result frame; this is NOT
+ * proof the relay or ChatGPT received it. No frame data is stored.
+ */
+const WINDOW_SIZE=64;
+const recentResultBytes:number[]=[];
+const wireTotals={framesQueued:0,encodedBytesQueued:0,oversizeReplacementsQueued:0,maxBytesQueued:0};
+export function recordResultFrameQueued(encoded:string,replaced:boolean):void{
+ const bytes=Buffer.byteLength(encoded,'utf8');
+ wireTotals.framesQueued++;
+ wireTotals.encodedBytesQueued+=bytes;
+ wireTotals.maxBytesQueued=Math.max(bytes,wireTotals.maxBytesQueued);
+ if(replaced)wireTotals.oversizeReplacementsQueued++;
+ recentResultBytes.push(bytes);
+ if(recentResultBytes.length>WINDOW_SIZE)recentResultBytes.shift();
+}
+export function resultFrameTelemetry(){
+ const samples=[...recentResultBytes].sort((a,b)=>a-b);
+ const percentile=(p:number)=>samples[Math.max(0,Math.ceil(samples.length*p)-1)]??0;
+ return {...wireTotals,lastN:samples.length,maxSamples:WINDOW_SIZE,
+  p50Bytes:percentile(.5),p95Bytes:percentile(.95),
+  retainedFrames:false,retainsPayloads:false,
+  note:'Encoded result bytes queued locally by WebSocket; excludes framing and does not prove relay delivery.'};
+}

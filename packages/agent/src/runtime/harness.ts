@@ -8,6 +8,7 @@ import { CODING_TOOL_HANDLERS } from '../tools/coding-tools.js';
 import { checkCancelled } from '../context.js';
 import { sourceCandidate } from './languages.js';
 import { checkCatalog } from './toolchains.js';
+import { loadTaskCheckpoints,saveTaskCheckpoint,deleteTaskCheckpoint,type TaskCheckpointEvent } from './task-checkpoints.js';
 interface Verification {
     fingerprint: string;
     passed: boolean;
@@ -30,11 +31,41 @@ interface Session {
     verification?: Verification;
     touchedAt: number;
     busy: boolean;
+    restored?: boolean;
+    persistent?: boolean;
+    events?: {at:number;type:TaskCheckpointEvent}[];
 }
 const sessions = new Map<string, Session>();
+let historyLoaded=false;
+async function loadSavedSessions():Promise<void>{
+    if(historyLoaded)return;
+    historyLoaded=true;
+    for(const c of await loadTaskCheckpoints()){
+        if(sessions.size>=8)break;
+        // Previous verification is not trusted after a restart. The source,
+        // toolchain and project state must be revalidated on the current PC.
+        sessions.set(c.id,{
+            id:c.id,root:c.root,goal:c.goal,scope:c.scope,
+            requiredChecks:c.requiredChecks,baseline:new Map(c.baseline),
+            state:c.state==='finished'?'finished':'active',verification:undefined,
+            touchedAt:Date.now(),busy:false,restored:true,persistent:true,
+            events:[...c.events.slice(-31),{at:Date.now(),type:'resumed'}]
+        });
+    }
+}
+async function checkpointSession(s:Session,event?:TaskCheckpointEvent):Promise<boolean>{
+    if(event)s.events=[...(s.events??[]).slice(-31),{at:Date.now(),type:event}];
+    const ok=await saveTaskCheckpoint({
+        version:1,id:s.id,root:s.root,goal:s.goal.slice(0,2048),scope:s.scope,
+        requiredChecks:s.requiredChecks,baseline:[...s.baseline.entries()],
+        state:s.state,touchedAt:Date.now(),events:s.events??[]
+    });
+    s.persistent=ok;
+    return ok;
+}
 const SOURCE = /\.(?:[cm]?[jt]sx?|jsonc?|mdx?|ya?ml|toml|css|s[ac]ss|html|vue|svelte|py|rs|go|java|cs|c|cc|cpp|h|hpp|php|rb|sql|graphql|sh|ps1|cmd|bat|xml|ini|conf|lock)$/i;
 export async function sourceFingerprint(root: string) {
-    const listed = await listProjectFiles(root, 15000);
+    const listed = await listProjectFiles(root, 15000, {fresh:true});
     if (listed.truncated)
         throw new AgentError('VERIFICATION_SCOPE_TOO_LARGE', 'Too many paths for reliable verification. Use a narrower project root.');
     const files = listed.files.filter(sourceCandidate);
@@ -76,6 +107,7 @@ function changes(s: Session, now: Map<string, string>) {
 }
 export async function runProjectChecks(root: string, names: string[], execute: boolean, sessionId?: string) {
     root = await rootPath(root);
+    if(sessionId)await loadSavedSessions();
     const session = sessionId ? getSession(sessionId) : undefined;
     if (session && session.root !== root)
         throw new AgentError('SESSION_ROOT_MISMATCH', 'Verification must use the same project root as the session.');
@@ -108,6 +140,7 @@ export async function runProjectChecks(root: string, names: string[], execute: b
         if (session) {
             session.verification = { fingerprint: after.fingerprint, passed, checks: names, steps, at: Date.now() };
             session.state = passed ? 'verified' : 'active';
+            await checkpointSession(session,passed?'verification_passed':'verification_failed');
         }
         const firstFailure = steps.find(s => !s.passed);
         const checkError = passed ? undefined : {
@@ -134,7 +167,8 @@ export async function codingSession(a: {
     scope?: string[];
     requiredChecks?: string[];
 }) {
-    // Evict only idle state; never persist a task transcript or progress log.
+    // Restore only metadata and file hashes; no model transcript is saved.
+    await loadSavedSessions();
     for (const [id, s] of sessions)
         if (!s.busy && Date.now() - s.touchedAt > 2 * 3600000)
             sessions.delete(id);
@@ -160,7 +194,8 @@ export async function codingSession(a: {
         const snap = await sourceFingerprint(root);
         const session: Session = { id: randomUUID(), root, goal: a.goal, scope, requiredChecks: required, baseline: snap.hashes, state: 'active', touchedAt: Date.now(), busy: false };
         sessions.set(session.id, session);
-        return { sessionId: session.id, state: session.state, goal: session.goal, scope, requiredChecks: required, context: await gatherContext(root), coverage: snap.coverage, persistent: false, note: 'Scope is checked at finish. This is workflow enforcement, not an OS sandbox; raw shell tools retain their existing authority.' };
+        const persisted=await checkpointSession(session,'started');
+        return { sessionId: session.id, state: session.state, goal: session.goal, scope, requiredChecks: required, context: await gatherContext(root), coverage: snap.coverage, persistent: persisted, note: 'Metadata-only restart checkpoint (when enabled). Scope is checked at finish; this is workflow enforcement, not an OS sandbox. No model conversation or source contents are stored.' };
     }
     if (!a.sessionId)
         throw new AgentError('INVALID_ARGUMENT', 'sessionId is required.');
@@ -169,6 +204,7 @@ export async function codingSession(a: {
         if (s.busy)
             throw new AgentError('SESSION_BUSY', 'Cancel the running verification first.');
         sessions.delete(s.id);
+        await deleteTaskCheckpoint(s.id);
         return { sessionId: s.id, abandoned: true, persistent: false };
     }
     if (a.action === 'verify')
@@ -185,8 +221,9 @@ export async function codingSession(a: {
         if (changed.some(c => !c.inScope))
             throw new AgentError('SCOPE_VIOLATION', 'Changes outside the agreed scope were detected. Review them before starting a correctly scoped session; nothing was reverted.');
         s.state = 'finished';
+        await checkpointSession(s,'finished');
     }
-    return { sessionId: s.id, root: s.root, goal: s.goal, state: s.state, scope: s.scope, requiredChecks: s.requiredChecks, verifiedCurrentSource: verified, verification: s.verification, changes: changed.slice(0, 200), changesTruncated: changed.length > 200, persistent: false, coverage: current.coverage };
+    return { sessionId: s.id, root: s.root, goal: s.goal, state: s.state, scope: s.scope, requiredChecks: s.requiredChecks, restoredUnverified:!!s.restored && !s.verification, verifiedCurrentSource: verified, verification: s.verification, changes: changed.slice(0, 200), changesTruncated: changed.length > 200, persistent:!!s.persistent, coverage: current.coverage };
 }
 export function pruneHarnessSessions(now=Date.now()){for(const [id,s]of sessions)if(!s.busy&&now-s.touchedAt>2*3600000)sessions.delete(id);}
 export function clearHarnessSessions() { sessions.clear(); }

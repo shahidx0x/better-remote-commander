@@ -7,6 +7,7 @@ import { parseCode, type ParsedCode } from './code-structure.js';
 import { sourceCandidate, languageFor } from './languages.js';
 import { AgentError } from './errors.js';
 import { checkCancelled } from '../context.js';
+import {sharedProjectManifest} from './project-manifest.js';
 type Import = ParsedCode['imports'][number];
 export interface GraphNode {
     file: string;
@@ -69,7 +70,7 @@ const stamp = (s: import('node:fs').Stats) => `${s.size}:${s.mtimeMs}:${s.ctimeM
 const graphKey = (root: string) => process.platform === 'win32' ? root.toLowerCase() : root;
 export class CodeGraph {
     private projects = new Map<string, Graph>();
-    invalidate(file?: string) { for (const g of this.projects.values())
+    invalidate(file?: string) {sharedProjectManifest.invalidate(file);for (const g of this.projects.values())
         if (!file || inside(g.root, file)) {
             g.dirty = true;
             g.version++;
@@ -93,7 +94,7 @@ export class CodeGraph {
             const target = g;
             try {
                 g.watcher = watch(root, { recursive: true, persistent: false }, (_event, name) => { if (name && slash(String(name)).split('/').some(p => IGNORED_DIRS.includes(p)))
-                    return; target.dirty = true; target.version++; });
+                    return; target.dirty = true; target.version++; sharedProjectManifest.invalidate(root); });
                 g.watcher.on('error', () => { g!.watcher?.close(); g!.watcher = undefined; g!.dirty = true; });
             }
             catch { /* Enumerate on each query when watching is unavailable. */ }
@@ -102,14 +103,26 @@ export class CodeGraph {
         if (g.building)
             await g.building;
         const entry = g;
-        entry.building = this.build(entry, Math.min((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 160 : 1500, Math.max(1, maxFiles)), focus, force).finally(() => { entry.building = undefined; });
+        const requestedLimit=Math.min((process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 160 : 1500, Math.max(1,maxFiles));
+        const focused=focus?slash(path.relative(entry.root,await projectPath(entry.root,focus))):undefined;
+        // Skip even the stat/parse pass for clean watched graphs. A full
+        // refresh still occurs on invalidation or after the integrity TTL.
+        if(!force && !entry.dirty && !!entry.watcher && Date.now()-entry.listedAt<30_000
+          && entry.nodes.size>=Math.min(requestedLimit,entry.files.length)
+          && (!focused || entry.nodes.has(focused))){
+            entry.hits=entry.nodes.size;
+            entry.misses=0;
+            entry.durationMs=0;
+            return entry;
+          }
+        entry.building = this.build(entry,requestedLimit,focus,force).finally(() => { entry.building = undefined; });
         await entry.building;
         return entry;
     }
     private async build(g: Graph, maxFiles: number, focus: string | undefined, force: boolean) {
         const started = Date.now(), version = g.version;
         if (force || g.dirty || !g.watcher || Date.now() - g.listedAt > 5000) {
-            const list = await listProjectFiles(g.root, (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 8000 : 15000);
+            const list = await listProjectFiles(g.root, (process.env.BRC_RESOURCE_PROFILE === 'responsive' || process.env.BRC_LOW_RESOURCE_MODE === '1') ? 8000 : 15000,{fresh:force || g.dirty || g.listedAt===0});
             g.files = list.files.filter(sourceCandidate);
             g.enumerationTruncated = list.truncated;
             g.listedAt = Date.now();
@@ -355,11 +368,13 @@ export class CodeGraph {
             let frontier = [name];
             for (let d = 0; d < depth; d++) {
                 const next: string[] = [];
+                // Avoid repeated linear frontier scans for every graph edge.
+                const frontierSet=new Set(frontier);
                 for (const edge of g.edges) {
                     let n: string | undefined;
-                    if (direction !== 'importers' && frontier.includes(edge.from))
+                    if (direction !== 'importers' && frontierSet.has(edge.from))
                         n = edge.to;
-                    if (direction !== 'dependencies' && frontier.includes(edge.to))
+                    if (direction !== 'dependencies' && frontierSet.has(edge.to))
                         n = edge.from;
                     if (n && !visited.has(n) && visited.size < limit) {
                         visited.add(n);

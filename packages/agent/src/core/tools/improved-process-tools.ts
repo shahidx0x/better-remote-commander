@@ -8,6 +8,7 @@ import * as os from 'os';
 import { configManager } from '../config-manager.js';
 import { selectRunCommandShell } from '../../tools/command-shell.js';
 import { spawn } from 'child_process';
+import {spawnManaged} from '../../runtime/managed-spawn.js';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -32,7 +33,7 @@ async function executeNodeCode(code: string, timeout_ms: number = 30000): Promis
     await fs.writeFile(tempFile, code, 'utf8');
 
     const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
-      const proc = spawn(process.execPath, [tempFile], {
+      const proc = spawnManaged(process.execPath, [tempFile], {
         cwd: mcpRoot,
         timeout: timeout_ms,
         windowsHide: true  // Prevent visible console windows on Windows
@@ -48,8 +49,8 @@ async function executeNodeCode(code: string, timeout_ms: number = 30000): Promis
         omitted += next.length-take;
         return take ? prior+next.slice(0,take) : prior;
       };
-      proc.stdout.on('data', data => { stdout = collect(stdout,data.toString()); });
-      proc.stderr.on('data', data => { stderr = collect(stderr,data.toString()); });
+      proc.stdout!.on('data', data => { stdout = collect(stdout,data.toString()); });
+      proc.stderr!.on('data', data => { stderr = collect(stderr,data.toString()); });
 
       proc.on('close', (exitCode) => {
         const trunc = omitted ? '\n[OUTPUT TRUNCATED: '+omitted+' characters omitted; redirect full output to a file when needed.]' : '';

@@ -72,7 +72,9 @@ test('replacement counts use actual non-overlapping matches',async()=>{
  assert.equal(await fs.readFile(p,'utf8'),'bb');
 });
 
-test('stale hash rebases only when an exact, unique, sufficiently specific anchor remains',async()=>{
+test('legacy stale hash rebases only when explicitly requested; the new default rejects it',async()=>{
+ process.env.BRC_REQUIRE_SOURCE_HASH='0';
+ try{
  const p=file('safe-rebase.ts');
  const original='export const importantLabel = "before";\nexport const unrelated = 1;\n';
  const revised='export const importantLabel = "before";\nexport const unrelated = 2;\n';
@@ -87,6 +89,7 @@ test('stale hash rebases only when an exact, unique, sufficiently specific ancho
  assert.equal(r.structuredContent?.autoRebasedFromStaleHash,true);
  assert.equal(await fs.readFile(p,'utf8'),
    'export const importantLabel = "after";\nexport const unrelated = 2;\n');
+ }finally{delete process.env.BRC_REQUIRE_SOURCE_HASH;}
 });
 
 test('ambiguous stale anchors keep FILE_CONFLICT and leave new content unchanged',async()=>{

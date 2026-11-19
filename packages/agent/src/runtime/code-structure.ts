@@ -3,7 +3,8 @@ import type ts from 'typescript';
 import path from 'node:path';
 import { textFile } from './workspace.js';
 import { AgentError } from './errors.js';
-import { checkCancelled } from '../context.js';
+import { checkCancelled, getCallContext } from '../context.js';
+import {commandCpuAdmission} from './resource-admission.js';
 import { languageFor } from './languages.js';
 import { parseInWorker, closeParserWorkers, parserStatus } from './parser-pool.js';
 import { genericStructure } from './generic-code.js';
@@ -89,6 +90,11 @@ export async function parseSource(file: string, text: string, hash = ''): Promis
         checkCancelled();
         return { path: file, sha256: hash, text, language: spec.id, provider: spec.engine, syntaxSupported: spec.engine !== 'generic', ...data };
     }
+    // TypeScript AST parsing runs on the agent event loop, unlike Tree-sitter.
+    // Coordinate its CPU-heavy section with toolchain commands when enabled.
+    const releaseCpu=await commandCpuAdmission.acquire(getCallContext()?.signal,8000);
+    try{
+    checkCancelled();
     const ts = await import('typescript');
     const lower = file.toLowerCase();
     const kind = lower.endsWith('.tsx') ? ts.ScriptKind.TSX : lower.endsWith('.jsx') ? ts.ScriptKind.JSX : /\.[cm]?js$/.test(lower) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
@@ -158,6 +164,7 @@ export async function parseSource(file: string, text: string, hash = ''): Promis
     const diagnostics = raw.slice(0, 100).map(d => { const pos = sf.getLineAndCharacterOfPosition(d.start ?? 0); return { code: d.code, line: pos.line + 1, column: pos.character + 1, message: ts.flattenDiagnosticMessageText(d.messageText, ' ').slice(0, 2000), category: ts.DiagnosticCategory[d.category] }; });
     const imports = ts.preProcessFile(text, true, true).importedFiles.slice(0, 200).map(i => ({ specifier: i.fileName, line: sf.getLineAndCharacterOfPosition(i.pos).line + 1 }));
     return { path: file, sha256: hash, text, symbols, imports, diagnostics, truncated: truncated || raw.length > 100, language: spec.id, provider: 'typescript', syntaxSupported: true, provides: [] };
+    }finally{releaseCpu();}
 }
 export function selectSymbol(parsed: ParsedCode, name: string, line?: number): CodeSymbol {
     const choices = parsed.symbols.filter(s => (s.name === name || s.qualifiedName === name) && (line === undefined || s.line === line));
