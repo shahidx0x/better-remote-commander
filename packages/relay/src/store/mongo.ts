@@ -11,6 +11,7 @@ import type { RelayStore } from './types.js';
 import { MAX_PENDING_PLUGIN_REQUESTS, type PluginRequestStatus, type PluginRequestRow } from './sqlite.js';
 import type { UsageRecord, UsageDay, McpEstimateDelta, McpEstimateDay } from '../features/usage.js';
 import type { SkillRow, SkillRequest } from '../features/skills.js';
+import { MAX_OPERATION_ROWS_PER_USER, MAX_OPERATION_STORED_BYTES, type OperationRow, type OperationUpdate } from './operation-record.js';
 
 export class MongoStore implements RelayStore {
   readonly auditRetentionMs = 0;
@@ -64,6 +65,8 @@ export class MongoStore implements RelayStore {
       this.col('mcp_estimate_daily').createIndex({ expire_on: 1 }, { expireAfterSeconds: 0 }),
       this.col('skills').createIndex({ user_id: 1, name: 1 }),
       this.col('skill_requests').createIndex({ user_id: 1, skill_id: 1 }, { unique: true }),
+      this.col('durable_operations').createIndex({ user_id:1,client_id:1,created_at:-1 }),
+      this.col('durable_operations').createIndex({ expire_on:1 }, { expireAfterSeconds:0 }),
     ];
     // TTL indexes remove expired records without a background relay database process.
     for (const name of ['auth_codes', 'device_codes', 'connection_links', 'tokens']) {
@@ -79,6 +82,50 @@ export class MongoStore implements RelayStore {
   }
   private static expire(expires: number, extraMs = 0): Date {
     return new Date(expires + extraMs);
+  }
+
+  /* ---------- durable operation receipts ---------- */
+  async claimOperation(row:OperationRow):Promise<boolean>{
+    if(await this.getOperation(row.id))return false;
+    const count=await this.col('durable_operations').countDocuments({user_id:row.user_id,expires_at:{$gt:Date.now()}});
+    if(count>=MAX_OPERATION_ROWS_PER_USER)throw new Error('RECOVERY_CAPACITY');
+    try{
+      await this.col('durable_operations').insertOne({ _id:row.id,...row,expire_on:new Date(row.expires_at) },
+        {writeConcern:{j:true}});
+      return true;
+    }catch(error){
+      if((error as {code?:unknown})?.code===11000)return false;
+      throw error;
+    }
+  }
+  async getOperation(id:string):Promise<OperationRow|undefined>{
+    return MongoStore.row<OperationRow>(await this.col('durable_operations').findOne({_id:id,expires_at:{$gt:Date.now()}}));
+  }
+  async recentOperations(userId:string,clientId:string,limit:number):Promise<OperationRow[]>{
+    return (await this.col('durable_operations').find({user_id:userId,client_id:clientId,expires_at:{$gt:Date.now()}})
+      .sort({created_at:-1}).limit(Math.max(1,Math.min(20,limit))).toArray()).map(r=>MongoStore.row<OperationRow>(r)!);
+  }
+  async settleOperation(id:string,update:OperationUpdate):Promise<void>{
+    let payload=update.encrypted_result;
+    if(payload!==null){
+      const rows=await this.col('durable_operations').aggregate<{bytes:number}>([
+        {$match:{encrypted_result:{$type:'string'},expires_at:{$gt:Date.now()}}},
+        {$group:{_id:null,bytes:{$sum:{$strLenBytes:'$encrypted_result'}}}}
+      ]).toArray();
+      const existing=await this.getOperation(id);
+      const total=rows[0]?.bytes??0;
+      const previous=existing?.encrypted_result?Buffer.byteLength(existing.encrypted_result,'utf8'):0;
+      if(Buffer.byteLength(payload,'utf8')+total-previous>MAX_OPERATION_STORED_BYTES)payload=null;
+    }
+    await this.col('durable_operations').updateOne({_id:id,state:{$ne:'settled'}},{$set:{
+      state:update.state,updated_at:update.updated_at,encrypted_result:payload,
+      result_bytes:update.result_bytes,
+      result_sha256:update.result_sha256,
+      result_is_error:update.result_is_error,error_code:update.error_code
+    }},{writeConcern:{j:true}});
+  }
+  async pruneOperations(now=Date.now()):Promise<number>{
+    return (await this.col('durable_operations').deleteMany({expires_at:{$lte:now}})).deletedCount;
   }
 
   /* ---------- users ---------- */

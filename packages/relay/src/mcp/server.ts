@@ -16,11 +16,13 @@ import { handlePluginRelayTool, PLUGIN_RELAY_TOOLS } from './plugin-tools.js';
 import type { RegistryClient } from '../plugins/registry.js';
 import { SKILL_RELAY_TOOLS, handleSkillRelayTool } from './skill-tools.js';
 import type { SkillsCatalog } from '../features/skills.js';
+import { OperationJournal, RecoveryError } from './operation-journal.js';
 
 export type McpContext = InvokeContext;
 
 export const DEVICE_ID_PROP = {
   deviceId: { type: 'string', description: 'Target device id (from list_devices). Required when more than one device is online; may be omitted when only one device is connected.' },
+  operationId: {type:'string',pattern:'^[0-9a-fA-F-]{36}$',description:'Optional stable UUID idempotency key. Reusing the SAME key with the same arguments retrieves the prior result/status without re-execution. Never reuse for distinct requests.'},
 };
 
 export function withDeviceId(schema: unknown): Record<string, unknown> {
@@ -38,7 +40,7 @@ const READ_ONLY_TOOLS = new Set([
   'find_symbols', 'find_references', 'related_files', 'code_diagnostics',
   'project_context', 'project_map', 'context_pack', 'language_capabilities',
   'vscode_tasks', 'git_status', 'git_diff', 'git_log', 'test_impact',
-  'docker_inventory', 'docker_inspect', 'read_images', 'agent_status',
+  'docker_inventory', 'docker_inspect', 'read_images', 'agent_status', 'recover_operation',
   'discover_checks', 'review_changes', 'session_handoff',
   'batch_tools', // Read-only clients may batch, but every nested tool is validated below.
 ]);
@@ -58,6 +60,17 @@ export function readOnlyToolAllowed(name: string, args: unknown): boolean {
       && (child.arguments === undefined || (!!child.arguments && typeof child.arguments === 'object' && !Array.isArray(child.arguments)));
   });
 }
+
+export const RECOVER_OPERATION_TOOL = {
+ name:'recover_operation',
+ description:'READ ONLY. Recover a previous durable relay operation result or status without rerunning the command. Pass operationId, or omit it to list recent operations for this OAuth client. Supports byte-offset paging of encrypted, authorized results. Unknown/uncertain work must never be automatically retried.',
+ inputSchema:{type:'object',additionalProperties:false,properties:{
+  operationId:{type:'string',pattern:'^[0-9a-fA-F-]{36}$'},
+  includeResult:{type:'boolean',default:true},
+  offset:{type:'integer',minimum:0,maximum:524288,default:0},
+  limit:{type:'integer',minimum:1,maximum:16384}
+ }},annotations:{readOnlyHint:true,title:'Recover operation'}
+};
 
 export const LIST_DEVICES_TOOL = {
   name: 'list_devices',
@@ -208,7 +221,7 @@ export const CORE_TOOL_ROUTING_GUIDANCE = [
   'Access controls and user approval are enforced separately from discovery. Do not fabricate file content, completion, tests, extra tools or successful edits.'
 ].join(' ');
 
-export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full', plugins?: { registry: RegistryClient; publicUrl: string; skills?: SkillsCatalog },
+export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full', plugins?: { registry: RegistryClient; publicUrl: string; skills?: SkillsCatalog; journal?: OperationJournal },
   onToolTraffic?: (userId:string,tool:string,args:unknown,result:unknown)=>void): Server {
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} },
     instructions: (mcpToolProfile()==='core' ? CORE_TOOL_ROUTING_GUIDANCE : TOOL_ROUTING_GUIDANCE) +
@@ -219,7 +232,7 @@ export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpConte
     const selected = access === 'read' ? tools.filter(t => READ_ONLY_TOOLS.has(t.name)).map(t =>
       t.name === 'batch_tools' ? { ...t, description: 'READ-ONLY BATCH: all nested tools must be permitted reads. ' + t.description,
         annotations: { ...t.annotations, readOnlyHint: true, destructiveHint: false } } : t) : tools;
-    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.` }, ...(plugins ? PLUGIN_RELAY_TOOLS.filter(t => access !== 'read' || t.name === 'search_mcp_registry') : []), ...(plugins?.skills ? SKILL_RELAY_TOOLS.filter(t => access !== 'read' || t.name !== 'request_skill_install') : []), ...selected] };
+    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${online} device(s) currently online.` }, ...(plugins?.journal?[RECOVER_OPERATION_TOOL]:[]), ...(plugins ? PLUGIN_RELAY_TOOLS.filter(t => access !== 'read' || t.name === 'search_mcp_registry') : []), ...(plugins?.skills ? SKILL_RELAY_TOOLS.filter(t => access !== 'read' || t.name !== 'request_skill_install') : []), ...selected] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
@@ -227,6 +240,16 @@ export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpConte
     const execute = async () => {
     if (name === 'list_devices') {
       return { content: [{ type: 'text', text: JSON.stringify({ ...await connectionStatus(hub, store, ctx.userId), relayInstance: hub.instanceId }, null, 2) }] };
+    }
+    if(name==='recover_operation'&&plugins?.journal){
+      try{
+        const recovered=await plugins.journal.recovery(ctx,(args??{}) as Record<string,unknown>);
+        return {content:[{type:'text',text:JSON.stringify(recovered)}],structuredContent:recovered};
+      }catch(error){
+        const e=error instanceof RecoveryError?error:new RecoveryError('RECOVERY_UNAVAILABLE','Operation recovery storage is unavailable.');
+        return {content:[{type:'text',text:e.code+': '+e.message}],isError:true,
+          structuredContent:{error:{code:e.code,message:e.message,retryable:false}}};
+      }
     }
     // Defense in depth: hiding a write tool from tools/list is not enough.
     if (access === 'read' && !readOnlyToolAllowed(name, args))
@@ -239,8 +262,10 @@ export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpConte
       const pluginResult = await handlePluginRelayTool({ hub, store, registry: plugins.registry, publicUrl: plugins.publicUrl }, ctx, name, args as Record<string, unknown> | undefined);
       if (pluginResult) return pluginResult;
     }
-    const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined, {signal:extra.signal});
-    if (!out.ok) return { content: [{ type: 'text', text: out.message }], isError: true };
+    const out = await invokeTool(hub, store, ctx, name, args as Record<string, unknown> | undefined, {signal:extra.signal,journal:plugins?.journal,readOnly:readOnlyToolAllowed(name,args)});
+    if (!out.ok) return { content: [{ type: 'text', text: out.message }], isError: true,
+      ...(out.operationId?{structuredContent:{operationId:out.operationId,
+        recovery:{tool:'recover_operation',args:{operationId:out.operationId}},automaticReplay:false}}:{}) };
     return { ...out.result, isError: out.result.isError ?? false, _meta: { ...out.result._meta, deviceId: out.deviceId, deviceName: out.deviceName, relayDurationMs: out.ms } } as never;
     };
     let result: Awaited<ReturnType<typeof execute>>;

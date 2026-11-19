@@ -8,6 +8,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { UsageRecord, UsageDay, McpEstimateDelta, McpEstimateDay } from '../features/usage.js';
 import type { SkillRow, SkillRequest } from '../features/skills.js';
+import { MAX_OPERATION_ROWS_PER_USER, MAX_OPERATION_STORED_BYTES, type OperationRow, type OperationUpdate } from './operation-record.js';
 
 export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 export const randomToken = (bytes = 32) => randomBytes(bytes).toString('base64url');
@@ -47,6 +48,19 @@ CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts);
 
 /* Plugins: AI install requests awaiting owner approval, and last-known plugin lists per device.
    Neither table ever holds env values or header values (secrets go straight to the agent). */
+const OPERATION_SCHEMA = `
+CREATE TABLE IF NOT EXISTS durable_operations (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL, client_id TEXT NOT NULL,
+ device_id TEXT NOT NULL, tool TEXT NOT NULL, args_hash TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('claimed','settled','uncertain')),
+ created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+ encrypted_result TEXT, result_bytes INTEGER NOT NULL DEFAULT 0,
+ result_sha256 TEXT, result_is_error INTEGER, error_code TEXT
+);
+CREATE INDEX IF NOT EXISTS durable_operations_owner ON durable_operations(user_id,client_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS durable_operations_expiry ON durable_operations(expires_at);
+`;
+
 const PLUGIN_SCHEMA = `
 CREATE TABLE IF NOT EXISTS plugin_requests (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, device_id TEXT, client TEXT, registry_name TEXT, custom_type TEXT, custom_spec TEXT, plugin_id TEXT, reason TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, decided_at INTEGER, result TEXT);
 CREATE INDEX IF NOT EXISTS plugin_requests_user ON plugin_requests(user_id, status);
@@ -100,16 +114,50 @@ export class SqliteStore {
   constructor(file: string) {
     if (file !== ':memory:') mkdirSync(path.dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA busy_timeout = 1000;');
+    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA busy_timeout = 1000;');
     this.db.exec(SCHEMA);
     this.db.exec(PLUGIN_SCHEMA);
     this.db.exec(FEATURE_SCHEMA);
+    this.db.exec(OPERATION_SCHEMA);
     // Additive schema migration: preserves previously aggregated token history.
     const cols = new Set((this.db.prepare('PRAGMA table_info(mcp_estimate_daily)').all() as {name:string}[]).map(c=>c.name));
     for (const name of ['to_agent_bytes','from_agent_bytes','matched_calls','universal_calls']) {
       if (!cols.has(name)) this.db.exec('ALTER TABLE mcp_estimate_daily ADD COLUMN '+name+' INTEGER NOT NULL DEFAULT 0');
     }
     this.pruneAudit();
+  }
+
+  /* ---------- durable operation receipts ---------- */
+  claimOperation(row:OperationRow):boolean{
+    if(this.getOperation(row.id))return false;
+    const count=this.statement('SELECT COUNT(*) AS n FROM durable_operations WHERE user_id=? AND expires_at>?')
+      .get(row.user_id,Date.now()) as {n:number};
+    if(count.n>=MAX_OPERATION_ROWS_PER_USER)throw new Error('RECOVERY_CAPACITY');
+    return this.statement('INSERT OR IGNORE INTO durable_operations (id,user_id,client_id,device_id,tool,args_hash,state,created_at,updated_at,expires_at,encrypted_result,result_bytes,result_sha256,result_is_error,error_code) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(row.id,row.user_id,row.client_id,row.device_id,row.tool,row.args_hash,row.state,row.created_at,row.updated_at,row.expires_at,null,0,null,null,null).changes===1;
+  }
+  getOperation(id:string):OperationRow|undefined{
+    return this.statement('SELECT * FROM durable_operations WHERE id=? AND expires_at>?')
+      .get(id,Date.now()) as unknown as OperationRow|undefined;
+  }
+  recentOperations(userId:string,clientId:string,limit:number):OperationRow[]{
+    return this.statement('SELECT * FROM durable_operations WHERE user_id=? AND client_id=? AND expires_at>? ORDER BY created_at DESC LIMIT ?')
+      .all(userId,clientId,Date.now(),Math.max(1,Math.min(20,limit))) as unknown as OperationRow[];
+  }
+  settleOperation(id:string,update:OperationUpdate):void{
+    let payload=update.encrypted_result;
+    if(payload!==null){
+      const amount=Buffer.byteLength(payload,'utf8');
+      const previous=this.statement('SELECT COALESCE(LENGTH(encrypted_result),0) AS size FROM durable_operations WHERE id=?').get(id) as {size:number}|undefined;
+      const total=this.statement('SELECT COALESCE(SUM(LENGTH(encrypted_result)),0) AS size FROM durable_operations').get() as {size:number};
+      if(amount>MAX_OPERATION_STORED_BYTES || total.size-(previous?.size??0)+amount>MAX_OPERATION_STORED_BYTES)payload=null;
+    }
+    this.statement("UPDATE durable_operations SET state=?,updated_at=?,encrypted_result=?,result_bytes=?,result_sha256=?,result_is_error=?,error_code=? WHERE id=? AND state!='settled'")
+      .run(update.state,update.updated_at,payload,update.result_bytes,
+        update.result_sha256,update.result_is_error,update.error_code,id);
+  }
+  pruneOperations(now=Date.now()):number{
+    return Number(this.statement('DELETE FROM durable_operations WHERE expires_at<=?').run(now).changes);
   }
 
   /* ---------- users ---------- */
@@ -264,6 +312,7 @@ export class SqliteStore {
   /** Housekeeping: drop expired codes/tokens. */
   vacuumExpired(): void {
     const now = Date.now();
+    this.pruneOperations(now);
     this.pruneAudit(now);
     this.statement('DELETE FROM model_usage WHERE day < ?').run(new Date(now - 400*86_400_000).toISOString().slice(0,10));
     this.statement('DELETE FROM mcp_estimate_daily WHERE day < ?').run(new Date(now - 400*86_400_000).toISOString().slice(0,10));

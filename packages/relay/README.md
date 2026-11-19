@@ -7,6 +7,7 @@ Doors it exposes:
 - `/mcp` — remote MCP (Streamable HTTP) with OAuth 2.0 (PKCE, dynamic client registration) or API-key bearer auth
 - `/admin`, `/device/verify`, `/auth/clients`, `/auth/apikeys` — browser dashboard: pair / pause / remove devices, OAuth clients, API keys, audit log
 - `/ws` — agent WebSocket (agents connect outbound; nothing to open on their side)
+- `recover_operation` — read-only MCP recovery of durably journaled operation outcomes and encrypted bounded results (same OAuth client, no replay). See [durable recovery](../../docs/durable-operation-recovery.md).
 
 ## Install & run
 
@@ -31,7 +32,9 @@ Recommended Easypanel settings are **Build Path `/`** with **Dockerfile `package
 | `PORT`, `HOST` | listen address (default 3000 / 0.0.0.0) |
 | `TRUST_PROXY` | `true` behind a proxy/tunnel |
 | `BRC_ADMIN_USER`, `BRC_ADMIN_PASSWORD` | dashboard login (single-user) |
-| `BRC_SESSION_SECRET` | cookie signing secret |
+| `BRC_SESSION_SECRET` | Stable random 32+ character secret for signed cookies and default durable-result encryption; preserve across redeploys |
+| `BRC_DURABLE_RESULT_PAYLOADS` | Optional `0` disables encrypted result bodies while keeping pre-dispatch metadata receipts. Enabled by default when the stable secret is strong. |
+| `BRC_RECOVERY_ENCRYPTION_KEY` | Optional separate stable 32+ character encryption secret; not required with an existing strong `BRC_SESSION_SECRET`. |
 | `BRC_DB` | SQLite file (default `data/relay.sqlite`); used only when `MONGODB_URI` is absent |
 | `MONGODB_URI` | **Optional** MongoDB connection string; when supplied, MongoDB is the sole persistent backend, no SQLite fallback |
 | `MONGODB_DB` | Optional dedicated database name override (otherwise uses the database from the URI, or `brc_relay` if no database is specified) |
@@ -41,7 +44,10 @@ Recommended Easypanel settings are **Build Path `/`** with **Dockerfile `package
 Use **either** SQLite **or** MongoDB. No second SQLite database or MongoDB cache is created
 when MongoDB is selected. All persistent BRC accounts, OAuth clients/codes, access
 and refresh tokens, device pairings, API keys, and private connection links are
-stored natively in MongoDB. Recent tool activity and CMD logs remain RAM-only.
+stored natively in MongoDB. Recent tool activity and CMD logs remain RAM-only. A separate bounded durable
+operation journal records pre-dispatch claims and, when a strong stable encryption
+secret is configured, encrypted recovery payloads. This is not a full plaintext
+command transcript or automatic command replay.
 
 In **Easypanel -> better-remote -> Environment**, keep your existing
 PUBLIC_URL, PORT, BRC_ADMIN_USER, BRC_ADMIN_PASSWORD, BRC_SESSION_SECRET and

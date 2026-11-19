@@ -165,7 +165,7 @@ export class DeviceHub {
   }
 
   /** Route a tool call to a device. Throws if offline or timed out. */
-  call(deviceId: string, tool: string, args: Record<string, unknown>, opts: { client?: { name?: string; version?: string }; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ToolResult> {
+  call(deviceId: string, tool: string, args: Record<string, unknown>, opts: { client?: { name?: string; version?: string }; timeoutMs?: number; signal?: AbortSignal; callId?: string } = {}): Promise<ToolResult> {
     const dev = this.devices.get(deviceId);
     if (!dev) return Promise.reject(new Error(`DEVICE_OFFLINE: ${deviceId}`));
     if (!dev.tools.some((t) => t.name === tool)) return Promise.reject(new Error(`UNKNOWN_TOOL: ${tool}`));
@@ -176,7 +176,10 @@ export class DeviceHub {
     if(dev.socket.bufferedAmount>8*1024*1024)return Promise.reject(new Error('RELAY_BACKPRESSURE: outbound device buffer is full; request was not dispatched'));
     if(Buffer.byteLength(JSON.stringify(args))>16*1024*1024)return Promise.reject(new Error('CALL_TOO_LARGE: split the operation into smaller bounded requests'));
 
-    const id = randomUUID();
+    // A relay-journaled call uses the SAME durable operation ID on the wire.
+    // The agent's own receipt can then be queried after a lost response.
+    const id = opts.callId ?? randomUUID();
+    if(this.pending.has(id))return Promise.reject(new Error('DUPLICATE_IN_FLIGHT: inspect durable operation status'));
     const timeoutMs = opts.timeoutMs ?? DEFAULTS.callTimeoutMs;
     return new Promise<ToolResult>((resolve, reject) => {
       const abort = () => {
@@ -234,6 +237,14 @@ export class DeviceHub {
   }
 
   get(deviceId: string): ConnectedDevice | undefined { return this.devices.get(deviceId); }
+
+  /** Best-effort notification only AFTER a durable result has been saved.
+   * A dropped ACK does not erase the relay journal, and an old agent ignores it. */
+  acknowledgeResult(deviceId:string,id:string,relayPersisted:boolean):boolean{
+    const device=this.devices.get(deviceId);
+    if(!device||!relayPersisted)return false;
+    return this.sendTo(device.socket,{type:'result_ack',id,relayPersisted:true,serverTime:Date.now()})>0;
+  }
 
   /** Single online device for an owner, or null when 0 or >1 (caller must ask for deviceId). */
   resolveDefault(ownerId?: string): string | null {

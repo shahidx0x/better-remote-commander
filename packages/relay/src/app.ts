@@ -39,6 +39,7 @@ import { SkillsCatalog } from './features/skills.js';
 import { registerSkillsRoutes } from './features/skills-routes.js';
 import { validateUsageReport, usageView, type UsagePeriod } from './features/usage.js';
 import { McpTrafficEstimator } from './features/mcp-estimates.js';
+import { OperationJournal } from './mcp/operation-journal.js';
 import { dashboardPage } from './pages/dashboard.js';
 
 export interface RelayConfig {
@@ -86,6 +87,9 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   catch (error) { await store.close(); throw error; }
   const sessions = new Sessions(cfg.sessionSecret, cfg.publicUrl.startsWith('https://'));
   const hub = new DeviceHub(cfg.relayVersion, log);
+  // Adds no new credentials or OAuth client IDs. Metadata is always durable;
+  // encrypted payload retention uses the existing stable session secret.
+  const operationJournal = new OperationJournal(store,cfg.sessionSecret);
   const registry = RegistryClient.fromEnv();
   const skills = new SkillsCatalog();
   const mcpEstimates = new McpTrafficEstimator(store, log);
@@ -237,7 +241,8 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
       catch { return res.status(503).json({ ok: false, storage: 'mongodb', error: 'database_unavailable' }); }
     }
     res.json({ ok: true, version: cfg.relayVersion, devices: hub.list().length, publicUrl: cfg.publicUrl,
-      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.filter(t=>exposeMcpAgentTool(t.name)).length + 1 + PLUGIN_RELAY_TOOLS.length + SKILL_RELAY_TOOLS.length,
+      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.filter(t=>exposeMcpAgentTool(t.name)).length + 2 + PLUGIN_RELAY_TOOLS.length + SKILL_RELAY_TOOLS.length,
+      operationRecovery:operationJournal.status(),
       mcpToolProfile: mcpToolProfile(),
       storage: cfg.mongoUri ? 'mongodb' : 'sqlite', relayInstance: hub.instanceId });
   });
@@ -381,7 +386,7 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
   const bearer = requireBearerAuth({ verifier: provider, requiredScopes: SCOPES, resourceMetadataUrl: `${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp` });
 
   const handleMcp = async (req: Request, res: Response, userId: string, clientId: string, access: 'read' | 'full' = 'full') => {
-    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access, { registry, publicUrl: cfg.publicUrl, skills },
+    const server = createMcpServer(hub, store, { userId, clientId }, cfg.relayVersion, access, { registry, publicUrl: cfg.publicUrl, skills, journal: operationJournal },
       (owner, tool, args, result) => mcpEstimates.track(owner,tool,args,result,
         typeof req.headers['x-brc-model'] === 'string' ? req.headers['x-brc-model'] : undefined));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

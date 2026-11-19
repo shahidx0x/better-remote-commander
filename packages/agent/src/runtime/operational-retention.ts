@@ -37,7 +37,7 @@ function policies():Policy[]{
  return [
   {name:'call-outcomes',records:/^[a-f0-9]{64}\.json$/,
    temp:/^[a-f0-9]{64}\.json\.\d+\.[a-f0-9]{8}\.tmp$/,
-   maxFiles:128,maxBytes:256*1024,ttlMs:7*DAY,
+   maxFiles:128,maxBytes:512*1024,ttlMs:7*DAY,
    protectedWriteMs:RECENT_WRITE_GRACE_MS,minRetained:0},
   {name:'mutation-receipts',records:/^[a-f0-9]{64}\.json$/,
    temp:/^[a-f0-9]{64}\.json\.\d+\.[a-f0-9]{8}\.tmp$/,

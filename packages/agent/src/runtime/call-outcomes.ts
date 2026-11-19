@@ -18,10 +18,16 @@ export type CallOutcome='started'|'returned_success'|'reported_failure'|'pending
 export interface CallOutcomeRecord{
  version:1;idHash:string;tool:string;startedAt:number;settledAt?:number;
  outcome:CallOutcome;durationMs?:number;errorCode?:string;
+ /** BRC-owned background jobs spawned by this call, not source/command/output data. */
+ jobIds?:string[];
+ /** Positive relay acknowledgement after its DB commit, not ChatGPT display. */
+ relayJournalConfirmed?:boolean;relayAcknowledgedAt?:number;
 }
-const FILES=128,RETAIN_MS=7*24*60*60_000,FILE_BYTES=1024,MAX_DISK_BYTES=256*1024;
+const FILES=128,RETAIN_MS=7*24*60*60_000,FILE_BYTES=4096,MAX_DISK_BYTES=512*1024;
 const HASH=/^[0-9a-f]{64}$/;
 const VALID_TOOL=/^[a-zA-Z0-9_-]{1,80}$/;
+const JOB_ID=/^j[a-z0-9]{7,64}$/;
+const MAX_JOB_LINKS=50;
 const folder=()=>path.join(homeDir(),'call-outcomes');
 const hash=(id:string)=>createHash('sha256').update(id).digest('hex');
 const recordPath=(hashed:string)=>{
@@ -38,7 +44,12 @@ const isValid=(r:unknown):r is CallOutcomeRecord=>{
   &&['started','returned_success','reported_failure','pending'].includes(String(a.outcome))
   &&(a.settledAt===undefined||(Number.isFinite(a.settledAt)&&a.settledAt>=a.startedAt))
   &&(a.durationMs===undefined||(Number.isFinite(a.durationMs)&&a.durationMs>=0&&a.durationMs<=86_400_000))
-  &&(a.errorCode===undefined||(typeof a.errorCode==='string'&&/^[A-Z0-9_]{1,64}$/.test(a.errorCode)));
+  &&(a.errorCode===undefined||(typeof a.errorCode==='string'&&/^[A-Z0-9_]{1,64}$/.test(a.errorCode)))
+  &&(a.jobIds===undefined||(Array.isArray(a.jobIds)&&a.jobIds.length<=MAX_JOB_LINKS
+     &&a.jobIds.every(id=>typeof id==='string'&&JOB_ID.test(id))
+     &&new Set(a.jobIds).size===a.jobIds.length))
+  &&(a.relayJournalConfirmed===undefined||typeof a.relayJournalConfirmed==='boolean')
+  &&(a.relayAcknowledgedAt===undefined||(Number.isFinite(a.relayAcknowledgedAt)&&a.relayAcknowledgedAt>=a.startedAt));
 };
 let lane:Promise<unknown>=Promise.resolve();
 let writes=0,failedWrites=0,prunes=0;
@@ -95,15 +106,56 @@ export async function settleCallOutcome(record:CallOutcomeRecord|null,
  const errorCode=typeof code==='string'?code.replace(/[^A-Z0-9_]/gi,'_').toUpperCase().slice(0,64):undefined;
  const outcome:CallOutcome=value?.isError?'reported_failure':
   value?.structuredContent?.pending===true?'pending':'returned_success';
- await write({...record,outcome,settledAt:Date.now(),
+ const rawIds=[value?.structuredContent?.jobId,
+   ...(Array.isArray(value?.structuredContent?.jobIds)?value.structuredContent.jobIds:[])];
+ const reportedJobIds=rawIds.filter((id):id is string=>typeof id==='string'&&JOB_ID.test(id));
+ // The job-link writer runs before dispatch; read its durable record before
+ // settling, otherwise a later failed response would erase the earlier link.
+ let linkedJobIds:string[]=[];
+ try{
+  const current:unknown=JSON.parse(await fs.readFile(recordPath(record.idHash),'utf8'));
+  if(isValid(current)&&current.idHash===record.idHash)linkedJobIds=current.jobIds??[];
+ }catch{/* The original call receipt still provides the best available state. */}
+ const jobIds=[...new Set([...linkedJobIds,...(record.jobIds??[]),...reportedJobIds])].slice(0,MAX_JOB_LINKS);
+ await write({...record,outcome,...(jobIds.length?{jobIds}:{}),settledAt:Date.now(),
   durationMs:Math.max(0,Math.min(86_400_000,Math.round(durationMs))),
   ...(errorCode?{errorCode}:{} )});
+}
+/** Persist job references before dispatch, so a lost MCP reply does not hide the job ID.
+ * Never persists command arguments or performs a retry. */
+export async function linkCallJobs(callId:string,jobIds:string[]):Promise<boolean>{
+ if(!callOutcomesEnabled()||typeof callId!=='string'||callId.length<8||callId.length>100||
+    !Array.isArray(jobIds)||!jobIds.length||jobIds.length>MAX_JOB_LINKS||
+    jobIds.some(id=>typeof id!=='string'||!JOB_ID.test(id)))return false;
+ const dest=recordPath(hash(callId));
+ try{
+  const stat=await fs.lstat(dest);
+  if(!stat.isFile()||stat.size>FILE_BYTES||stat.size<40)return false;
+  const existing:unknown=JSON.parse(await fs.readFile(dest,'utf8'));
+  if(!isValid(existing)||existing.idHash!==hash(callId))return false;
+  const combined=[...new Set([...(existing.jobIds??[]),...jobIds])].slice(0,MAX_JOB_LINKS);
+  return await write({...existing,jobIds:combined});
+ }catch{return false;}
+}
+/** Called only after a relay result_ack received on the authorized WebSocket.
+ * Idempotent, disk-only, and never modifies a project or replays a call. */
+export async function acknowledgeCallOutcome(callId:string):Promise<boolean>{
+ if(!callOutcomesEnabled()||typeof callId!=='string'||callId.length<8||callId.length>100)return false;
+ const idHash=hash(callId);
+ try{
+  const filename=recordPath(idHash),stat=await fs.lstat(filename);
+  if(!stat.isFile()||stat.size<40||stat.size>FILE_BYTES)return false;
+  const row:unknown=JSON.parse(await fs.readFile(filename,'utf8'));
+  if(!isValid(row)||row.idHash!==idHash)return false;
+  if(row.relayJournalConfirmed===true)return true;
+  return await write({...row,relayJournalConfirmed:true,relayAcknowledgedAt:Date.now()});
+ }catch{return false;}
 }
 export interface CallOutcomeLookup{
  found:boolean;outcome?:'uncertain'|'returned_success'|'reported_failure'|'pending';
  tool?:string;startedAt?:number;settledAt?:number;durationMs?:number;
- errorCode?:string;recoveredUncertain?:boolean;
- fullResultStored:false;deliveryToRelayConfirmed:false;automaticReplay:false;
+ errorCode?:string;recoveredUncertain?:boolean;jobIds?:string[];
+ fullResultStored:false;deliveryToRelayConfirmed:boolean;automaticReplay:false;
  guidance:string;
 }
 export async function lookupCallOutcome(callId:string):Promise<CallOutcomeLookup>{
@@ -122,14 +174,16 @@ export async function lookupCallOutcome(callId:string):Promise<CallOutcomeLookup
    outcome:data.outcome==='started'?'uncertain':data.outcome,
    tool:data.tool,startedAt:data.startedAt,settledAt:data.settledAt,
    durationMs:data.durationMs,errorCode:data.errorCode,
+   ...(data.jobIds?.length?{jobIds:data.jobIds}:{}),
    recoveredUncertain:uncertain,
-   fullResultStored:false,deliveryToRelayConfirmed:false,automaticReplay:false,
+   fullResultStored:false,deliveryToRelayConfirmed:data.relayJournalConfirmed===true,automaticReplay:false,
    guidance:uncertain?
     'The call was received but its completion was not durably recorded. It may have completed before a crash. Inspect the actual state; never replay a mutation automatically.':
     data.outcome==='returned_success'?
+     data.relayJournalConfirmed?'The relay confirmed a durable result receipt. ChatGPT display is not confirmed; use recover_operation to retrieve the stored result if needed.':
      'The local agent returned success, but delivery to the relay/ChatGPT is not confirmed. Inspect actual state before any mutation retry.':
      data.outcome==='pending'?
-      'The local agent returned a pending job. Query the existing job/session; do not start a duplicate.':
+      'The local agent returned a pending job. Query the existing job ID in jobIds using get_job; do not start a duplicate.':
       'The local agent reported failure. Check actual state before retrying because external side effects may still have occurred.'
   };
  }catch{return none;}
@@ -139,5 +193,5 @@ export const callOutcomeStatus=()=>({
  maxFiles:FILES,maxDiskBytes:MAX_DISK_BYTES,retentionDays:7,
  writes,failedWrites,prunes,storesFullResults:false,storesArguments:false,
  storesPaths:false,storesRawCallIds:false,automaticReplay:false,
- deliveryAcknowledgementSupported:false
+ deliveryAcknowledgementSupported:true
 });

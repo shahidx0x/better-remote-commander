@@ -60,17 +60,36 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    assert.equal(recovered.structuredContent.outcome,'returned_success');
    assert.equal(recovered.structuredContent.automaticReplay,false);
    assert.equal(recovered.structuredContent.fullResultStored,false);
-   assert.equal(recovered.structuredContent.deliveryToRelayConfirmed,false);
+   // The new relay ACK is an eventual metadata update to the agent receipt.
+   await until(async()=>{
+    const latest=await tool('agent_status',{lookupCallId:callId});
+    return latest.structuredContent.deliveryToRelayConfirmed===true;
+   },5000);
    const saved=await fs.readFile(path.join(home,'call-outcomes',
      (await import('node:crypto')).createHash('sha256').update(callId).digest('hex')+'.json'),'utf8');
    assert.ok(!saved.includes('console.log(73)'));
    assert.ok(!saved.includes(callId));
   });
+  await t.test('lost background-job response can be recovered through durable call receipt',async()=>{
+   const started=await tool('spawn_job',{command:'node -e "console.log(84)"',cwd:project,label:'recovery-fixture'});
+   assert.equal(started.isError,false,JSON.stringify(started));
+   const jobId=started.structuredContent?.jobId;
+   assert.match(jobId,/^j[a-z0-9]{7,64}$/);
+   const callId=started._meta?.callId;
+   assert.equal(typeof callId,'string');
+   const recovered=await tool('agent_status',{lookupCallId:callId});
+   assert.equal(recovered.isError,false);
+   assert.deepEqual(recovered.structuredContent.jobIds,[jobId]);
+   assert.equal(recovered.structuredContent.automaticReplay,false);
+   const job=await tool('get_job',{id:jobId});
+   assert.equal(job.isError,false);
+   assert.match(job.content[0].text,/recovery-fixture/);
+  });
   await t.test('build/test verification returns structured success',async()=>{
    const r=await tool('verify_project',{cwd:project,commands:[{name:'syntax check',command:'node --check sample.ts'}]});assert.equal(r.isError,false);assert.equal(r.structuredContent.passed,true);
   });
   await t.test('project context, symbol tools and safe previews traverse real MCP',async()=>{
-   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,67);assert.ok(defs.tools.some(t=>t.name==='run_project_checks'));assert.ok(!defs.tools.some(t=>t.name==='workspace_batch'));
+   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,68);assert.ok(defs.tools.some(t=>t.name==='recover_operation'));assert.ok(defs.tools.some(t=>t.name==='run_project_checks'));assert.ok(!defs.tools.some(t=>t.name==='workspace_batch'));
    const context=await tool('project_context',{path:project,focus:'sample.ts'});assert.equal(context.isError,false);assert.equal(context.structuredContent.package.packageManager,'pnpm');assert.ok(context.structuredContent.instructions.some(x=>x.path==='AGENTS.md'));
    const outline=await tool('code_outline',{path:p});assert.equal(outline.isError,false);assert.ok(outline.structuredContent.symbols.some(s=>s.name==='value'));
    const symbol=await tool('read_symbol',{path:p,name:'value'});assert.equal(symbol.isError,false);assert.match(symbol.structuredContent.text,/value = 2/);

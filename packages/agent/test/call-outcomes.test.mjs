@@ -12,7 +12,7 @@ const temp=mkdtempSync(path.join(realpathSync.native(os.tmpdir()),'brc-call-outc
 process.env.BRC_HOME=path.join(temp,'home');
 const previous=process.env.BRC_CALL_OUTCOME_RECEIPTS;
 delete process.env.BRC_CALL_OUTCOME_RECEIPTS;
-const {beginCallOutcome,settleCallOutcome,lookupCallOutcome,callOutcomeStatus}=
+const {beginCallOutcome,settleCallOutcome,lookupCallOutcome,linkCallJobs,acknowledgeCallOutcome,callOutcomeStatus}=
  await import('../dist/runtime/call-outcomes.js');
 const dir=path.join(process.env.BRC_HOME,'call-outcomes');
 const hash=id=>createHash('sha256').update(id).digest('hex');
@@ -47,6 +47,70 @@ test('durable outcome is default-on, stores only hashed call ID and metadata, ne
  assert.equal(restored.deliveryToRelayConfirmed,false);
  assert.equal(restored.fullResultStored,false);
  assert.equal(restored.automaticReplay,false);
+});
+test('job references survive a lost response and fresh-process recovery without storing command data',async()=>{
+ const id=randomUUID(), jobA='jabc12345',jobB='jabc12346';
+ const record=await beginCallOutcome(id,'run_parallel');
+ assert.ok(record);
+ assert.equal(await linkCallJobs(id,[jobA,jobB]),true);
+ const before=await lookupCallOutcome(id);
+ assert.deepEqual(before.jobIds,[jobA,jobB]);
+ assert.equal(before.outcome,'uncertain');
+ await settleCallOutcome(record,{structuredContent:{jobIds:[jobA,jobB],group:'secret project',stdout:'DO_NOT_PERSIST'}},30);
+ const persisted=await fs.readFile(file(id),'utf8');
+ assert.ok(!persisted.includes('secret project'));
+ assert.ok(!persisted.includes('DO_NOT_PERSIST'));
+ const snapshot=spawnSync(process.execPath,['--input-type=module','-e',
+  'import {lookupCallOutcome} from '+JSON.stringify(module)+'; process.stdout.write(JSON.stringify(await lookupCallOutcome('+JSON.stringify(id)+')));'
+ ],{encoding:'utf8',timeout:12000,env:{...process.env}});
+ assert.equal(snapshot.status,0,snapshot.stderr);
+ assert.deepEqual(JSON.parse(snapshot.stdout).jobIds,[jobA,jobB]);
+ assert.equal(JSON.parse(snapshot.stdout).automaticReplay,false);
+});
+test('a durable relay acknowledgement survives restart without claiming ChatGPT display',async()=>{
+ const id=randomUUID(),receipt=await beginCallOutcome(id,'run_command');
+ assert.ok(receipt);
+ await settleCallOutcome(receipt,{structuredContent:{ok:true}},15);
+ assert.equal((await lookupCallOutcome(id)).deliveryToRelayConfirmed,false);
+ assert.equal(await acknowledgeCallOutcome(id),true);
+ assert.equal(await acknowledgeCallOutcome(id),true);
+ assert.equal((await lookupCallOutcome(id)).deliveryToRelayConfirmed,true);
+ const persisted=await fs.readFile(file(id),'utf8');
+ assert.equal(persisted.includes(id),false);
+ const snapshot=spawnSync(process.execPath,['--input-type=module','-e',
+  'import {lookupCallOutcome} from '+JSON.stringify(module)+';process.stdout.write(JSON.stringify(await lookupCallOutcome('+JSON.stringify(id)+')));'
+ ],{encoding:'utf8',timeout:12000,env:{...process.env}});
+ assert.equal(snapshot.status,0,snapshot.stderr);
+ assert.equal(JSON.parse(snapshot.stdout).deliveryToRelayConfirmed,true);
+});
+test('a failed final response does not erase the already-durable job identity',async()=>{
+ const id=randomUUID(),jobId='jabc12348';
+ const started=await beginCallOutcome(id,'spawn_job');
+ assert.ok(started);
+ assert.equal(await linkCallJobs(id,[jobId]),true);
+ await settleCallOutcome(started,{isError:true,structuredContent:{error:{code:'TOOL_OUTCOME_UNCERTAIN'}}},20);
+ const recovered=await lookupCallOutcome(id);
+ assert.equal(recovered.outcome,'reported_failure');
+ assert.deepEqual(recovered.jobIds,[jobId]);
+ assert.equal(recovered.automaticReplay,false);
+});
+test('a maximum parallel batch of 50 long valid job IDs fits the bounded durable receipt',async()=>{
+ const id=randomUUID(),record=await beginCallOutcome(id,'run_parallel');
+ assert.ok(record);
+ const ids=Array.from({length:50},(_,n)=>'j'+String(n).padStart(2,'0')+'x'.repeat(62));
+ assert.ok(ids.every(s=>s.length===65));
+ assert.equal(await linkCallJobs(id,ids),true);
+ await settleCallOutcome(record,{structuredContent:{jobIds:ids}},22);
+ assert.deepEqual((await lookupCallOutcome(id)).jobIds,ids);
+ assert.ok((await fs.stat(file(id))).size<=4096);
+});
+test('invalid background-job references cannot pollute recovery metadata',async()=>{
+ const id=randomUUID(),record=await beginCallOutcome(id,'spawn_job');
+ assert.ok(record);
+ assert.equal(await linkCallJobs(id,['../secret']),false);
+ await settleCallOutcome(record,{structuredContent:{jobId:'../secret'}},5);
+ const restored=await lookupCallOutcome(id);
+ assert.equal(restored.jobIds,undefined);
 });
 test('an interrupted call remains UNCERTAIN after a fresh Node process',async()=>{
  const id=randomUUID();

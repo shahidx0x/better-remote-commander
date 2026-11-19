@@ -8,7 +8,7 @@ import { PluginAdmin } from './plugin-admin.js';
 import { isTermuxRuntime } from '../runtime/platform-capabilities.js';
 import { boundedAgentFrame,recordResultFrameQueued } from './result-budget.js';
 import { connectionHealth } from './connection-health.js';
-import {beginCallOutcome,settleCallOutcome,lookupCallOutcome,type CallOutcomeRecord} from '../runtime/call-outcomes.js';
+import {beginCallOutcome,settleCallOutcome,lookupCallOutcome,acknowledgeCallOutcome,type CallOutcomeRecord} from '../runtime/call-outcomes.js';
 export interface WsClientOptions {
  relayUrl:string;token:string;deviceId:string;name:string;agentVersion:string;coreVersion:string;tools:ToolDefinition[];
  callTool:(name:string,args:Record<string,unknown>)=>Promise<unknown>;
@@ -83,6 +83,10 @@ export class WsClient {
    case 'welcome':if(msg.protocol!==BRC_PROTOCOL_VERSION){connectionHealth.record('relay_error','PROTOCOL_MISMATCH');this.stop();return;}this.welcomed=true;connectionHealth.record('connected');this.backoff=DEFAULTS.reconnectMinMs;this.unauthorizedCount=0;this.log('info',`Ready: relay ${msg.relayVersion}; ${this.opts.tools.length} tools`);this.plugins.sendStatus();try{this.opts.onConnected?.();}catch{}return;
    case 'ping':connectionHealth.ping();this.armHeartbeat(ws);this.send({type:'pong',ts:msg.ts},ws);return;
    case 'cancel':if(typeof msg.id==='string')cancelOperation(msg.id);return;
+   case 'result_ack':
+     if(msg.relayPersisted===true&&typeof msg.id==='string'&&msg.id.length>=8&&msg.id.length<=100)
+       void acknowledgeCallOutcome(msg.id);
+     return;
    case 'call':await this.handleCall(msg,ws);return;
    case 'plugin_admin':await this.plugins.handle(msg);return;
    case 'error':connectionHealth.record('relay_error',msg.code);this.log('error',`Relay error ${msg.code}`);if(msg.fatal)this.stop();return;

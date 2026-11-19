@@ -55,6 +55,8 @@ export interface ResultMessage {
 }
 
 export interface PongMessage { type: 'pong'; ts: number }
+/** Relay confirms it durably settled an operation. Not a ChatGPT/host delivery receipt. */
+export interface ResultAckMessage { type:'result_ack'; id:string; relayPersisted:boolean; serverTime:number }
 
 /**
  * Plugin status report (agent -> relay). Sent after `welcome` and whenever plugin state changes
@@ -109,7 +111,7 @@ export interface PluginAdminMessage {
   unsetEnv?: string[];
 }
 export interface CancelMessage { type: 'cancel'; id: string; reason?: string }
-export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage | CancelMessage | PluginAdminMessage;
+export type RelayMessage = WelcomeMessage | CallMessage | PingMessage | ErrorMessage | CancelMessage | PluginAdminMessage | ResultAckMessage;
 
 export const DEFAULTS = {
   pingIntervalMs: 20_000,

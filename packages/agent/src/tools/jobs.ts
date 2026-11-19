@@ -35,6 +35,7 @@ import type { ToolDefinition } from '../core/tool-definitions.js';
 import { isHeavyTool } from '../runtime/operations.js';
 import { saveJobOutput,readJobOutput,redactJobOutput,spillEnabled,type SpillRef } from '../runtime/job-output-spill.js';
 import {classifyExecution} from '../runtime/execution-kernel.js';
+import {linkCallJobs} from '../runtime/call-outcomes.js';
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -761,6 +762,9 @@ export async function handleManagedRunCommand(args: unknown): Promise<ServerResu
   const job = createJob([{command:a.command,cwd:a.cwd,shell:a.shell,raw:a.raw,
     maxOutputChars:a.maxOutputChars,timeout_ms:runtimeMs}],{timeoutMs:runtimeMs,label:'run_command'});
   job.quickReturnPending=true;
+  await persist(job);
+  const origin=getCallContext();
+  if(origin?.remote)await linkCallJobs(origin.id,[job.id]);
   enqueue(job);
   // An explicit cancel_operation BEFORE the handoff still cancels this job.
   // After a PENDING receipt, it is independent from relay call deadlines and
@@ -830,9 +834,13 @@ export async function handleSpawnJob(args: unknown): Promise<ServerResult> {
       'Wait for existing jobs to finish, then inspect list_jobs before scheduling another.',
       {tool:'list_jobs',args:{limit:50}});
   const job = createJob(steps, { label: a.label, group: a.group, continueOnError: a.continue_on_error, timeoutMs: a.timeout_ms, retainOutput:a.retain_output });
+  await persist(job);
+  const origin=getCallContext();
+  if(origin?.remote)await linkCallJobs(origin.id,[job.id]);
   enqueue(job);
   const pos = job.status === 'queued' ? ` (queued: ${MAX_CONCURRENT_JOBS} jobs run at once)` : '';
-  return text(`Started job ${job.id}${job.label ? ` "${job.label}"` : ''}${job.group ? ` in group ${job.group}` : ''} with ${steps.length} step(s)${pos}.\nUse wait_jobs to collect the result.`);
+  const message=`Started job ${job.id}${job.label ? ` "${job.label}"` : ''}${job.group ? ` in group ${job.group}` : ''} with ${steps.length} step(s)${pos}.\nUse wait_jobs to collect the result.`;
+  return {content:[{type:'text',text:message}],structuredContent:{jobId:job.id,group:job.group??null,pending:true,status:job.status,next:{tool:'get_job',args:{id:job.id}}}};
 }
 
 export async function handleWaitJobs(args: unknown): Promise<ServerResult> {
@@ -955,6 +963,11 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
     groupConcurrency: a.max_concurrency,
     retainOutput:a.retain_output,
   }));
+  // Save all job identities and associate the originating remote call before
+  // dispatch. A lost result can be recovered by lookupCallId, with no replay.
+  await Promise.all(batch.map(job=>persist(job)));
+  const origin=getCallContext();
+  if(origin?.remote)await linkCallJobs(origin.id,batch.map(job=>job.id));
   // Feed the shared scheduler: at most three workers globally, one CPU-heavy
   // job at a time, and lightweight work can pass a queued heavy job.
   for (const job of batch) enqueue(job);
@@ -978,7 +991,7 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
   if(shown<batch.length)
     s+=`\n[MORE PARALLEL RESULTS: ${batch.length-shown} omitted from this reply. Call wait_jobs({group:"${group}"}) for unreported results or get_job({id:"..."}) by job ID. Do not rerun already-completed mutations.]`;
   if (finished.length < batch.length) s += `\n\nUnfinished calls keep running. Collect them with wait_jobs({"group":"${group}"}).`;
-  return text(s);
+  return {content:[{type:'text',text:capJobReply(s)}],structuredContent:{group,jobIds:batch.map(j=>j.id),finished:finished.length,total:batch.length,pending:finished.length<batch.length,next:{tool:'wait_jobs',args:{group}}}};
 }
 
 // ---------------------------------------------------------------------------
