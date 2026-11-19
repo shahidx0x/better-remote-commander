@@ -1,7 +1,9 @@
 # BRC relay image: works with the full monorepo context or Easypanel's subfolder context.
 # The fallback fetches the exact GIT_SHA provided by Easypanel, never an unpinned branch when SHA is available.
-FROM node:24-alpine AS build
-RUN corepack enable && apk add --no-cache git ca-certificates
+FROM node:24-bookworm AS build
+# Debian buildpack-deps already provides git and trusted CA certificates.
+# Avoid Alpine apk altogether: its mirror's TLS failure prevented VPS deploys.
+RUN corepack enable && git --version && test -r /etc/ssl/certs/ca-certificates.crt
 WORKDIR /app
 ARG GIT_SHA
 COPY . /source-context/
@@ -39,6 +41,7 @@ RUN pnpm --filter brc-relay --prod deploy --legacy /out
 
 FROM node:24-alpine
 ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0 BRC_DB=/data/relay.sqlite
+# Keep the original production UID/group and data-volume permissions unchanged.
 RUN addgroup -S rdp && adduser -S rdp -G rdp && mkdir -p /data && chown rdp:rdp /data
 WORKDIR /app
 COPY --from=build --chown=rdp:rdp /out .
