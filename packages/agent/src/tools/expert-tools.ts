@@ -12,7 +12,7 @@ import { parseCode, parseSource, selectSymbol } from '../runtime/code-structure.
 import { sourceCandidate } from '../runtime/languages.js';
 import { codeGraph } from '../runtime/code-graph.js';
 import { discoverChecks, runProjectChecks, codingSession } from '../runtime/harness.js';
-import { AgentError, result } from '../runtime/errors.js';
+import { AgentError, result, errorCode } from '../runtime/errors.js';
 import { atomicWrite, sha256, withFileLocks } from '../runtime/file-safety.js';
 import { projectIndex } from '../runtime/project-index.js';
 import { searchManager } from '../core/search-manager.js';
@@ -39,6 +39,7 @@ const ChecksSchema = PathSchema.extend({ scripts: z.array(z.string().regex(/^[A-
 const SessionSchema = z.object({ action: z.enum(['start', 'status', 'verify', 'finish', 'abandon']), path: z.string().optional(), sessionId: z.string().optional(), goal: z.string().min(1).max(2000).optional(), scope: z.array(z.string().min(1).max(500)).min(1).max(20).optional(), requiredChecks: z.array(z.string().regex(/^[A-Za-z0-9_.:-]+$/)).min(1).max(5).optional() });
 const ImpactSchema = PathSchema.extend({ files: z.array(z.string().min(1)).min(1).max(50) });
 async function projectMap(raw: unknown) {
+    try {
     const a = MapSchema.parse(raw), root = await rootPath(a.path), listed = await listProjectFiles(root);
     const extensions: Record<string, number> = {}, folders: Record<string, number> = {};
     for (const f of listed.files) {
@@ -47,6 +48,12 @@ async function projectMap(raw: unknown) {
         folders[folder] = (folders[folder] ?? 0) + 1;
     }
     return result({ root, total: listed.files.length, extensions, folders, files: listed.files.slice(0, a.limit), truncated: listed.truncated || listed.files.length > a.limit, ignores: 'Honors ripgrep/git ignore rules; skips dependencies, builds and likely secret files.' });
+    } catch(error) {
+        if(errorCode(error)!=='TOOL_FAILED')throw error;
+        const reason=error instanceof Error?error.message.slice(0,300):'unknown listing failure';
+        throw new AgentError('PROJECT_MAP_FAILED',
+            'Could not enumerate project files: '+reason+'. Check the root and use scoped list_directory or start_search.');
+    }
 }
 async function readRanges(raw: unknown) {
     const a = RangesSchema.parse(raw), files: Record<string, unknown>[] = [];

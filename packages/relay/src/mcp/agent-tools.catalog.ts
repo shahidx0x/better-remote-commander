@@ -3,6 +3,45 @@
 import type { ToolDefinition } from 'brc-shared';
 export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   {
+    "name": "code_mode",
+    "description": "USE WHEN: PRIMARY DEFAULT for most multi-step coding, debugging, project exploration, testing and installed-plugin workflows; combine dependent tool operations with local JavaScript and progressive discovery in one remote MCP call.\nUSE INSTEAD: For a simple read/edit/command use its direct tool; for builds longer than one MCP call use spawn_job then get_job/wait_jobs.\nIMPORTANT: Guest code runs in a bounded QuickJS/WASM worker and can only call permitted BRC tool methods. No Node modules or native host objects. Errors stop the workflow; never blindly replay uncertain changes.\nDETAILS: USE WHEN: PRIMARY DEFAULT for multi-step coding, testing, debugging, project research and installed-plugin workflows. Compose dependent calls, branching and filtered outputs in one MCP request. USE INSTEAD: Direct read_file/edit_bloc\n[Full parameter details: tool input schema.]",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50000,
+          "description": "JavaScript function BODY ending with return. Available API: tools.search(query), tools.describe(name), tools.call(name,args). Standard loops, branching, arrays, JSON and await are supported. No Node imports, filesystem access, fetch or process globals."
+        },
+        "max_runtime_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 105000,
+          "default": 85000,
+          "description": "Total workflow deadline. For long builds use tools.call(\"spawn_job\",...) and inspect the returned job ID in a later MCP call."
+        },
+        "max_calls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 96,
+          "default": 48,
+          "description": "Maximum nested local tool invocations. Tool discovery does not count against this budget."
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "title": "Code Mode (local sandbox)",
+      "readOnlyHint": false,
+      "destructiveHint": true
+    }
+  },
+  {
     "name": "read_multiple_files",
     "description": "USE WHEN: Read 2+ already-known files or specific per-file ranges in ONE MCP request.\nUSE INSTEAD: If names are unknown use start_search; if you need multiple code ranges with hashes use read_code_ranges; do not issue repeated read_file calls.\nIMPORTANT: Up to 3 file reads overlap internally; individual errors are isolated. Use batch.continuations when truncated; images/PDFs have a small shared media budget.\nHOW / NEXT: START: paths[] for known files, or files[{path,offset,length}] for precise ranges. NEXT: batch.continuations, or smaller batches if the shared reply budget is reached. Do not treat a truncated batch as the complete files.\nDETAILS: PREFERRED FOR 2 OR MORE KNOWN FILE PATHS: read_multiple_files uses ONE MCP call and reads up to 8 files concurrently. Use this instead of repeating read_file, parallel Pr\n[Full parameter details: tool input schema.]",
     "inputSchema": {

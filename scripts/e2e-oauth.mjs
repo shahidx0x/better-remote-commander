@@ -61,15 +61,17 @@ step('mcp initialize', init.status === 200 && init.body?.result?.serverInfo?.nam
 
 const list = await rpc('tools/list', {}, 2);
 const names = (list.body?.result?.tools ?? []).map((t) => t.name);
-step('mcp tools/list', names.includes('list_devices') && names.includes('read_file') && names.includes('start_process'), `${names.length} tools`);
+step('mcp tools/list', names[0]==='code_mode' && names.includes('list_devices') && names.includes('read_file') && names.includes('run_command'), `${names.length} tools`);
 
 const devs = await rpc('tools/call', { name: 'list_devices', arguments: {} }, 3);
 const devJson = JSON.parse(devs.body?.result?.content?.[0]?.text ?? '{}');
 step('mcp list_devices', devJson.devices?.some((d) => d.online), JSON.stringify(devJson.devices?.map((d) => `${d.name}:${d.online ? 'online' : 'offline'}`)));
 
-const call = await rpc('tools/call', { name: 'start_process', arguments: { command: 'echo brc-mcp-ok', timeout_ms: 8000 } }, 4);
+const call = await rpc('tools/call', { name: 'code_mode', arguments: {
+  source: 'const c=await tools.call("start_process",{command:"echo brc-mcp-ok",timeout_ms:8000});return {output:c.text};'
+} }, 4);
 const out = call.body?.result?.content?.[0]?.text ?? '';
-step('mcp start_process via device', out.includes('brc-mcp-ok'), `isError=${call.body?.result?.isError} device=${call.body?.result?._meta?.deviceName}`);
+step('mcp code_mode routes to start_process on paired device', out.includes('brc-mcp-ok'), `isError=${call.body?.result?.isError} device=${call.body?.result?._meta?.deviceName}`);
 
 // 8. unauthorized / refresh
 const bad = await fetch(`${base}/mcp`, { method: 'POST', headers: { ...H, authorization: 'Bearer nope' }, body: '{}' });

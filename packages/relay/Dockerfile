@@ -1,5 +1,6 @@
 # BRC relay image: works with the full monorepo context or Easypanel's subfolder context.
-# The fallback fetches the exact GIT_SHA provided by Easypanel, never an unpinned branch when SHA is available.
+# An incomplete/subfolder context MUST supply a pinned 40-character GIT_SHA.
+# No fallback to a moving branch: doing so can deploy old Code Mode code.
 FROM node:24-bookworm AS build
 # Debian buildpack-deps already provides git and trusted CA certificates.
 # Avoid Alpine apk altogether: its mirror's TLS failure prevented VPS deploys.
@@ -17,16 +18,13 @@ RUN set -eu; \
       cp -a /source-context/. /app/; \
     else \
       echo 'BRC: incomplete Docker context; fetching source for the Git revision'; \
-      if [ -n "${GIT_SHA:-}" ]; then \
-        echo "$GIT_SHA" | grep -Eq '^[0-9a-fA-F]{40}$' || { echo 'BRC: GIT_SHA must be a 40-character commit hash' >&2; exit 1; }; \
-      fi; \
+      test -n "${GIT_SHA:-}" || { echo 'BRC: incomplete Docker build context needs an explicit GIT_SHA. Use full repository context or a 40-character pinned revision; refusing to fetch a moving branch.' >&2; exit 1; }; \
+      echo "$GIT_SHA" | grep -Eq '^[0-9a-fA-F]{40}$' || { echo 'BRC: GIT_SHA must be a 40-character commit hash' >&2; exit 1; }; \
       git init -q /app; \
       git remote add origin https://github.com/Rifatul-Islam-Munna/better-better-remote-commander.git; \
-      git -c protocol.version=2 fetch -q --depth 1 origin "${GIT_SHA:-main}"; \
+      git -c protocol.version=2 fetch -q --depth 1 origin "$GIT_SHA"; \
       git checkout -q --detach FETCH_HEAD; \
-      if [ -n "${GIT_SHA:-}" ]; then \
-        test "$(git rev-parse HEAD)" = "$GIT_SHA" || { echo 'BRC: fetched revision differs from requested Git SHA' >&2; exit 1; }; \
-      fi; \
+      test "$(git rev-parse HEAD)" = "$GIT_SHA" || { echo 'BRC: fetched revision differs from requested Git SHA' >&2; exit 1; }; \
       rm -rf .git; \
     fi; \
     test -f package.json; \
@@ -37,10 +35,14 @@ RUN set -eu; \
     test -f packages/relay/tsconfig.json
 RUN pnpm install --frozen-lockfile --filter brc-relay... --config.confirmModulesPurge=false
 RUN pnpm --filter brc-shared build && pnpm --filter brc-relay build
+# Reject stale/incomplete catalog artifacts before producing a release image.
+RUN test -f packages/relay/dist/mcp/agent-tools.catalog.js \
+    && grep -Fq '"name": "code_mode"' packages/relay/src/mcp/agent-tools.catalog.ts \
+    && node --input-type=module -e "import('./packages/relay/dist/mcp/server.js').then(m => { if(m.mcpToolProfile() !== 'codemode' || !m.exposeMcpAgentTool('code_mode')) process.exit(1); }).catch(() => process.exit(1))"
 RUN pnpm --filter brc-relay --prod deploy --legacy /out
 
 FROM node:24-alpine
-ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0 BRC_DB=/data/relay.sqlite
+ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0 BRC_DB=/data/relay.sqlite BRC_MCP_TOOL_PROFILE=codemode
 # Keep the original production UID/group and data-volume permissions unchanged.
 RUN addgroup -S rdp && adduser -S rdp -G rdp && mkdir -p /data && chown rdp:rdp /data
 WORKDIR /app

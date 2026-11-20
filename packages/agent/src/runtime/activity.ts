@@ -64,6 +64,7 @@ export function activityAction(tool: string, args: Record<string,unknown> | unde
         return approved+(task?' '+task:'')+(where?' in '+where:'')+
             (file?' / '+file:'');
     }
+    if (tool==='code_mode')return 'sandboxed workflow';
     if (tool==='read_multiple_files')
         return (Array.isArray(args.paths)?args.paths.length:0)+' files';
     if (tool==='edit_block')return 'edit'+at;

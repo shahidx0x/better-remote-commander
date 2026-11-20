@@ -245,8 +245,8 @@ test('LLM routing guidance chooses batches for known files and read-only batchin
   const { BUNDLED_AGENT_TOOL_CATALOG } = await import('../dist/mcp/agent-tools.catalog.js');
   const { ReadMultipleFilesArgsSchema } = await import('../../agent/dist/core/tools/schemas.js');
   const definitions = new Map(BUNDLED_AGENT_TOOL_CATALOG.map(t => [t.name, t]));
-  assert.deepEqual(BUNDLED_AGENT_TOOL_CATALOG.slice(0, 3).map(t => t.name),
-    ['read_multiple_files', 'batch_tools', 'workspace_batch'], 'batch-first discovery order');
+  assert.deepEqual(BUNDLED_AGENT_TOOL_CATALOG.slice(0, 4).map(t => t.name),
+    ['code_mode', 'read_multiple_files', 'batch_tools', 'workspace_batch'], 'Code Mode and batch-first discovery order');
   assert.match(TOOL_ROUTING_GUIDANCE, /2\+ known files.*read_multiple_files/);
   assert.match(TOOL_ROUTING_GUIDANCE, /run_parallel/);
   assert.match(TOOL_ROUTING_GUIDANCE, /write_file/);

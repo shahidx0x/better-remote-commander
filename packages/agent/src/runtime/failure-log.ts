@@ -49,8 +49,16 @@ const explanations:Record<string,string>={
   PROCESS_ALREADY_EXITED:'the PID already completed; use read_process_output to inspect exit status',
   PROCESS_NOT_ACTIVE:'no active process has this PID; inspect list_sessions or get_job',
   PROCESS_INPUT_REJECTED:'stdin is unavailable or the process has exited; inspect the process before retrying',
-  COMMAND_FAILED:'shell command returned nonzero exit; inspect stderr and exitCode',
-  TIMEOUT:'tool timed out; for long commands use start_process and read_process_output, then verify partial effects',
+  COMMAND_FAILED:'command returned a real nonzero exit; inspect stderr and exitCode, correct the command before retrying',
+  SHELL_SYNTAX:'PowerShell or cmd syntax rejected before execution; use program+args or select the proper shell',
+  CODE_SNAPSHOT_NOT_FILE:'read_code_file expects a file; inspect the parent using list_directory',
+  CODE_SNAPSHOT_FAILED:'source snapshot could not be read; inspect file type and permissions with get_file_info',
+  DIRECTORY_LIST_FAILED:'directory enumeration failed; verify the directory and reduce depth or page size',
+  PROJECT_MAP_FAILED:'project file enumeration failed; check root and use scoped start_search or list_directory',
+  PLUGIN_TOOL_REPORTED_ERROR:'the installed plugin returned its own error; inspect its response and verify effects before retrying',
+  PLUGIN_TRANSPORT:'plugin tool transport failed; inspect the plugin status and external effects before retrying',
+  PROCESS_INTERACTION_FAILED:'terminal interaction failed; inspect the live session and output before resending input',
+  TIMEOUT:'tool timed out; inspect partial effects first, then use spawn_job with get_job/wait_jobs for future long builds; never replay uncertain writes',
   ENOENT:'requested file or path does not exist; verify the absolute path and parent directory',
   BUSY:'agent concurrency queue is full',
   RESULT_TOO_LARGE:'tool output exceeded the bounded transport response limit',
@@ -65,6 +73,12 @@ export function failureReason(tool:string,code:string,diagnostic?:string):string
   }
   if(explanations[code])return explanations[code];
   if(tool==='start_search')return 'search failed; inspect its structured error and recovery guidance';
+  if(tool==='read_code_file')return 'file read failed; inspect path, type, permissions and read_code_file recovery suggestions';
+  if(tool==='list_directory')return 'directory listing failed; verify the root and reduce listing depth';
+  if(tool==='project_map')return 'project mapping failed; check root and use a scoped list_directory or start_search';
+  if(tool==='list_plugin_tools'||tool==='call_plugin_tool')return 'installed plugin operation failed; inspect plugin status and check effects before retrying';
+  if(tool==='get_job'||tool==='run_parallel')return 'job operation failed; inspect the returned job IDs and structured error before repeating';
+  if(tool==='interact_with_process')return 'process input may have failed; inspect session/output before resending';
   if(tool==='edit_block')return 'edit failed; check exact text, occurrence count and current SHA-256';
   return 'tool failed; inspect its structured error and recovery guidance';
 }

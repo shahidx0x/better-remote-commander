@@ -7,7 +7,7 @@ const definitions = listTools();
 const byName = new Map(definitions.map(t => [t.name, t]));
 
 test('ALL advertised agent tools have unique, actionable WHEN / USE INSTEAD rules', () => {
-  assert.equal(definitions.length, 82, 'keep the explicit coverage count intentional');
+  assert.equal(definitions.length, 83, 'Code Mode adds one intentionally reviewed native tool');
   assert.equal(byName.size, definitions.length, 'no duplicate tool names');
   assert.deepEqual(Object.keys(TOOL_CHOICES).sort(), [...byName.keys()].sort(),
     'a new/removed public tool requires updating the routing catalog');
@@ -71,7 +71,9 @@ test('tool descriptions lead with actionable next calls and enforce discovery bu
   const total=definitions.reduce((n,x)=>n+x.description.length,0);
   assert.ok(total<61500,'the model-facing tool descriptions regressed: '+total);
   const advertisedBytes=Buffer.byteLength(JSON.stringify(definitions),'utf8');
-  assert.ok(advertisedBytes<112500,'tool catalog metadata grew unexpectedly: '+advertisedBytes);
+  // One intentionally added Code Mode schema costs about 1.8 KiB in the
+  // full compatibility catalog; Core remains capped at 40 visible tools.
+  assert.ok(advertisedBytes<114000,'tool catalog metadata grew unexpectedly: '+advertisedBytes);
 });
 
 test('the tool-routing helper changes descriptions ONLY, not names, schema or access annotations', () => {

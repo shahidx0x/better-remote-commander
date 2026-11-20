@@ -76,8 +76,10 @@ const fullUrl = fullHtml.match(/id="new-connection-url"[^>]+value="([^"]+)"/)?.[
 const fullId = fullHtml.match(/name="link_id" value="([^"]+)"/)?.[1];
 step('separate full-access link is generated', r.status === 200 && !!fullUrl && fullUrl !== readUrl && !!fullId);
 const fullTools = await rpc(fullUrl, 'tools/list', {}, 5);
-step('full link exposes terminal tools without OAuth', fullTools.result?.result?.tools?.some(t => t.name === 'start_process'));
-const command = await rpc(fullUrl, 'tools/call', { name: 'start_process', arguments: { command: 'echo brc-capability-link-ok', timeout_ms: 8000 } }, 6);
+step('full link advertises primary Code Mode tool without OAuth', fullTools.result?.result?.tools?.[0]?.name === 'code_mode');
+const command = await rpc(fullUrl, 'tools/call', { name: 'code_mode', arguments: {
+  source: 'const c=await tools.call("start_process",{command:"echo brc-capability-link-ok",timeout_ms:8000});return {output:c.text};'
+} }, 6);
 step('real agent command runs through URL-only MCP', command.status === 200 && JSON.stringify(command.result).includes('brc-capability-link-ok'));
 
 const invalidUrl = readUrl.replace('/c/brc_link_', '/c/brc_link_X');
@@ -95,7 +97,7 @@ step('owner can revoke link instantly', r.status === 302);
 const revoked = await rpc(readUrl, 'tools/list', {}, 7);
 step('revoked URL cannot access tools', revoked.status === 404);
 const stillValid = await rpc(fullUrl, 'tools/list', {}, 8);
-step('revoking one URL does not revoke another', stillValid.status === 200 && stillValid.result?.result?.tools?.some(t => t.name === 'start_process'));
+step('revoking one URL does not revoke another', stillValid.status === 200 && stillValid.result?.result?.tools?.some(t => t.name === 'code_mode'));
 r = await fetch(base + '/auth/links/revoke', { method: 'POST', headers, redirect: 'manual',
   body: form({ csrf, link_id: fullId }) });
 step('second connection cleanup', r.status === 302);

@@ -10,6 +10,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [
 ] }));
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const a = req.params.arguments ?? {};
+  if (req.params.name === 'echo' && a.text === '__brc_test_fail__') return { content: [{ type:'text',text:'fixture rejected test request' }], isError:true };
   if (req.params.name === 'echo') return { content: [{ type: 'text', text: `echo: ${a.text}` }] };
   if (req.params.name === 'add') return { content: [{ type: 'text', text: String(Number(a.a) + Number(a.b)) }] };
   if (req.params.name === 'pid') return { content: [{ type: 'text', text: String(process.pid) }] };

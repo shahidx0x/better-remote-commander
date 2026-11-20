@@ -18,7 +18,7 @@ import { ServerResult } from '../types.js';
 import { withTimeout } from '../utils/withTimeout.js';
 import { createErrorResponse } from '../error-handlers.js';
 import { configManager } from '../config-manager.js';
-import { AgentError, failure } from '../../runtime/errors.js';
+import { AgentError, failure, errorCode } from '../../runtime/errors.js';
 import {idempotentAppend} from '../../runtime/idempotent-append.js';
 import {listDirectoryPage} from '../../runtime/directory-page.js';
 import {missingFileResponse} from '../../runtime/path-diagnostics.js';
@@ -511,6 +511,13 @@ export async function handleListDirectory(args: unknown): Promise<ServerResult> 
             },
         };
     } catch (error) {
+        // Preserve specific policy/OS/validation errors; only wrap a truly
+        // unknown directory-enumeration failure with an actionable code.
+        if(errorCode(error)==='TOOL_FAILED'){
+            const detail=error instanceof Error?error.message.slice(0,350):'unknown filesystem error';
+            return failure(new AgentError('DIRECTORY_LIST_FAILED',
+                'Unable to enumerate directory: '+detail+'. Verify the folder with get_file_info or narrow the list_directory depth.'));
+        }
         return failure(error);
     }
 }

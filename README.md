@@ -54,11 +54,29 @@ ChatGPT / Claude / other MCP client
 
 ## MCP tool catalog
 
-The **default Core MCP profile** advertises **34 everyday agent tools**, plus relay connection/marketplace/skills tools. Set `BRC_MCP_TOOL_PROFILE=focused` for 44 or `full` for 60. We retired 20 overlapping or unnecessary **public tool entry points** across every profile, including the public multi-file writer, redundant editors, ad-hoc verification and Docker-specific tools. The 80 existing agent handlers remain installed for backward compatibility, and the internal hash-checked batch engine is still used for worker integration. Public discovery remains small: no stale tool list gets a new permission or bypasses ownership checks. After deploying, **refresh the MCP tool definitions in ChatGPT**. `BRC_TOOL_PROFILE=coding` is a separate agent-side filter.
+The **default Code Mode-first MCP profile** (`BRC_MCP_TOOL_PROFILE=codemode`) exposes only **14 top-level tools** (15 when operation recovery is enabled). `code_mode` is listed first and can progressively discover and call dozens of local coding, testing, Git, process and installed external MCP methods inside one request. The previous `BRC_MCP_TOOL_PROFILE=core` profile still exposes 40 main tools when a traditional direct-tool workflow is preferable. The four installed plugin types (computer-use, Playwright, Serena, MarkItDown) are accessible on demand through `list_plugin_tools` and `call_plugin_tool`, not exposed as separate top-level tools. When operation recovery is enabled, it adds one tool in the default compact profile (15 total); in the 40-tool Core it replaces `list_sessions` to stay at 40. `focused` exposes 48 agent tools and `full` exposes 64; both include the relay marketplace and skills tools separately. Nineteen redundant **public entries** are retired across profiles; their legacy handlers remain installed and the internal worker-batch engine stays intact. Discovery does not change permissions. After deploying, **refresh the MCP tool definitions in ChatGPT**. `BRC_TOOL_PROFILE=coding` is a separate agent-side filter.
 
-To write two files, call **`write_file` once for each file** and verify each result; use `mode=rewrite` for the first chunk and `mode=append` for later chunks. For precise source edits, read current content/hash and use `edit_block`. There is no public multi-file writer in the simplified MCP catalog. See [ChatGPT tool selection and recovery](docs/chatgpt-mcp-tool-guide.md).
+Within Code Mode, write two files by calling **`await tools.call("write_file", {...})` once for each file** and verify each result; use `mode=rewrite` for the first chunk and `mode=append` for later chunks. For precise source edits, read current content/hash and use `edit_block`. Core also includes guarded multi-file source updates using `edit_files` and `apply_patch`; the legacy `workspace_batch` entry stays hidden. See [ChatGPT tool selection and recovery](docs/chatgpt-mcp-tool-guide.md).
 
-### Relay tools (7)
+### Local Code Mode (one MCP call, multiple local tool operations)
+
+`code_mode` is the FIRST tool in the default **14–15-tool Code Mode-first profile**, with the 40-tool Core still selectable. Model-authored JavaScript runs in a memory-bounded **QuickJS/WASM worker on the paired device**, not in Node.js, the relay, or Cloudflare Workers. Only the injected `tools.search`, `tools.describe` and `tools.call` API can invoke existing BRC tools. A script can read several files, branch on results, apply reviewed edits and run a check without intermediate relay round trips.
+
+```js
+// code_mode({source: "...the following JavaScript...", max_calls: 12})
+const matches = await tools.search("git");
+const git = await tools.describe("git_status");
+const status = await tools.call("git_status", {path:"D:/projects/example"});
+const check = await tools.call("run_command", {
+  program:"node", args:["--version"], cwd:"D:/projects/example"
+});
+return {available:matches.length,tool:git.name,
+  status:status.text.slice(0,600),exitCode:check.structuredContent.exitCode};
+```
+
+Use direct tools for one quick action. The default Code Mode budget is 48 nested tool calls (maximum 96), not unlimited work; the runtime is 85 seconds by default (maximum 105 seconds). For long builds, call `spawn_job` and then `get_job`/`wait_jobs` in later MCP calls; a started job is not a completed build. The Code Mode worker cannot import packages, access Node/OS objects or browse the network directly. Nested tool calls still use BRC's normal path limits, permissions, error handling and operation receipts. Memory, output, call count and execution time are bounded; uncertain writes must be inspected before any retry. No live agent/relay restart is implied by building the source.
+
+### Relay tools (3 in Core, 7 in Focused/Full; plus optional operation recovery)
 
 | Tool | Purpose |
 | --- | --- |
@@ -70,12 +88,13 @@ To write two files, call **`write_file` once for each file** and verify each res
 | `search_skills_catalog` | Search skills.sh with optional Vercel OIDC authentication; unavailable without it |
 | `request_skill_install` | Request owner review of a skill; **no automatic installation** |
 
-### Active public agent tools (60 in `BRC_MCP_TOOL_PROFILE=full`)
+### Active public agent tools (64 in `BRC_MCP_TOOL_PROFILE=full`)
 
 | Category | Tools |
 | --- | --- |
 | Configuration (2) | `get_config`, `set_config_value` |
 | Files and editing (10) | `read_file`, `read_multiple_files`, `write_file`, `write_pdf`, `create_directory`, `list_directory`, `move_file`, `get_file_info`, `edit_block`, `delete_file` |
+| Guarded multi-file source edits (2) | `edit_files`, `apply_patch` |
 | Encrypted transfer (3) | `prepare_file_transfer`, `send_file_transfer`, `receive_file_transfer` |
 | Search (4) | `start_search`, `get_more_search_results`, `stop_search`, `list_searches` |
 | Commands and processes (8) | `run_command`, `start_process`, `read_process_output`, `interact_with_process`, `force_terminate`, `list_sessions`, `list_processes`, `kill_process` |
@@ -86,16 +105,18 @@ To write two files, call **`write_file` once for each file** and verify each res
 | Code navigation (5) | `code_outline`, `find_symbols`, `read_symbol`, `find_references`, `related_files` |
 | Verified project checks (2) | `discover_checks`, `run_project_checks` |
 | Language context (4) | `language_capabilities`, `code_graph`, `context_pack`, `session_handoff` |
+| Language server navigation (1) | `lsp_query` |
 | Image preview (1) | `read_images` |
 | Parallel/background jobs (6) | `run_parallel`, `spawn_job`, `wait_jobs`, `get_job`, `list_jobs`, `cancel_job` |
 | Device plugins and AST search (3) | `list_plugin_tools`, `call_plugin_tool`, `ast_search` |
+| Local sandboxed Code Mode (1) | `code_mode` |
 | Optional native-worker coordination (3) | `worker_tasks`, `worker_patch`, `worker_integrate` |
 
-**Choosing the right tool:** Use `read_file` for one known file, `read_multiple_files` for multiple known files, `write_file` for creation/rewrite/append and `edit_block` for focused existing-file edits. Use `run_command` for one-shot commands, `start_process` for interactive programs and `run_parallel` for independent work. Use `discover_checks` and `run_project_checks` for actual check evidence. Tool selection guidance lives in [`packages/agent/src/tool-routing.ts`](packages/agent/src/tool-routing.ts) and the relay MCP initialization rules.
+**Choosing the right tool:** Use `code_mode` for multi-step dependent coding workflows; use `read_file` for one known file, `read_multiple_files` for multiple known files, `write_file` for creation/rewrite/append and `edit_block` for focused existing-file edits. Use `run_command` for one-shot commands, `start_process` for interactive programs and `run_parallel` for independent work. Use `discover_checks` and `run_project_checks` for actual check evidence. Tool selection guidance lives in [`packages/agent/src/tool-routing.ts`](packages/agent/src/tool-routing.ts) and the relay MCP initialization rules.
 
 ### Two different kinds of parallel work
 
-**1. Command and tool workers — no extra AI models.** `run_parallel` runs independent tool/command steps together. `spawn_job` returns a job ID immediately; `wait_jobs`, `get_job`, `list_jobs` and `cancel_job` manage the result. The default concurrent job limit is 4 (configurable with `BRC_MAX_JOBS`); excess jobs queue. Background jobs can run longer than a normal MCP request (up to the configured maximum of 6 hours), and completed job records can survive an agent restart.
+**1. Command and tool workers — no extra AI models.** `run_parallel` runs independent tool/command steps together. `spawn_job` returns a job ID immediately; `wait_jobs`, `get_job`, `list_jobs` and `cancel_job` manage the result. The agent allows up to three concurrent background workers (scaled to CPU availability), with one CPU-heavy job at a time; excess jobs queue. Background jobs can run longer than a normal MCP request (up to the configured maximum of 6 hours), and completed job records can survive an agent restart.
 
 **2. Host-native AI workers — only if your AI client genuinely supports them.** `worker_tasks`, `worker_patch` and `worker_integrate` coordinate independent source scopes, proposed patches and a parent-owned verified integration. These tools **do not** create extra ChatGPT/Claude/Codex models or invoke an inference API. Coordination plans/claims live in the agent's memory and disappear on agent restart. See [parallel worker coordination](docs/parallel-workers.md).
 
@@ -225,7 +246,7 @@ Local test profiles use HTTP on loopback; public deployments need HTTPS and corr
 | `BRC_IMAGE_WORKERS` | Concurrent native image decodes per preview request (default 2; 1-3 supported) |
 | `BRC_SKILLS_API_TOKEN` | Optional short-lived Vercel OIDC JWT for skills.sh catalog search; manual skills import needs no token |
 | `BRC_MCP_TOKEN_ESTIMATES` | `1` (default) automatically estimates MCP-visible text tokens in a worker; set `0` to disable |
-| `BRC_MCP_TOOL_PROFILE` | `core` (default, 34 agent tools), `focused` (44), or `full` (60). Set on the **relay**; 20 retired tools are not publicly advertised in any profile. |
+| `BRC_MCP_TOOL_PROFILE` | `codemode` (default, 11 native fallback + 3 relay tools; 15 with recovery), `core` (40 total), `focused` (48 agent tools), or `full` (64 agent tools). Set on the **relay**; 19 retired entries are not advertised. |
 | `BRC_MAX_RESULT_BYTES` | Optional **agent** setting, default 524288 bytes (512 KiB), clamped from 64 KiB to 512 KiB; the relay also enforces a 512 KiB result forwarding cap for old agents. |
 
 See [`.env.example`](.env.example) for relay and tunnel variables. Do not commit a real `.env`, pairing tokens or plugin secrets.

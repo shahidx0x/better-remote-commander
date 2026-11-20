@@ -68,7 +68,17 @@ test('public MCP operation recovery survives lost agent connection and relay res
    tools:[{name:'run_command',description:'test command',inputSchema:{type:'object',properties:{command:{type:'string'}}}}]}));
   await waitFor(()=>relay.hub.list(user.id).length===1);
   const listing=await rpc(base,key.raw,null,{},true);
-  assert.ok(listing.tools.find(t=>t.name==='recover_operation'));
+  assert.equal(listing.tools.length,15,'default Code Mode-first MCP must expose 15 tools with recovery');
+  assert.equal(listing.tools[0].name,'code_mode');
+  assert.equal(new Set(listing.tools.map(t=>t.name)).size,15);
+  for(const name of ['recover_operation','search_mcp_registry','request_plugin_install',
+    'list_plugin_tools','call_plugin_tool','code_mode','read_file','read_multiple_files',
+    'edit_block','run_command','wait_jobs','get_job']){
+    assert.ok(listing.tools.find(t=>t.name===name),'missing Core tool: '+name);
+  }
+  assert.ok(!listing.tools.some(t=>t.name==='list_sessions'),'recovery replaces optional session-list slot');
+  assert.ok(!listing.tools.some(t=>t.name==='context_pack'),'advanced project tools use Code Mode discovery');
+  assert.ok(!listing.tools.some(t=>t.name==='list_skills'),'skills administration remains out of Core discovery');
   assert.ok(listing.tools.find(t=>t.name==='run_command').inputSchema.properties.operationId);
   const id=randomUUID(),args={command:'node -e "console.log(1)"',operationId:id};
   const first=await rpc(base,key.raw,'run_command',args);

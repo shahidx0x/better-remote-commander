@@ -118,6 +118,9 @@ export function traceToolResult(tool: string, result: unknown): string {
   const texts = contents.filter(c => c && c.type === 'text' && typeof c.text === 'string')
     .map(c => String(c.text));
   const raw = texts.join('\n');
+  // Code Mode outputs can contain arbitrary source data and intentionally
+  // filtered model results. Never copy even an error preview to agent logs.
+  if (tool === 'code_mode') return redactTrace(lines.join('\n')+'\nSandbox result omitted from activity log.', MAX_TRACE_CHARS);
   if (raw.length) {
     if (SAFE_RESULT_TOOLS.has(tool)) {
       let output = raw;

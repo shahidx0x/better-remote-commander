@@ -46,7 +46,7 @@ function portableDescription(name, original) {
   return description;
 }
 const preferredOrder = [
-  'read_multiple_files', 'batch_tools', 'workspace_batch',
+  'code_mode', 'read_multiple_files', 'batch_tools', 'workspace_batch',
   'read_code_ranges', 'read_code_context', 'read_file', 'read_code_file', 'start_search',
   'project_context', 'context_pack', 'project_map', 'code_outline',
   'edit_files', 'edit_block', 'write_file',

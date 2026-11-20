@@ -18,8 +18,8 @@ async function rpc(endpoint, headers, method, params, id) {
 const health = await (await fetch(base + '/health')).json();
 step('testing while zero devices are connected', health.devices === 0);
 step('health advertises the selected catalog profile and actual tool count',
-  health.mcpTools === ({core:34,focused:44,full:60}[health.mcpToolProfile] + 7) &&
-  health.mcpToolProfile === (process.env.BRC_MCP_TOOL_PROFILE || 'core'));
+  health.mcpTools === ({codemode:15,core:40,focused:56,full:72}[health.mcpToolProfile]) &&
+  health.mcpToolProfile === (process.env.BRC_MCP_TOOL_PROFILE || 'codemode'));
 const reg = await (await fetch(base + '/register', { method: 'POST', headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
     client_name: 'offline-catalog-e2e', redirect_uris: ['https://tools.example.test/oauth/callback'],
@@ -54,15 +54,15 @@ const H = { authorization: 'Bearer ' + tok.access_token };
 const listed = await rpc(base + '/mcp', H, 'tools/list', {}, 1);
 const publishedTools = listed.msg?.result?.tools ?? [];
 const names = publishedTools.map(t => t.name);
-step('default core tools describe WHEN and HOW to use them',
-  publishedTools.length >= 35 && publishedTools.length <= 55 &&
+step('Code Mode-first catalog is compact and contains actionable rules',
+  publishedTools.length === 15 && names[0] === 'code_mode' &&
   publishedTools.every(t=>t.description.startsWith('USE WHEN: ')&&t.description.includes('USE INSTEAD: ')) &&
   !publishedTools.some(t=>['docker_inventory','write_pdf','ast_rewrite'].includes(t.name)));
-step('a single-run command is not confused with an interactive process',
+step('direct command remains available alongside primary Code Mode',
   publishedTools.find(t => t.name === 'run_command')?.description.includes('ONE-SHOT command')
-  && publishedTools.find(t => t.name === 'start_process')?.description.includes('run_command'));
+  && names.includes('code_mode') && !names.includes('start_process'));
 step('first connection advertises file and terminal tools while agent is offline',
-  listed.status === 200 && names.length >= 35 && names.includes('list_devices') && names.includes('read_file') && names.includes('write_file') && names.includes('start_process') && !names.includes('workspace_batch') && !names.includes('batch_tools'));
+  listed.status === 200 && names.length === 15 && names.includes('list_devices') && names.includes('read_file') && names.includes('read_multiple_files') && names.includes('edit_block') && names.includes('run_command') && !names.includes('workspace_batch') && !names.includes('batch_tools'));
 const offline = await rpc(base + '/mcp', H, 'tools/call', { name: 'read_file', arguments: { path: '/fake/offline/path' } }, 2);
 step('advertised offline tools fail safely instead of claiming to run',
   offline.status === 200 && offline.msg?.result?.isError === true && /No device is online/i.test(offline.msg?.result?.content?.[0]?.text ?? ''));
@@ -77,4 +77,4 @@ step('private no-OAuth URL can be generated while offline', !!privateUrl);
 const ro = await rpc(privateUrl, {}, 'tools/list', {}, 3);
 const roNames = (ro.msg?.result?.tools ?? []).map(t => t.name);
 step('read-only link sees permitted file tools but never write or terminal',
-  ro.status === 200 && roNames.length > 10 && roNames.includes('read_file') && !roNames.includes('write_file') && !roNames.includes('start_process'));
+  ro.status === 200 && roNames.includes('list_devices') && roNames.includes('read_file') && roNames.includes('read_multiple_files') && !roNames.includes('code_mode') && !roNames.includes('edit_block') && !roNames.includes('run_command'));

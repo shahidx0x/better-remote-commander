@@ -43,6 +43,7 @@
         "pdf-lib": "^1.17.1",
         "pizzip": "^3.2.0",
         "proper-lockfile": "^4.1.2",
+        "quickjs-emscripten": "0.32.0",
         "remark": "^15.0.1",
         "remark-gfm": "^4.0.1",
         "remark-parse": "^11.0.0",

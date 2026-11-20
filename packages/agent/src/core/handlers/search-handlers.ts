@@ -47,6 +47,23 @@ export async function handleStartSearch(args: unknown): Promise<ServerResult> {
 
     if(result.isError){
       const state=searchManager.readSearchResults(result.sessionId,0,0);
+      // An implicit regex may simply be a filename or snippet containing
+      // punctuation. Follow Desktop Commander's helpful search-recovery
+      // pattern: retry only a proven regex parse failure as a literal.
+      // Never reinterpret a caller's explicit literalSearch:false.
+      const implicit=args&&typeof args==='object'&&!Array.isArray(args)&&
+        !Object.prototype.hasOwnProperty.call(args,'literalSearch');
+      if(implicit&&!parsed.data.literalSearch&&
+        searchErrorCode(state.error??'')==='SEARCH_INVALID_PATTERN'){
+        searchManager.releaseSearch(result.sessionId);
+        const corrected=await handleStartSearch({...parsed.data,literalSearch:true});
+        if(corrected.isError)return corrected;
+        return {...corrected,
+          content:[{type:'text',text:'[BRC] Invalid implicit regex; started an exact literal search instead. No content was changed.\n'+
+            corrected.content.filter(c=>c.type==='text').map(c=>c.text).join('\n')}],
+          structuredContent:{...corrected.structuredContent,autoLiteralFallback:true,
+            actualSearchMode:'literal',requestedPatternWasInvalidRegex:true}};
+      }
       return structuredSearchFailure(new AgentError(
         searchErrorCode(state.error??'SEARCH_FAILED'),state.error??'ripgrep search failed'),'start') as ServerResult;
     }

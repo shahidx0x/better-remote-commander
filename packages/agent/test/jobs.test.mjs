@@ -93,6 +93,10 @@ test('run_parallel serializes heavy commands and keeps input order', async () =>
   assert.ok([aS, aE, bS, bE].every(Number.isFinite), `timestamps missing:\n${text}`);
   assert.ok(aE <= bS, `heavy commands must not overlap: A [${aS}-${aE}] B [${bS}-${bE}]`);
   assert.match(text, /4\/4 done, 1 failed/);
+  assert.equal(r.structuredContent.failed,1);
+  assert.equal(r.structuredContent.executionCompleted,true);
+  assert.equal(r.structuredContent.allCallsSucceeded,false);
+  assert.equal(r.structuredContent.failedJobIds.length,1);
   assert.ok(text.indexOf('=== A') < text.indexOf('=== B') && text.indexOf('=== B') < text.indexOf('=== bad'));
   assert.match(text, /=== bad -> FAILED/);
 });
@@ -104,6 +108,9 @@ test('lightweight reads finish while a long heavy background command is still ru
   ] });
   const text = out(r);
   assert.match(text, /run_parallel: 1\/2 done/);
+  assert.equal(r.structuredContent.pending,true);
+  assert.equal(r.structuredContent.executionCompleted,false);
+  assert.equal(r.structuredContent.allCallsSucceeded,false);
   assert.match(text, /=== heavy -> STILL RUNNING/);
   assert.match(text, /=== quick-read -> OK/);
   const group = text.match(/wait_jobs\(\{"group":"(par-[a-z0-9]+)"\}\)/)?.[1];

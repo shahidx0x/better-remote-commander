@@ -15,7 +15,7 @@ test('relay exposes only Android agent-supported tools when all online devices a
  const r=await liveTools(onlineHub,store,'owner-android');
  assert.equal(r.online,1);
  assert.ok(r.tools.some(t=>t.name==='read_file'));
- assert.ok(r.tools.some(t=>t.name==='worker_tasks'));
+ assert.ok(!r.tools.some(t=>t.name==='worker_tasks'),'Core hides optional worker coordination');
  assert.ok(!r.tools.some(t=>t.name==='read_images'));
  assert.ok(!r.tools.some(t=>t.name==='write_pdf'));
  assert.ok(!r.tools.some(t=>t.name==='docker_inventory'));

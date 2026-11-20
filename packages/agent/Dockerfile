@@ -10,8 +10,16 @@ COPY packages/agent/package.json packages/agent/tsconfig.json packages/agent/
 RUN pnpm install --frozen-lockfile --filter brc-agent... --config.confirmModulesPurge=false
 COPY packages/shared/src packages/shared/src
 COPY packages/agent/src packages/agent/src
+# The agent build script references this folder even on Linux (where the
+# optional Windows native helper is skipped).
+COPY packages/agent/native packages/agent/native
 RUN pnpm --filter brc-shared build && pnpm --filter brc-agent build
 RUN pnpm --filter brc-agent --prod deploy --legacy /out
+# Code Mode is executed on the device agent, never in the relay container.
+# Verify the transpiled worker and its WASM dependency are in the image.
+RUN test -f /out/dist/runtime/code-mode-worker.js \
+    && test -f /out/dist/runtime/code-mode.js \
+    && cd /out && node --input-type=module -e "import('quickjs-emscripten').then(m => m.getQuickJS()).catch(() => process.exit(1))"
 
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production BRC_HOME=/home/rdp/.brc

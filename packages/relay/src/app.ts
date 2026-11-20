@@ -27,14 +27,12 @@ import { parseAuthorizeRequest, validateClientId, validateRedirectUri, approveCa
 import { Sessions } from './auth/sessions.js';
 import { createMcpServer } from './mcp/server.js';
 import { BUNDLED_AGENT_TOOL_CATALOG } from './mcp/agent-tools.catalog.js';
-import { exposeMcpAgentTool, mcpToolProfile } from './mcp/server.js';
+import { exposeMcpAgentTool, mcpToolProfile, composeMcpToolList } from './mcp/server.js';
 import * as pages from './pages/html.js';
 import * as adminPages from './pages/admin.js';
 import { LoginLimiter } from './auth/rate-limit.js';
 import { RegistryClient } from './plugins/registry.js';
 import { registerPluginRoutes } from './plugins/admin-routes.js';
-import { PLUGIN_RELAY_TOOLS } from './mcp/plugin-tools.js';
-import { SKILL_RELAY_TOOLS } from './mcp/skill-tools.js';
 import { SkillsCatalog } from './features/skills.js';
 import { registerSkillsRoutes } from './features/skills-routes.js';
 import { validateUsageReport, usageView, type UsagePeriod } from './features/usage.js';
@@ -279,7 +277,8 @@ export async function buildRelay(cfg: RelayConfig, log: (level: string, msg: str
       recoveryReadiness:{claimsBeforeDispatch:true,encryptedResults:operationJournal.payloadsEnabled,
         degraded:recoveryWarnings.length>0,warnings:recoveryWarnings,
         ...(recoveryQuota?{quota:recoveryQuota}:{})},
-      mcpTools: BUNDLED_AGENT_TOOL_CATALOG.filter(t=>exposeMcpAgentTool(t.name)).length + 2 + PLUGIN_RELAY_TOOLS.length + SKILL_RELAY_TOOLS.length,
+      mcpTools: composeMcpToolList(BUNDLED_AGENT_TOOL_CATALOG.filter(t=>exposeMcpAgentTool(t.name)),
+        {plugins:true,skills:true,journal:true}).length,
       operationRecovery:operationJournal.status(),
       multiRelayRouting:crossRelay?.status()??{enabled:false,mode:'single-instance'},
       mcpToolProfile: mcpToolProfile(),

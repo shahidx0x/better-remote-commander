@@ -475,9 +475,16 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
     capture('server_interact_with_process_failed', {
       error: 'Invalid arguments'
     });
+    const details=parsed.error.message.slice(0,800);
     return {
-      content: [{ type: "text", text: `Error: Invalid arguments for interact_with_process: ${parsed.error}` }],
+      content: [{ type: "text", text: 'INVALID_ARGUMENT: Invalid interact_with_process arguments: '+details }],
       isError: true,
+      structuredContent:{
+        error:{code:'INVALID_ARGUMENT',message:details,retryable:false},
+        commandExecuted:false,
+        recovery:{automaticRetry:false,
+          suggestion:'Pass an active PID from list_sessions and a string input. Check the exact schema and fix arguments before retrying.'}
+      }
     };
   }
 
@@ -758,8 +765,14 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
       error: errorMessage
     });
     return {
-      content: [{ type: "text", text: `Error interacting with process: ${errorMessage}` }],
+      content: [{ type: "text", text: 'PROCESS_INTERACTION_FAILED: '+errorMessage.slice(0,1000) }],
       isError: true,
+      structuredContent:{
+        error:{code:'PROCESS_INTERACTION_FAILED',message:errorMessage.slice(0,1000),retryable:false},
+        pid,
+        recovery:{automaticRetry:false,
+          suggestion:'Inspect list_sessions or read_process_output to determine whether input was accepted. Do not resend side-effecting input without checking process state.'}
+      }
     };
   }
 }
@@ -770,9 +783,13 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
 export async function forceTerminate(args: unknown): Promise<ServerResult> {
   const parsed = ForceTerminateArgsSchema.safeParse(args);
   if (!parsed.success) {
+    const details=parsed.error.message.slice(0,700);
     return {
-      content: [{ type: "text", text: `Error: Invalid arguments for force_terminate: ${parsed.error}` }],
-      isError: true,
+      content: [{ type: "text", text:'INVALID_ARGUMENT: Invalid force_terminate arguments: '+details }],
+      isError:true,
+      structuredContent:{error:{code:'INVALID_ARGUMENT',message:details,retryable:false},
+        commandExecuted:false,recovery:{automaticRetry:false,
+          suggestion:'Use a verified active PID. No termination was requested.'}}
     };
   }
 

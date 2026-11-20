@@ -16,6 +16,11 @@ export interface ToolChoice {
 
 /** Keep each tool's recommendation concise; detailed parameters live in JSON Schema. */
 export const TOOL_CHOICES: Record<string, ToolChoice> = {
+  code_mode: {
+    use: 'PRIMARY DEFAULT for most multi-step coding, debugging, project exploration, testing and installed-plugin workflows; combine dependent tool operations with local JavaScript and progressive discovery in one remote MCP call.',
+    instead: 'For a simple read/edit/command use its direct tool; for builds longer than one MCP call use spawn_job then get_job/wait_jobs.',
+    caveat: 'Guest code runs in a bounded QuickJS/WASM worker and can only call permitted BRC tool methods. No Node modules or native host objects. Errors stop the workflow; never blindly replay uncertain changes.',
+  },
   get_config: {
     use: 'Inspect this BRC agent configuration and access limits.',
     instead: 'For project coding conventions use project_context or project_preferences; for process health use agent_status.',

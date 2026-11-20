@@ -120,8 +120,21 @@ export async function handleCallPluginTool(args: unknown): Promise<ServerResult>
     }
     try {
       const res=await callPluginTool(plugin,tool,toolArgs);
-      if(!browser)return {content:res.content as unknown as ServerResult['content'],
-        ...(res.isError?{isError:true}:{})};
+      if(!browser){
+        const content=res.content as unknown as ServerResult['content'];
+        if(!res.isError)return {content};
+        // A plugin can return isError:true without throwing. Preserve its
+        // original explanation AND classify the wrapper result so the caller
+        // does not see an unhelpful generic TOOL_FAILED.
+        return {isError:true,content,structuredContent:{
+          error:{code:'PLUGIN_TOOL_REPORTED_ERROR',
+            message:'Installed plugin '+plugin+'.'+tool+' reported a tool error; see its returned content.',
+            retryable:false},
+          pluginId:plugin,pluginTool:tool,
+          recovery:{automaticRetry:false,
+            suggestion:'Inspect the plugin error and verify any external effects before correcting arguments or retrying. Check list_plugin_tools for the current schema and plugin status.'}
+        }};
+      }
       playwrightPolicy.after(tool,toolArgs,{isError:res.isError,
         content:res.content as Array<{type?:string;text?:string}>});
       const content=[...(res.content as unknown as ServerResult['content'])];

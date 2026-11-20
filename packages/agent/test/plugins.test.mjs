@@ -150,6 +150,11 @@ test('command plugin: real installer + list_plugin_tools + call_plugin_tool via 
 
   assert.equal(out(await callTool('call_plugin_tool', { plugin: 'echo', tool: 'echo', args: { text: 'hi' } })), 'echo: hi');
   assert.equal(out(await callTool('call_plugin_tool', { plugin: 'echo', tool: 'add', args: { a: 2, b: 3 } })), '5');
+  const childFailure=await callTool('call_plugin_tool', {plugin:'echo',tool:'echo',args:{text:'__brc_test_fail__'}});
+  assert.equal(childFailure.isError,true);
+  assert.equal(childFailure.structuredContent.error.code,'PLUGIN_TOOL_REPORTED_ERROR');
+  assert.match(out(childFailure),/fixture rejected test request/);
+  assert.equal(childFailure.structuredContent.recovery.automaticRetry,false);
 
   await manager.setPluginEnabled('echo', false);
   const disabled = await callTool('call_plugin_tool', { plugin: 'echo', tool: 'echo', args: { text: 'x' } });

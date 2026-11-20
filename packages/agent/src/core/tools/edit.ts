@@ -24,6 +24,7 @@ import { EditBlockArgsSchema } from "./schemas.js";
 import { atomicWrite, readBounded, sha256 } from "../../runtime/file-safety.js";
 import path from 'path';
 import { detectLineEnding, normalizeLineEndings } from '../utils/lineEndingHandler.js';
+import { distance } from 'fastest-levenshtein';
 import { configManager } from '../config-manager.js';
 import { resolvePreviewFileType } from '../ui/file-preview/shared/preview-file-types.js';
 import { resolveAbsolutePath } from '../handlers/filesystem-handlers.js';
@@ -95,7 +96,37 @@ function findCandidateLineNumbers(content:string,wanted:string):number[]{
         }
         if(found.length)return found;
     }
-    return [];
+    // Desktop Commander's fuzzy edit recovery is advisory. Keep that useful
+    // behavior, but cap comparisons tightly and NEVER choose a write target.
+    return boundedNearbyLines(content,wanted);
+}
+/** Read-only similarity hints for near-miss anchors. Limits source/CPU usage
+ * and returns LINE NUMBERS ONLY; every edit still requires an exact match.
+ */
+function boundedNearbyLines(content:string,wanted:string):number[]{
+    if(content.length>1_000_000)return [];
+    const target=wanted.split(/\r?\n/).map(s=>s.trim()).find(s=>s.length>=12&&s.length<=130);
+    if(!target)return [];
+    const normalized=target.toLowerCase().replace(/\s+/g,' ');
+    const allowed=Math.min(12,Math.max(2,Math.floor(normalized.length*0.18)));
+    const candidates:{line:number;delta:number}[]=[];
+    let from=0,line=1,scanned=0,compared=0;
+    while(from<content.length&&from<256_000&&scanned++<3500&&compared<500){
+        const end=content.indexOf('\n',from);
+        const to=end<0?content.length:end;
+        if(to-from<=160){
+            const candidate=content.slice(from,to).trim().toLowerCase().replace(/\s+/g,' ');
+            if(candidate&&candidate[0]===normalized[0]&&
+                Math.abs(candidate.length-normalized.length)<=allowed){
+                compared++;
+                const delta=distance(candidate,normalized);
+                if(delta<=allowed)candidates.push({line,delta});
+            }
+        }
+        if(end<0)break;
+        from=end+1;line++;
+    }
+    return candidates.sort((a,b)=>a.delta-b.delta||a.line-b.line).slice(0,5).map(x=>x.line);
 }
 function repairHint(content:string,sourceSha256:string,wanted:string,readPath:string){
     const candidateLines=findCandidateLineNumbers(content,wanted);

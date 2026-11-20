@@ -91,7 +91,7 @@ test('real MCP coding workflow, cancellation and bounded live diagnostics',{time
    const r=await tool('verify_project',{cwd:project,commands:[{name:'syntax check',command:'node --check sample.ts'}]});assert.equal(r.isError,false);assert.equal(r.structuredContent.passed,true);
   });
   await t.test('project context, symbol tools and safe previews traverse real MCP',async()=>{
-   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,71);assert.ok(defs.tools.some(t=>t.name==='recover_operation'));assert.ok(defs.tools.some(t=>t.name==='run_project_checks'));assert.ok(!defs.tools.some(t=>t.name==='workspace_batch'));
+   const defs=await rpc('tools/list',{});assert.equal(defs.tools.length,72);assert.ok(defs.tools.some(t=>t.name==='recover_operation'));assert.ok(defs.tools.some(t=>t.name==='run_project_checks'));assert.ok(!defs.tools.some(t=>t.name==='workspace_batch'));
    const context=await tool('project_context',{path:project,focus:'sample.ts'});assert.equal(context.isError,false);assert.equal(context.structuredContent.package.packageManager,'pnpm');assert.ok(context.structuredContent.instructions.some(x=>x.path==='AGENTS.md'));
    const outline=await tool('code_outline',{path:p});assert.equal(outline.isError,false);assert.ok(outline.structuredContent.symbols.some(s=>s.name==='value'));
    const symbol=await tool('read_symbol',{path:p,name:'value'});assert.equal(symbol.isError,false);assert.match(symbol.structuredContent.text,/value = 2/);

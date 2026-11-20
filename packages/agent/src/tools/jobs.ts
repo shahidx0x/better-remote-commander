@@ -1046,7 +1046,12 @@ export async function handleRunParallel(args: unknown): Promise<ServerResult> {
     s+=`\n[MORE PARALLEL RESULTS: ${batch.length-shown} omitted from this reply. Call wait_jobs({group:"${group}"}) for unreported results or get_job({id:"..."}) by job ID. Do not rerun already-completed mutations.]`;
   if (finished.length < batch.length) s += `\n\nUnfinished calls keep running. Collect them with wait_jobs({"group":"${group}"}).`;
   return {content:[{type:'text',text:capJobReply(s)}],structuredContent:{group,jobIds:batch.map(j=>j.id),
-    dependencies:a.calls.map(c=>c.depends_on),finished:finished.length,total:batch.length,pending:finished.length<batch.length,next:{tool:'wait_jobs',args:{group}}}};
+    dependencies:a.calls.map(c=>c.depends_on),finished:finished.length,total:batch.length,
+    failed:failed.length,failedJobIds:failed.map(j=>j.id),
+    executionCompleted:finished.length===batch.length,
+    allCallsSucceeded:finished.length===batch.length&&failed.length===0,
+    pending:finished.length<batch.length,
+    next:finished.length<batch.length?{tool:'wait_jobs',args:{group}}:null}};
 }
 
 // ---------------------------------------------------------------------------

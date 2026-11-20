@@ -64,7 +64,7 @@ export function readOnlyToolAllowed(name: string, args: unknown): boolean {
 
 export const RECOVER_OPERATION_TOOL = {
  name:'recover_operation',
- description:'READ ONLY. Recover a previous durable relay operation result or status without rerunning the command. Pass operationId, or omit it to list recent operations for this OAuth client. Supports byte-offset paging of encrypted, authorized results. Unknown/uncertain work must never be automatically retried.',
+ description:'USE WHEN: Read the final result or status of a previous durable relay operation after uncertain delivery, without rerunning it. USE INSTEAD: For new work use the original tool; for active local agent activity use agent_status. IMPORTANT: Pass the original operationId, or omit it to list this OAuth client\'s recent operations. Supports byte-offset paging of authorized encrypted results. Never automatically replay uncertain mutations.',
  inputSchema:{type:'object',additionalProperties:false,properties:{
   operationId:{type:'string',pattern:'^[0-9a-fA-F-]{36}$'},
   includeResult:{type:'boolean',default:true},
@@ -98,28 +98,44 @@ export const RETIRED_PUBLIC_AGENT_TOOLS = new Set([
   // Not needed in a general-purpose coding MCP catalog.
   'docker_inventory','docker_inspect','sandbox_run'
 ]);
-/** Default small catalog for ChatGPT/other MCP clients. These tools cover
- * common file/edit/search/terminal/project/check operations, safe multi-file
- * edits through workspace_batch and optional host-native worker coordination.
- * Advanced tools are still implemented; set full/focused for discovery.
+/** Default coding-first catalog. Keep 37 useful native agent entries;
+ * the relay adds device discovery and the MCP marketplace (up to 40 total).
+ * Computer-use, Playwright, Serena and MarkItDown remain reachable through
+ * list_plugin_tools + call_plugin_tool, not as dozens of top-level entries.
+ * Extra handlers remain available in focused/full and to legacy callers.
  */
 export const CORE_MCP_AGENT_TOOLS = new Set([
   'agent_status',
-  'read_file','read_multiple_files','write_file','edit_block','edit_files','apply_patch',
-  'create_directory','list_directory','get_file_info','move_file','delete_file',
-  'start_search','get_more_search_results',
+  // Read, search and understand projects.
+  'read_file','read_multiple_files','read_code_file','list_directory',
+  'start_search','code_mode','project_context','context_pack',
+  'project_map','read_images',
+  // Safe file changes, including source patching and deletion.
+  'write_file','edit_block','edit_files','apply_patch','create_directory','move_file',
+  'delete_file',
+  // Commands, long processes, independent work, Git and real checks.
   'run_command','start_process','read_process_output','interact_with_process',
-  'git_status','git_diff','git_log',
-  'project_context','project_map','context_pack','read_code_file',
-  'discover_checks','run_project_checks',
-  'run_parallel','spawn_job','wait_jobs','get_job','cancel_job','lsp_query',
-  'worker_tasks','worker_patch','worker_integrate','read_images',
+  'run_parallel','git_status','git_diff','git_log','discover_checks','run_project_checks',
+  'spawn_job','wait_jobs','get_job','cancel_job',
+  // Optional installed MCP servers and operational recovery.
+  'list_plugin_tools','call_plugin_tool','force_terminate','list_sessions','cancel_operation',
+]);
+/** Default Code Mode-first catalog: a small direct fallback, with all reviewed
+ * coding, test, project and external MCP methods progressively discoverable
+ * inside code_mode. This changes visibility only, never tool authorization.
+ * The 40-tool 'core' profile is still selectable for legacy/manual clients.
+ */
+export const CODEMODE_MCP_AGENT_TOOLS = new Set([
+  'code_mode',
+  'read_file','read_multiple_files','edit_block','run_command',
+  'agent_status','get_job','wait_jobs','cancel_job',
+  'list_plugin_tools','call_plugin_tool',
 ]);
 /** Optional larger discovery profile. No profile grants additional privileges. */
 export const FOCUSED_MCP_AGENT_TOOLS = new Set([
   'get_config','set_config_value','read_file','read_multiple_files','write_file',
   'create_directory','list_directory','move_file','get_file_info','edit_block',
-  'start_search','get_more_search_results','stop_search','list_searches',
+  'start_search','get_more_search_results','stop_search','list_searches','code_mode',
   'start_process','read_process_output','interact_with_process','force_terminate','list_sessions',
   'run_command','git_status','git_diff','git_log','agent_status','cancel_operation',
   'project_context','project_map','context_pack','read_code_file','read_code_ranges',
@@ -129,14 +145,49 @@ export const FOCUSED_MCP_AGENT_TOOLS = new Set([
   'worker_tasks','worker_patch','worker_integrate',
   'list_plugin_tools','call_plugin_tool','code_graph','lsp_query','get_recent_tool_calls',
 ]);
-export type McpToolProfile = 'core'|'focused'|'full';
+export type McpToolProfile = 'codemode'|'core'|'focused'|'full';
+/** Code Mode-first is the default. 'core' retains the earlier 40-tool profile. */
 export function mcpToolProfile(value=process.env.BRC_MCP_TOOL_PROFILE):McpToolProfile {
-  return value==='full'||value==='focused'?value:'core';
+  return value==='core'||value==='focused'||value==='full'?value:'codemode';
 }
 export function exposeMcpAgentTool(name:string,profile=process.env.BRC_MCP_TOOL_PROFILE):boolean {
   if(RETIRED_PUBLIC_AGENT_TOOLS.has(name))return false;
   const mode=mcpToolProfile(profile);
-  return mode==='full'||(mode==='focused'?FOCUSED_MCP_AGENT_TOOLS:CORE_MCP_AGENT_TOOLS).has(name);
+  return mode==='full'||({codemode:CODEMODE_MCP_AGENT_TOOLS,
+    core:CORE_MCP_AGENT_TOOLS,focused:FOCUSED_MCP_AGENT_TOOLS} as const)[mode].has(name);
+}
+
+/** Shared public tool catalog for MCP tools/list and /health.
+ * Default codemode: 11 agent + 3 relay tools (14), plus optional
+ * recover_operation (15). Legacy core: 37 agent + 3 relay (40);
+ * with recovery, list_sessions is hidden to preserve its 40-slot budget.
+ * Discovery does NOT imply execution authorization.
+ */
+export function composeMcpToolList<T extends {name:string;description:string;inputSchema:unknown}>(
+  agentTools:T[], options:{
+    onlineCount?:number;profile?:McpToolProfile;access?:'read'|'full';
+    plugins?:boolean;skills?:boolean;journal?:boolean;
+  }={}
+) {
+  const profile=options.profile??mcpToolProfile();
+  const core=profile==='core';
+  const access=options.access??'full';
+  const selected=core&&options.journal
+    ?agentTools.filter(t=>t.name!=='list_sessions'):agentTools;
+  const relayTools=[
+    {...LIST_DEVICES_TOOL,description:`${LIST_DEVICES_TOOL.description} ${options.onlineCount??0} device(s) currently online.`},
+    ...(options.journal?[RECOVER_OPERATION_TOOL]:[]),
+    ...(options.plugins?PLUGIN_RELAY_TOOLS.filter(t=>access!=='read'||t.name==='search_mcp_registry'):[]),
+    ...(!core&&profile!=='codemode'&&options.skills
+      ?SKILL_RELAY_TOOLS.filter(t=>access!=='read'||t.name!=='request_skill_install'):[]),
+  ];
+  // Code Mode is visibly the PRIMARY action, while direct file/job tools
+  // remain available for simple work, troubleshooting and older workflows.
+  if(profile==='codemode'){
+    const code=selected.find(t=>t.name==='code_mode');
+    return [...(code?[code]:[]),...relayTools,...selected.filter(t=>t.name!=='code_mode')];
+  }
+  return [...relayTools,...selected];
 }
 // Cache schema transformation only, NEVER authentication, ownership or pause checks.
 // Device objects change on reconnect/hello; pause state is read freshly for every tools/list.
@@ -217,15 +268,33 @@ export const CORE_TOOL_ROUTING_GUIDANCE = [
   'READ: one known file -> read_file; two or more known files -> read_multiple_files; unknown paths -> start_search(wait=true). Bounded reads can be incomplete. Follow read.next or batch.continuations, and use read_code_file charOffset/charLength for giant lines. PDF pagination uses pages, not lines.',
   'EDIT: write_file creates/replaces/appends ONE file. edit_block changes ONE focused block: default exactly one occurrence, use explicit replace_all:true only when all matches should change. On a mismatch inspect candidateLines/sourceSha256 and next read window. For source changes apply_patch with exact Update/Add/Delete/Move sections or edit_files with expected_sha256. Both validate before writing and use guarded per-file updates; neither is crash-atomic across files. A successful write confirms only its chunk; never blindly retry an uncertain mutation without checking current file state.',
   'RUN: prefer run_command({program:"git",args:["status","--short"],cwd:"absolute project path"}) for native executable calls. Literal argv bypasses Windows quoting; for shell scripts/pipelines use command and an explicit compatible shell. Inspect final exitCode, not merely tool success. A nonzero exit means the program failed, not MCP transport. Long/interactive command -> start_process returns PID+stable sessionId. read_process_output(session_id,cursor) supports independent cursors and encrypted 24h bounded history on paired agents. Restored unfinished sessions remain uncertain; never replay automatically. Independent operations -> run_parallel (default concurrency 4), then use wait_jobs/get_job for incomplete or truncated output. Do not run simultaneous writes to the same path.',
-  'WORKERS: worker_tasks, worker_patch and worker_integrate coordinate *existing host-native AI workers*; BRC does not create extra models. Without subagents use ordinary sequential write_file/edit_block calls; only the worker integrator uses the internal batch engine. Worker plans live in agent RAM; expire/reclaim with fresh hashes.',
+  'EXTERNAL MCP: use list_plugin_tools to inspect ready plugins and their exact schemas, then call_plugin_tool to invoke computer-use, Serena, MarkItDown or Playwright only when the task requires it. Do not open a browser or app for ordinary coding; use local file tools and commands first. Only installed plugins can run.',
+  'CODE MODE: for multi-step coding tasks use code_mode with a JavaScript function body. Inside the isolated local worker await tools.search(query), await tools.describe(name), and await tools.call(name,args); inspect actual results, branch and return a compact summary. Every nested operation uses BRC permissions and completion checks. Do not include raw secrets or assume a started background job has passed. For one simple operation prefer its direct tool, and for a long build use spawn_job then get_job/wait_jobs.',
+  'MCP INSTALL: search_mcp_registry discovers available servers; request_plugin_install queues an owner-reviewed installation request in BRC Admin. Discovery or a model request cannot install third-party code or supply secret keys on its own.',
+  'LONG TASKS: spawn_job starts durable-in-session jobs; wait_jobs/get_job confirm completion and actual exit codes. start_process is for interactive work, read_process_output retrieves updates; use force_terminate for a known session or cancel_operation for an authorized active operation. Never claim completion merely because a job started.',
+  'RECOVERY: if recover_operation appears in this catalog, use it with the original operationId after an uncertain MCP delivery rather than rerunning a build or mutation. The optional list_sessions entry is hidden when recovery is available to keep project context and the Core budget at 40.',
   'ERRORS: check structuredContent.error.code and recovery.suggestion. BUSY means wait/reduce concurrency; CHECK_FAILED means actual verification failed; WRITE_LINE_LIMIT/WRITE_SIZE_LIMIT means nothing was written; a disconnected write may still have succeeded, so verify before any retry.',
-  'Access controls and user approval are enforced separately from discovery. Do not fabricate file content, completion, tests, extra tools or successful edits.'
+  'Access controls and user approval are enforced separately from discovery. For code deletions use delete_file only for explicitly identified targets. Do not fabricate file content, completion, tests, extra tools or successful edits.'
+].join(' ');
+
+/** Default model instructions: make local Code Mode the planning/execution
+ * surface instead of asking the model to shuttle intermediate tool results.
+ * A fallback direct call is still encouraged for a single simple action.
+ */
+export const CODEMODE_TOOL_ROUTING_GUIDANCE = [
+  'BRC CODE MODE FIRST (DEFAULT): For most coding, debugging, testing, project exploration and multistep MCP work, call code_mode FIRST. Write a small JavaScript function body with await tools.search(query), await tools.describe(exactName), await tools.call(exactName,args), conditional checks and a compact return value. This is ONE model-to-relay request: local nested tools do not create extra model turns.',
+  'DISCOVERY: use tools.search for tool names, tools.describe to inspect the actual JSON parameter schema, and tools.call with correct arguments. Installed external MCP servers: await tools.call("list_plugin_tools",{...}) to inspect a ready plugin, then await tools.call("call_plugin_tool",{plugin,tool,args}) for the selected method. Computer/browser interaction requires an explicit user task; do not open apps or browsers during ordinary coding.',
+  'RESULTS: use returned structuredContent and actual command exitCode / test status. A pending tool or background job is NOT finished. For long builds/tests spawn_job through Code Mode, return its jobId, then use the direct get_job/wait_jobs tool on subsequent turns. Default 48 nested calls, maximum 96; the workflow has a deadline, not an unlimited run.',
+  'SAFETY: all nested calls go through the original agent dispatcher, path access and user permissions. A Code Mode program cannot install MCP servers or grant itself new permissions. Do not automatically repeat uncertain mutations; inspect affected files and recovery receipts. If a script fails, report partial steps and exact error instead of fabricating completion.',
+  'FALLBACK: for ONE trivial, known read, focused edit, or command, a direct read_file/read_multiple_files/edit_block/run_command can be better. Use list_devices only to select a paired device. If Code Mode is unavailable on an older agent, ask to update/restart the agent or switch the relay to BRC_MCP_TOOL_PROFILE=core; do not claim success for unsupported tools.',
+  'PLUGIN INSTALL: search_mcp_registry can find candidate servers and request_plugin_install records an owner-reviewed request. It does NOT automatically install third-party packages. A read-only MCP connection must not run Code Mode, file edits or shell commands.',
 ].join(' ');
 
 export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpContext, relayVersion: string, access: 'read' | 'full' = 'full', plugins?: { registry: RegistryClient; publicUrl: string; skills?: SkillsCatalog; journal?: OperationJournal; crossRelay?: CrossRelayCoordinator },
   onToolTraffic?: (userId:string,tool:string,args:unknown,result:unknown)=>void): Server {
   const server = new Server({ name: 'brc', version: relayVersion }, { capabilities: { tools: {} },
-    instructions: (mcpToolProfile()==='core' ? CORE_TOOL_ROUTING_GUIDANCE : TOOL_ROUTING_GUIDANCE) +
+    instructions: (mcpToolProfile()==='codemode' ? CODEMODE_TOOL_ROUTING_GUIDANCE :
+      mcpToolProfile()==='core' ? CORE_TOOL_ROUTING_GUIDANCE : TOOL_ROUTING_GUIDANCE) +
       (access === 'read' ? ' THIS CONNECTION IS READ-ONLY: only advertised read tools may be invoked; no writes or terminal mutations.' : '') });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -234,7 +303,9 @@ export function createMcpServer(hub: DeviceHub, store: RelayStore, ctx: McpConte
     const selected = access === 'read' ? tools.filter(t => READ_ONLY_TOOLS.has(t.name)).map(t =>
       t.name === 'batch_tools' ? { ...t, description: 'READ-ONLY BATCH: all nested tools must be permitted reads. ' + t.description,
         annotations: { ...t.annotations, readOnlyHint: true, destructiveHint: false } } : t) : tools;
-    return { tools: [{ ...LIST_DEVICES_TOOL, description: `${LIST_DEVICES_TOOL.description} ${onlineCount} device(s) currently online.` }, ...(plugins?.journal?[RECOVER_OPERATION_TOOL]:[]), ...(plugins ? PLUGIN_RELAY_TOOLS.filter(t => access !== 'read' || t.name === 'search_mcp_registry') : []), ...(plugins?.skills ? SKILL_RELAY_TOOLS.filter(t => access !== 'read' || t.name !== 'request_skill_install') : []), ...selected] };
+    return { tools: composeMcpToolList(selected, {
+      onlineCount,access,plugins:!!plugins,skills:!!plugins?.skills,journal:!!plugins?.journal,
+    }) };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {

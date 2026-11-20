@@ -39,6 +39,16 @@ test('edit_block missing anchor returns a hash and line-number repair locations 
  assert.equal(failed.structuredContent.next.args.path,file);
  assert.equal(await fs.readFile(file,'utf8'),data);
 });
+test('edit_block near-typo suggestions follow bounded fuzzy hints but do not auto-edit',async()=>{
+ const file=full('typo.ts'),original='header\nlet valueCount = 3;\nfooter\n';
+ await fs.writeFile(file,original);
+ const failed=await callTool('edit_block',{file_path:file,old_string:'let vlaueCount = 3;',new_string:'let valueCount = 4;'});
+ assert.equal(failed.isError,true);
+ assert.equal(failed.structuredContent.error.code,'EDIT_TEXT_NOT_FOUND');
+ assert.ok(failed.structuredContent.candidateLines.includes(2),JSON.stringify(failed.structuredContent));
+ assert.equal(failed.structuredContent.next.args.offset,0);
+ assert.equal(await fs.readFile(file,'utf8'),original);
+});
 test('edit_block multi-edit replace_all validates every hunk before one write',async()=>{
  const file=full('multi.ts'),before='one\nTWO\nTWO\nend\n';
  await fs.writeFile(file,before);

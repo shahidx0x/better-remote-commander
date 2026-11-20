@@ -13,7 +13,7 @@ import { runProgram } from '../runtime/program-runner.js';
 import { codeGraph } from '../runtime/code-graph.js';
 import { codeCacheStatus } from '../runtime/code-structure.js';
 import { readBounded, decodeCode, sha256, atomicWrite, withFileLocks, lockKey } from '../runtime/file-safety.js';
-import { AgentError, result, failure } from '../runtime/errors.js';
+import { AgentError, result, failure, errorCode } from '../runtime/errors.js';
 import { projectIndex } from '../runtime/project-index.js';
 import { activity, RETENTION_MS } from '../runtime/activity.js';
 import { operationStatus, cancelOperation } from '../runtime/operations.js';
@@ -78,7 +78,22 @@ export async function snapshot(file:string, offset=0, length=200, charOffset?:nu
 async function readCodeFile(raw:unknown):Promise<ToolResult> {
  const a=SnapshotSchema.parse(raw);
  try{return result(await snapshot(a.path,a.offset,a.length,a.charOffset,a.charLength));}
- catch(e){if((e as NodeJS.ErrnoException)?.code==='ENOENT')return missingFileResponse(a.path);throw e;}
+ catch(e){
+  const code=errorCode(e);
+  if(code==='ENOENT')return missingFileResponse(a.path);
+  if(code==='EISDIR'||code==='ENOTDIR')return failure(new AgentError('CODE_SNAPSHOT_NOT_FILE',
+    'read_code_file needs an existing regular source file, not a directory or invalid parent. Use list_directory to inspect the path.'));
+  // Preserve real access, cancellation, policy and source errors unchanged.
+  // Only unexpected unclassified snapshot errors get this scoped diagnosis.
+  if(code!=='TOOL_FAILED')return failure(e);
+  const reason=e instanceof Error?e.message.slice(0,300):'unknown filesystem error';
+  const out=failure(new AgentError('CODE_SNAPSHOT_FAILED',
+    'Source snapshot failed: '+reason+'. Check the path and file type before retrying.'));
+  return {...out,structuredContent:{...out.structuredContent,
+    recovery:{automaticRetry:false,
+      suggestion:'Use get_file_info to verify the file exists and is readable. Use read_file for non-code documents, then retry only with a corrected path.',
+      next:{tool:'get_file_info',args:{path:a.path}}}}};
+ }
 }
 
 async function readCodeContext(raw:unknown):Promise<ToolResult> {

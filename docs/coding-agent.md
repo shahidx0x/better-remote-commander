@@ -1,6 +1,10 @@
 # Coding agent: local launch, live output and project harness
 
-This source build exposes 70 agent tools, plus the relay's `list_devices` (71 total). The new tools do not contain another AI model: the connected AI chooses the work, and the local agent provides context, performs authorized operations and verifies results.
+The default Code Mode-first MCP profile exposes 14 main tools (15 with recovery). The earlier 40-tool Core is an opt-in direct-tool fallback; it is not the default. More specialized handlers remain available in Focused/Full. The new tools do not contain another AI model: the connected AI chooses the work, and the local agent provides context, performs authorized operations and verifies results.
+
+## Code Mode
+
+The agent uses `code_mode` FIRST in the default 14–15-tool `codemode` relay catalog; set `BRC_MCP_TOOL_PROFILE=core` to expose the previous 40 tools directly. Its JavaScript guest runs in a bounded QuickJS/WASM worker on the **local paired device** and has no Node.js, `require`, process, filesystem or network globals. Only the injected `tools.search`, `tools.describe`, and `tools.call` bridge is available. Every called tool still applies existing source validation, cancellation, path policy, runtime limits, receipts, and permission checks. For long-running builds create BRC jobs and follow them with `get_job` or `wait_jobs`; do not treat started jobs as completed. No production restart or installed third-party MCP approval is implicit. See [tool discovery and Code Mode](chatgpt-mcp-tool-guide.md).
 
 ## Run your checkout
 

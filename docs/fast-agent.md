@@ -1,6 +1,10 @@
 # BRC coding tools, bounded results and legacy tool reference
 
-This checkout implements an 80-handler compatibility catalog, but the relay now publicly advertises only **34 Core tools** by default (44 Focused / 60 Full). The 20 retired public entries include competing multi-file editors and Docker-specific tools. The agent executes authorized calls; the relay authenticates, routes and limits results. Existing internal worker-batch functionality is retained. No new model, orchestration framework or graph database is required.
+This checkout implements an 83-entry offline compatibility catalog, but the relay now defaults to **14–15 Code Mode-first MCP tools** (the previous 40-tool Core is available explicitly). Focused exposes 48 native agent tools and Full exposes 64, plus relay tools. The 19 retired public entries include competing multi-file editors and Docker-specific tools. The agent executes authorized calls; the relay authenticates, routes and limits results. Existing internal worker-batch functionality is retained. No new model, orchestration framework or graph database is required.
+
+## Code Mode for workflows requiring several dependent tools
+
+For most coding and testing workflows involving more than one step, prefer `code_mode`: run model-authored JavaScript in the paired device's QuickJS/WASM sandbox and use `await tools.search(query)`, `await tools.describe(name)` and `await tools.call(name,args)` for progressive tool discovery, file edits, Git and real test execution. No direct Node/OS globals are exposed in the guest; each nested call passes the original BRC dispatcher and permission checks. It consumes **one remote MCP call** but still performs its nested local operations. Use direct tools for one short action, `spawn_job` plus later `get_job`/`wait_jobs` for builds that outlive a Code Mode call, and **never** auto-replay uncertain mutations. The worker limits memory, time, output and nested tool calls. See [Code Mode guide](chatgpt-mcp-tool-guide.md#local-javascript-code-mode-for-multi-step-coding).
 
 ## The short workflow
 

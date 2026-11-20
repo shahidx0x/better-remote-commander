@@ -66,13 +66,20 @@ const call = async (name, args) => { const b = await rpc('tools/call', { name, a
 const tools = (await rpc('tools/list', {})).result?.tools?.map((t) => t.name) ?? [];
 step('MCP lists marketplace tools without forcing every local plugin tool into the core catalog',
   tools.includes('search_mcp_registry') && tools.includes('request_plugin_install') &&
-    (process.env.BRC_MCP_TOOL_PROFILE==='full'||process.env.BRC_MCP_TOOL_PROFILE==='focused'
-      ? tools.includes('list_plugin_tools') : !tools.includes('list_plugin_tools')),
+    tools.includes('list_plugin_tools') && tools.includes('call_plugin_tool'),
   tools.filter((t) => /plugin|registry/.test(t)).join(','));
 let c = await call('list_plugin_tools', { deviceId, plugin: 'echo-e2e' });
 step('list_plugin_tools shows plugin tools', !c.isError && /### echo/.test(c.text), c.text.slice(0, 80));
 c = await call('call_plugin_tool', { deviceId, plugin: 'echo-e2e', tool: 'echo', args: { text: 'hi' } });
 step('call_plugin_tool works', !c.isError && c.text === 'echo: hi', c.text);
+const throughCodeMode=await call('code_mode',{source:[
+  'const meta=await tools.call("list_plugin_tools",{plugin:"echo-e2e"});',
+  'const echoed=await tools.call("call_plugin_tool",{plugin:"echo-e2e",tool:"echo",args:{text:"via-code-mode"}});',
+  'return {discovered:meta.text.includes("echo-e2e"),response:echoed.text};'
+].join('\n')});
+step('Code Mode reaches an installed external MCP through the existing dispatcher',
+  !throughCodeMode.isError && throughCodeMode.text.includes('echo: via-code-mode') &&
+  throughCodeMode.text.includes('discovered'),throughCodeMode.text.slice(0,150));
 
 // --- disable -> calls fail
 r = await post('/admin/plugins/action', { csrf, device_id: deviceId, plugin_id: 'echo-e2e', action: 'disable' }, cookie);

@@ -1,6 +1,8 @@
 node_modules
 **/node_modules
 **/dist
+**/native/**/bin
+**/native/**/obj
 reference-desktop-commander
 data
 .git
