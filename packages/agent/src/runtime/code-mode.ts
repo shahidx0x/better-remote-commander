@@ -286,7 +286,9 @@ export async function executeCodeMode(
           return;
         }
         if(message?.type==='error'){
-          finish(failureWithSteps('CODE_MODE_SCRIPT_FAILED',message.message.slice(0,900)));
+          const code=message.message.startsWith('CODE_MODE_UNAWAITED_CALLS:')
+            ?'CODE_MODE_UNAWAITED_CALLS':'CODE_MODE_SCRIPT_FAILED';
+          finish(failureWithSteps(code,message.message.slice(0,900)));
           return;
         }
         if(message?.type==='done'){

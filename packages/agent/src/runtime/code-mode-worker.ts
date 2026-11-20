@@ -16,6 +16,9 @@ if (!parentPort) throw new Error('Code Mode worker requires a parent thread.');
 const port=parentPort;
 const input=workerData as Inputs;
 const pending=new Map<number,{resolve:(value:RpcReply)=>void;reject:(error:Error)=>void}>();
+// A guest can launch tools.call() without awaiting it. Never destroy the VM
+// while its bridge promises are still live: JS_FreeRuntime can abort on them.
+const inFlightGuestCalls=new Set<Promise<void>>();
 let sequence=0;
 let cancelled=false;
 
@@ -67,8 +70,12 @@ async function execute():Promise<unknown>{
       }else{
         try{
           const request=JSON.parse(raw) as RpcRequest;
-          void rpc(request).then(settle,error=>settle({ok:false,error:{
+          const operation=rpc(request).then(settle,error=>settle({ok:false,error:{
             code:'CODE_MODE_BRIDGE_FAILED',message:safeError(error)}}));
+          inFlightGuestCalls.add(operation);
+          // Observe both outcomes without creating an unhandled rejection.
+          void operation.then(()=>inFlightGuestCalls.delete(operation),
+            ()=>inFlightGuestCalls.delete(operation));
         }catch(error){
           settle({ok:false,error:{code:'CODE_MODE_BRIDGE_FAILED',message:safeError(error)}});
         }
@@ -116,6 +123,23 @@ async function execute():Promise<unknown>{
       // Later RPC completions wake the remaining microtasks automatically.
       vm.runtime.executePendingJobs();
       const settled=await awaiting;
+      const unawaited=inFlightGuestCalls.size;
+      if(unawaited){
+        // A detached tools.call() promise can outlive the guest script. Drain
+        // already-started host calls and guest microtasks before disposing the
+        // QuickJS runtime; do not report a successful workflow prematurely.
+        // Follow-on guest continuations may enqueue more calls as jobs run.
+        // The parent owns the deadline and terminates a stuck worker. Never
+        // call JS_FreeRuntime with unresolved QuickJS bridge promises.
+        while(inFlightGuestCalls.size){
+          await Promise.allSettled([...inFlightGuestCalls]);
+          if(vm.alive)vm.runtime.executePendingJobs();
+        }
+        if(settled.error)settled.error.dispose();
+        else settled.value.dispose();
+        throw new Error('CODE_MODE_UNAWAITED_CALLS: '+unawaited+
+          ' asynchronous bridge call(s) were not awaited. Use await tools.call(...) or await Promise.all(...). The started calls have settled; inspect their results before retrying writes.');
+      }
       if(settled.error){
         const detail=vm.dump(settled.error) as {message?:unknown}|string;
         settled.error.dispose();

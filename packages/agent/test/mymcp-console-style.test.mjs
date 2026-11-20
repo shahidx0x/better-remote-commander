@@ -14,10 +14,10 @@ test('shows MyMCP remote-device received message with arguments and metadata',()
  const ev={timestamp:'2026-11-20T03:05:33.000Z',level:'info',phase:'START',
    tool:'read_multiple_files',id:'0a95f022-0206',trace};
  const line=formatActivityEvent(ev,'mymcp',160);
- assert.match(line,/^\[\d\d:\d\d:\d\d\] 🔧 Received tool call 0a95f022-0206: read_multiple_files/);
- assert.match(line,/paths/);
- assert.match(line,/metadata: \{"origin":"remote"/);
- assert.match(line,/openai-mcp/);
+ assert.match(line,/^\[\d\d:\d\d:\d\d\] 🔧 Tool call read_multiple_files started/);
+ assert.match(line,/started\s+#0a95f022/);
+ assert.equal(line.split('\n').length,1);
+ assert.doesNotMatch(line,/paths|metadata|openai-mcp|package\.json/);
 });
 
 test('shows MyMCP completion message with bounded JSON body',()=>{
@@ -26,9 +26,13 @@ test('shows MyMCP completion message with bounded JSON body',()=>{
  const ev={timestamp:'2026-11-20T03:05:27.000Z',level:'info',phase:'OK',
    tool:'list_directory',id:'receipt-1234',ms:5,trace};
  const line=formatActivityEvent(ev,'mymcp',160);
- assert.match(line,/^\[\d\d:\d\d:\d\d\] ✅ Tool call list_directory completed:\n /);
- assert.match(line,/package.json/);
- assert.doesNotMatch(line,/\| OK\s+\|/);
+ assert.match(line,/^\[\d\d:\d\d:\d\d\] ✅ Tool call list_directory completed/);
+ assert.match(line,/Result preview/);
+ assert.match(line,/Call #receipt/);
+ assert.match(line,/5ms/);
+ assert.match(line,/Directory listed successfully/);
+ assert.match(line,/2 files, 1 folder/);
+ assert.doesNotMatch(line,/package\.json|\{\s*"content"|\\n/);
 });
 
 test('activity console emits received and completed, retains bounded events',async()=>{
@@ -39,7 +43,7 @@ test('activity console emits received and completed, retains bounded events',asy
   log.tool('START','read_file','file-123',undefined,undefined,'read @ file.ts',undefined,
     mymcpCallPreview('read_file',{path:'file.ts'}));
   assert.equal(log.consoleQueue.length,1);
-  assert.match(log.consoleQueue[0],/🔧 Received tool call/);
+  assert.match(log.consoleQueue[0],/🔧 Tool call read_file started/);
   log.tool('OK','read_file','file-123',3,undefined,'read @ file.ts','24 lines',
     mymcpResultPreview('read_file',{content:[{type:'text',text:'export const a=1;'}]}));
   assert.equal(log.consoleQueue.length,2);
@@ -56,8 +60,11 @@ test('errors use the matching failed label and safe structured JSON',()=>{
  const ev={timestamp:'2026-11-20T03:05:35.000Z',level:'error',phase:'ERROR',
    tool:'run_command',id:'uuid-1',ms:25,code:'COMMAND_FAILED',trace};
  const out=formatActivityEvent(ev,'mymcp',160);
- assert.match(out,/^\[\d\d:\d\d:\d\d\] ❌ Tool call run_command failed:/);
- assert.match(out,/exitCode/);
+ assert.match(out,/^\[\d\d:\d\d:\d\d\] ❌ Tool call run_command failed/);
+ assert.match(out,/Result preview/);
+ assert.match(out,/Operation failed • COMMAND_FAILED • exit 1/);
+ assert.match(out,/Next: Inspect the command output returned to ChatGPT/);
+ assert.doesNotMatch(out,/"content"|"exitCode"/);
 });
 
 test('JSON previews remain <= 4096 UTF-8 bytes and source actions are omitted',()=>{
@@ -70,8 +77,9 @@ test('JSON previews remain <= 4096 UTF-8 bytes and source actions are omitted',(
  const batch=mymcpResultPreview('read_multiple_files',
    {content:[{type:'text',text:'non-public file content'}]},
    {files:[{path:'D:/project/.env'}]});
- assert.doesNotMatch(batch,/non-public file content/);
- assert.match(batch,/omitted/);
+ assert.doesNotMatch(batch,/non-public file content|D:\/project\/\.env/);
+ assert.match(batch,/Files read successfully/);
+ assert.match(batch,/1 file/);
 });
 
 test('heartbeat remains suppressed when idle',()=>{
@@ -99,6 +107,7 @@ test('recent activity is compatible with received and completed labels',()=>{
    tool:'read_file',id:'abc',trace:'{"content":[{"type":"text","text":"ok"}]}'}
  ];
  const display=recentActivity(history,50,48*1024,'mymcp');
- assert.match(display,/Received tool call/);
+ assert.match(display,/Tool call read_file started/);
  assert.match(display,/Tool call read_file completed/);
+ assert.doesNotMatch(display,/"content":/);
 });

@@ -95,6 +95,26 @@ function localToolStamp(timestamp:string):string {
     return date.getFullYear()+'-'+pad(date.getMonth()+1)+'-'+pad(date.getDate())+
         ' '+pad(date.getHours())+':'+pad(date.getMinutes())+':'+pad(date.getSeconds());
 }
+/** Parse only allowlisted, short console fields. Never render raw MCP JSON. */
+function minimalPreview(raw:string|undefined):{
+    summary?:string;detail?:string;target?:string;hint?:string
+} {
+    if(!raw)return {};
+    try {
+        const value=JSON.parse(raw) as Record<string,unknown>;
+        if(!value||typeof value!=='object'||Array.isArray(value))return {};
+        const field=(name:string,limit:number):string|undefined=>{
+            const item=value[name];
+            return typeof item==='string'&&item.length>0?compactLine(item,limit):undefined;
+        };
+        return {
+            summary:field('summary',130),
+            detail:field('detail',100),
+            target:field('target',115),
+            hint:field('hint',125),
+        };
+    } catch { return {}; }
+}
 /** Render human-readable live events. Verbose mode preserves bounded multi-line details. */
 export function formatActivityEvent(event: ActivityEvent, mode: ConsoleMode, width=120): string {
     const time = new Date(event.timestamp).toLocaleTimeString('en-GB',{hour12:false});
@@ -116,21 +136,32 @@ export function formatActivityEvent(event: ActivityEvent, mode: ConsoleMode, wid
     const legacyTool = /^\s*(?:START|OK|ERROR|PENDING)\s+([a-z][a-z0-9_]*)\b/i.exec(event.message)?.[1];
     const label = '['+time+'] ['+state+'] '+(event.tool??legacyTool??'operation')+duration;
     if (mode === 'mymcp') {
-        // Match the ACTUAL MyMCP remote-device console (device.ts), not
-        // Desktop Commander's separate history table. Keep safe 4-KiB JSON
-        // previews instead of dumping unlimited raw tool payloads.
+        // A few readable lines like a tool receipt: no JSON, code or full output.
         const stamp='['+time+']';
         const name=event.tool??legacyTool??'operation';
-        const payload=event.trace??'{"content":[],"note":"Preview unavailable"}';
+        const preview=minimalPreview(event.trace);
+        const id='#'+(event.id?.slice(0,8)??'unknown');
+        const took=event.ms===undefined?'':' • '+(event.ms>=1000
+            ?(event.ms/1000).toFixed(1)+'s':Math.round(event.ms)+'ms');
+        const target=preview.target??(event.action?compactLine(event.action,105):undefined);
+        const context=target&&target!==preview.detail
+            ?'\n    Target: '+compactLine(target,Math.max(40,max-12)):'';
         if(event.phase==='START')
-            return stamp+' 🔧 Received tool call '+(event.id??'unknown')+
-                ': '+name+' '+payload;
-        if(event.phase==='OK')
-            return stamp+' ✅ Tool call '+name+' completed:\n '+payload;
-        if(event.phase==='PENDING')
-            return stamp+' ⏳ Tool call '+name+' running:\n '+payload;
-        return stamp+' ❌ Tool call '+name+' failed:'+
-            (event.note?' '+compactLine(event.note,180):'')+'\n '+payload;
+            return stamp+' 🔧 Tool call '+name+' started  '+id;
+        const receipt='\n    Call '+id+took;
+        const heading='\n    Result preview\n    ';
+        const detail=preview.detail?' • '+preview.detail:'';
+        if(event.phase==='OK')return stamp+' ✅ Tool call '+name+' completed'+receipt+
+            heading+(preview.summary??'Tool completed successfully')+detail+context;
+        if(event.phase==='PENDING')return stamp+' ⏳ Tool call '+name+' running'+receipt+
+            heading+(preview.summary??'Operation is still running')+detail+context;
+        const code=preview.detail??event.code??'TOOL_FAILED';
+        const generic=/tool failed; inspect its structured error and recovery guidance/i;
+        const hint=preview.hint??(event.note&&!generic.test(event.note)
+            ?compactLine(event.note,105):undefined);
+        return stamp+' ❌ Tool call '+name+' failed'+receipt+heading+
+            'Operation failed • '+compactLine(code,100)+
+            (hint?'\n    Next: '+compactLine(hint,125):'')+context;
     }
     if (mode === 'detailed') {
         // Desktop Commander-style timestamps, call IDs, action and outcome,
