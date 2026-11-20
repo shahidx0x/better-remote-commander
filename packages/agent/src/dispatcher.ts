@@ -24,6 +24,7 @@ import {PATCH_TOOL_HANDLERS,buildPatchToolDefinitions} from './tools/patch-tools
 import {CODE_MODE_TOOL_HANDLERS,buildCodeModeToolDefinitions,setCodeModeToolExecutor} from './tools/code-mode-tools.js';
 import { activity, activityAction } from './runtime/activity.js';
 import { traceToolArguments, traceToolResult } from './runtime/tool-trace.js';
+import { mymcpCallPreview, mymcpResultPreview } from './runtime/mymcp-console.js';
 import { toolHistory } from './core/utils/toolHistory.js';
 import { summarizeCommandActivity } from './runtime/command-log-summary.js';
 import { summarizeToolOutcome } from './runtime/log-outcome.js';
@@ -249,8 +250,10 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
   try {
   const start=performance.now();
    const action=activityAction(name,args);
+  const logMode=activity.getConsoleMode();
   activity.tool('START',name,parent.id,undefined,undefined,action,undefined,
-    activity.getConsoleMode()==='verbose'?traceToolArguments(name,args):undefined);
+    logMode==='mymcp'?mymcpCallPreview(name,args,parent.client,parent.remote):
+      logMode==='verbose'?traceToolArguments(name,args):undefined);
   let out:ToolResult;
   try{
     const handler=TOOL_HANDLERS.get(name);
@@ -350,7 +353,8 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     : phase==='ERROR' ? ((error?.code??'TOOL_FAILED')+': '+failureReason(name,error?.code??'TOOL_FAILED'))
     : summarizeToolOutcome(name,out);
   activity.tool(phase,name,parent.id,durationMs,error?.code,action,note,
-    activity.getConsoleMode()==='verbose'?traceToolResult(name,out):undefined);
+    logMode==='mymcp'?mymcpResultPreview(name,out,args):
+      logMode==='verbose'?traceToolResult(name,out):undefined);
   // Persist sanitized metadata and a <=4-KiB output preview without adding
   // another in-memory history ring. Never log the history query itself.
   if(name!=='get_recent_tool_calls')

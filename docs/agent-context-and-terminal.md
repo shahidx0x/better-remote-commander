@@ -107,9 +107,9 @@ The desktop BRC Agent opens the verification page **on the exact relay base URL 
 
 Rebuild the agent after changing its source; redeploy the relay after changing its HTTP pages/routes. Building does not alter or restart an already-running service.
 
-## Detailed live console with bounded 30-second local heartbeat
+## MyMCP-style live console with bounded local heartbeat
 
-Interactive CMD/Windows Terminal shows a static startup panel containing the device/relay/runtime, a simple live connection indicator and detailed tool activity. A 30-second local O(1) heartbeat summarizes connection state, active calls, completed/failed counts and current retained log payload. It never polls the relay, writes activity transcripts, or redraws a full-screen dashboard.
+Interactive CMD/Windows Terminal shows a static startup panel and the **actual MyMCP remote-device messages**: a timestamped 🔧 `Received tool call <id>: <name> <safe arguments> metadata: <safe metadata>` on arrival, followed by a timestamped ✅ `Tool call <name> completed:` and a bounded JSON output preview. Errors use ❌ `Tool call <name> failed:` and include a safe diagnosis. This is intentionally a start/completion pair, not the old padded one-line history layout. The local status check still runs every 30 seconds, but unchanged heartbeats remain silent (a reassurance row appears at most every five idle minutes). It never polls the relay, writes activity transcripts, or redraws a full-screen dashboard.
 
 Single-key controls in a TTY (or a command followed by Enter in non-raw interactive mode):
 
@@ -118,13 +118,13 @@ Single-key controls in a TTY (or a command followed by Enter in non-raw interact
 | **M** | Connection settings (only opens when tool execution is idle) |
 | **S** | Show live connection and in-flight tool status (local O(1) snapshot) |
 | **L** | Show last 50 sanitized activity events held in RAM |
-| **V** | Cycle detailed, verbose and compact live output |
+| **V** | Cycle MyMCP-style, detailed, verbose and compact live output |
 | **?** or **H** | Show shortcut hints |
 | **Ctrl+C** | Stop the agent gracefully |
 
-The agent CLI defaults to **detailed** mode with timestamped START, completion, duration, safe action, call ID and classified failure notes. `--compact` removes START chatter; `--verbose` shows additional bounded redacted parameter/status previews. Live logging retains at most **428 KiB of event history + 40 KiB pending stdout + 32 KiB pending/in-flight history writes**. Native terminal scrollback is not duplicated in RAM. Separately, `~/.brc/logs/tool-history.jsonl` persists up to **1,000 sanitized tool records**, with a **4 KiB** maximum preview per record and **5 MiB** maximum file size. An asynchronous streaming writer trims older entries and loads history on demand; `BRC_TOOL_HISTORY=0` opts out.
+The agent CLI defaults to **mymcp** mode copied from MyMCP's `remote-device/device.ts` message layout. Its JSON previews are redacted and limited to **4 KiB per tool result**, unlike MyMCP's unbounded console dump. Args omit scripts and credentials; full results still reach the MCP caller. The default displays both received and completed events. `--compact` uses the previous concise one-row layout, `BRC_CONSOLE_MODE=detailed` restores explicit START/OK rows and call IDs, and `--verbose` shows bounded redacted parameter/status previews. Live logging retains at most **428 KiB of event history + 40 KiB pending stdout + 32 KiB pending/in-flight history writes**. Native terminal scrollback is not duplicated in RAM. Separately, `~/.brc/logs/tool-history.jsonl` persists up to **1,000 sanitized tool records**, with a **4 KiB** maximum preview per record and **5 MiB** maximum file size. An asynchronous streaming writer trims older entries and loads history on demand; `BRC_TOOL_HISTORY=0` opts out.
 
-Use `BRC_CONSOLE_MODE=detailed|verbose|compact` or the CLI switches `--verbose` / `--compact`. Set `NO_COLOR=1` or `BRC_COLOR=0` for plain, non-ANSI output. If `BRC_LOG_LEVEL=silent` is set, it still silences console activity as before. The display does not add execution latency beyond its optional, short text output.
+Use `BRC_CONSOLE_MODE=mymcp|detailed|verbose|compact` or the CLI switches `--verbose` / `--compact`. Set `NO_COLOR=1` or `BRC_COLOR=0` for plain, non-ANSI output. If `BRC_LOG_LEVEL=silent` is set, it still silences console activity as before. The display does not add execution latency beyond its optional, short text output.
 
 ## Dependency layout note (Windows / pnpm)
 

@@ -16,7 +16,7 @@ export const MAX_ACTIVITY_EVENT_BYTES = MAX_ACTIVITY_LOG_BYTES - MAX_ACTIVITY_QU
 export const MAX_ACTIVITY_CONSOLE_BYTES = MAX_ACTIVITY_EVENT_BYTES;
 let stdoutAvailable = true;
 process.stdout.on('error', () => { stdoutAvailable = false; });
-export type ConsoleMode = 'compact' | 'detailed' | 'verbose';
+export type ConsoleMode = 'mymcp' | 'compact' | 'detailed' | 'verbose';
 export interface ActivityEvent {
     timestamp: string;
     level: string;
@@ -69,8 +69,11 @@ export function activityAction(tool: string, args: Record<string,unknown> | unde
             (file?' / '+file:'');
     }
     if (tool==='code_mode')return 'sandboxed workflow';
-    if (tool==='read_multiple_files')
-        return (Array.isArray(args.paths)?args.paths.length:0)+' files';
+    if (tool==='read_multiple_files') {
+        const files = Array.isArray(args.files) ? args.files :
+            Array.isArray(args.paths) ? args.paths : null;
+        return files ? files.length+' files' : 'multiple files';
+    }
     if (tool==='edit_block')return 'edit'+at;
     if (tool==='write_file')return 'write'+at;
     if (tool==='read_file')return 'read'+at;
@@ -84,11 +87,27 @@ export function activityAction(tool: string, args: Record<string,unknown> | unde
         return typeof args.pid==='number'&&Number.isSafeInteger(args.pid)?'PID '+args.pid:'';
     return at.trim();
 }
+/** Format local time for MyMCP remote-device-style terminal output.
+ * Safe JSON previews are supplied separately by the dispatcher. */
+function localToolStamp(timestamp:string):string {
+    const date=new Date(timestamp);
+    const pad=(n:number)=>String(n).padStart(2,'0');
+    return date.getFullYear()+'-'+pad(date.getMonth()+1)+'-'+pad(date.getDate())+
+        ' '+pad(date.getHours())+':'+pad(date.getMinutes())+':'+pad(date.getSeconds());
+}
 /** Render human-readable live events. Verbose mode preserves bounded multi-line details. */
 export function formatActivityEvent(event: ActivityEvent, mode: ConsoleMode, width=120): string {
     const time = new Date(event.timestamp).toLocaleTimeString('en-GB',{hour12:false});
     const max = Math.min(160,Math.max(40,width));
-    if (!event.phase) return compactLine('['+time+'] '+event.message,max);
+    if (!event.phase) {
+        if (mode==='mymcp') {
+            const heartbeat=event.message.startsWith('Heartbeat | ');
+            const label=(heartbeat?'status':event.level).slice(0,20).padEnd(20,' ');
+            const message=heartbeat?event.message.slice('Heartbeat | '.length):event.message;
+            return compactLine(localToolStamp(event.timestamp)+' | '+label+' | '+message,max);
+        }
+        return compactLine('['+time+'] '+event.message,max);
+    }
     const state = event.phase === 'PENDING' ? 'RUN'
         : event.phase === 'ERROR' ? 'FAIL'
         : event.phase === 'OK' ? 'OK' : 'START';
@@ -96,6 +115,23 @@ export function formatActivityEvent(event: ActivityEvent, mode: ConsoleMode, wid
         ? (event.ms / 1000).toFixed(1)+'s' : Math.round(event.ms)+'ms');
     const legacyTool = /^\s*(?:START|OK|ERROR|PENDING)\s+([a-z][a-z0-9_]*)\b/i.exec(event.message)?.[1];
     const label = '['+time+'] ['+state+'] '+(event.tool??legacyTool??'operation')+duration;
+    if (mode === 'mymcp') {
+        // Match the ACTUAL MyMCP remote-device console (device.ts), not
+        // Desktop Commander's separate history table. Keep safe 4-KiB JSON
+        // previews instead of dumping unlimited raw tool payloads.
+        const stamp='['+time+']';
+        const name=event.tool??legacyTool??'operation';
+        const payload=event.trace??'{"content":[],"note":"Preview unavailable"}';
+        if(event.phase==='START')
+            return stamp+' 🔧 Received tool call '+(event.id??'unknown')+
+                ': '+name+' '+payload;
+        if(event.phase==='OK')
+            return stamp+' ✅ Tool call '+name+' completed:\n '+payload;
+        if(event.phase==='PENDING')
+            return stamp+' ⏳ Tool call '+name+' running:\n '+payload;
+        return stamp+' ❌ Tool call '+name+' failed:'+
+            (event.note?' '+compactLine(event.note,180):'')+'\n '+payload;
+    }
     if (mode === 'detailed') {
         // Desktop Commander-style timestamps, call IDs, action and outcome,
         // without copying raw arguments, command output or source into logs.
@@ -144,9 +180,11 @@ export class ActivityLog {
     private failedCalls = 0;
     private pendingCalls = 0;
     private lastTool: string | null = null;
-    // The default must remain readable for 40-50 recent operations.
-    // Rich per-call traces are opt-in with V or --verbose.
-    private consoleMode: ConsoleMode = process.env.BRC_CONSOLE_MODE === 'verbose' ? 'verbose' : 'compact';
+    // Match Desktop Commander's remote-device tool-call console by default.
+    // Legacy compact/detailed/verbose displays remain available as overrides.
+    private consoleMode: ConsoleMode = process.env.BRC_CONSOLE_MODE === 'verbose' ? 'verbose'
+        : process.env.BRC_CONSOLE_MODE === 'compact' ? 'compact'
+        : process.env.BRC_CONSOLE_MODE === 'detailed' ? 'detailed' : 'mymcp';
     dropped = 0;
     ioErrors = 0;
     // The legacy third argument is deliberately ignored: disk logging cannot be enabled.
@@ -178,7 +216,7 @@ export class ActivityLog {
         id = safeId(id);
         code = code ? safeId(code) : undefined;
         note = note ? compactLine(note,155) : undefined;
-        trace = trace ? trace.slice(0,12_000) : undefined;
+        trace = trace ? trace.slice(0,this.consoleMode==='mymcp'?6_500:12_000) : undefined;
         if (phase==='START') this.startedCalls++;
         else if (phase==='OK') this.finishedCalls++;
         else if (phase==='ERROR') {this.finishedCalls++;this.failedCalls++;}
@@ -210,12 +248,12 @@ export class ActivityLog {
         if (this.consoleMode === 'compact' && event.phase === 'OK' &&
             (event.tool === 'wait_jobs' || event.tool === 'get_job' ||
              event.tool === 'list_jobs')) return;
-        if (this.consoleMode === 'compact' && event.level === 'info' && !event.phase
-            && !/^(Connecting to |Ready: |Disconnected|Relay refused|Device authorization)/.test(event.message)) return;
+        if ((this.consoleMode === 'compact' || this.consoleMode === 'mymcp') && event.level === 'info' && !event.phase
+            && !/^(Connecting to |Ready: |Disconnected|Relay refused|Device authorization|Heartbeat \|)/.test(event.message)) return;
         const width = Math.min(160, Math.max(40, (process.stdout.columns || 120) - 1));
         let line = formatActivityEvent(event,this.consoleMode,width);
         // Colors are attached only AFTER sanitizing untrusted log text.
-        if (process.stdout.isTTY && !('NO_COLOR' in process.env) && process.env.BRC_COLOR !== '0') {
+        if (this.consoleMode !== 'mymcp' && process.stdout.isTTY && !('NO_COLOR' in process.env) && process.env.BRC_COLOR !== '0') {
             const code = event.phase === 'ERROR' || event.level === 'error' ? '31'
                 : event.phase === 'OK' ? '32' : event.phase === 'PENDING' ? '33' : event.level === 'warn' ? '33' : '36';
             line = line.split('\n').map(part => '\x1b['+code+'m'+part+'\x1b[0m').join('\n');

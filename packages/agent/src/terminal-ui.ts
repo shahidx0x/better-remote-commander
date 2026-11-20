@@ -27,7 +27,7 @@ export function consoleBanner(a: AgentTerminal, width = process.stdout.columns |
     row(' Device    ' + name),
     row(' Relay     ' + endpoint),
     row(' Runtime   v' + a.version + '  |  Core ' + a.coreVersion + '  |  ' + a.tools + ' tools'),
-    row(' Session   ' + plain(a.deviceId, 9) + '...  |  live-only diagnostics'),
+    row(' Session   ' + plain(a.deviceId, 9) + '...  |  local diagnostic history'),
     '+' + rule + '+',
   ];
   if (color) {
@@ -69,7 +69,8 @@ export function connectionPanel(
     + '\n  Storage  500 KiB live activity + bounded, sanitized local tool-history JSONL\n';
 }
 
-export function recentActivity(events: ActivityEvent[], max = 50, byteBudget = MAX_ACTIVITY_CONSOLE_BYTES): string {
+export function recentActivity(events: ActivityEvent[], max = 50,
+    byteBudget = MAX_ACTIVITY_CONSOLE_BYTES, mode:'compact'|'mymcp'='compact'): string {
   // The L shortcut prints the last 50 meaningful events into scrollback.
   // It does not clear the live console or render a multi-page payload.
   const recent: string[] = [];
@@ -77,9 +78,9 @@ export function recentActivity(events: ActivityEvent[], max = 50, byteBudget = M
   const limit = Math.max(1, Math.min(events.length, Math.floor(max)));
   for (let i = events.length - 1; i >= 0 && recent.length < limit; i--) {
     const e = events[i];
-    if (e.phase === 'START') continue;
+    if (e.phase === 'START' && mode !== 'mymcp') continue;
     if (e.phase === 'OK' && ['wait_jobs','get_job','list_jobs'].includes(e.tool ?? '')) continue;
-    const line = formatActivityEvent(e,'compact',120).split('\n')
+    const line = formatActivityEvent(e,mode,120).split('\n')
       .map(part=>'  '+part).join('\n');
     const size = Buffer.byteLength(line + '\n', 'utf8');
     if (bytes + size > byteBudget) break;

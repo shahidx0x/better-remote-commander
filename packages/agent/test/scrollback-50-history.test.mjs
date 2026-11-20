@@ -6,10 +6,10 @@ import {
 } from '../dist/runtime/activity.js';
 import { recentActivity } from '../dist/terminal-ui.js';
 
-test('compact default keeps 75 operations in native terminal scrollback, without clearing the screen', async () => {
+test('legacy compact mode keeps 75 operations in native terminal scrollback, without clearing the screen', async () => {
   const log = new ActivityLog(undefined, false);
-  if(process.env.BRC_CONSOLE_MODE !== 'verbose')
-    assert.equal(log.getConsoleMode(), 'compact');
+  log.setConsoleMode('compact');
+  assert.equal(log.getConsoleMode(), 'compact');
   // The launcher enables rolling mode only for TTY, so emulate it here without
   // changing process.stdout.isTTY in the whole test process.
   log.rollingConsole = true;

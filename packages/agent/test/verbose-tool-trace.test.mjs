@@ -7,7 +7,8 @@ import { recentActivity } from '../dist/terminal-ui.js';
 
 test('verbose mode is opt-in and returns multi-line received/completed previews', async()=>{
   const log = new ActivityLog(undefined,true);
-  if(process.env.BRC_CONSOLE_MODE!=='verbose')assert.equal(log.getConsoleMode(),'compact');
+  if(!['verbose','compact','detailed'].includes(process.env.BRC_CONSOLE_MODE??''))
+    assert.equal(log.getConsoleMode(),'mymcp');
   log.setConsoleMode('verbose');
   const args=traceToolArguments('start_process',{
     command:"pnpm --dir 'D:\\client-project\\restaurants\\frontend' build",

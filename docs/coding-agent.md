@@ -45,17 +45,19 @@ Optional: `BRC_TOOL_PROFILE=coding` hides six document/transfer/history tools fr
 
 ## Detailed live logging + bounded, sanitized disk history
 
-Normal foreground output is limited to compact activity lines:
+Normal foreground output follows MyMCP's remote-device tool-call messages, with a local timestamp and bounded sanitized previews:
 
 ```text
-[20:30:01] START read_symbol [a1234567]
-[20:30:01] OK    read_symbol [a1234567] 8ms
-[20:30:05] ERROR edit_files [b1234567] 2ms FILE_CONFLICT
+[20:30:01] 🔧 Received tool call abc123: read_file {"path":"D:/project/README.md"} metadata: {"origin":"remote"}
+[20:30:01] ✅ Tool call read_file completed:
+ {"content":[{"type":"text","text":"# Project overview..."}]}
+[20:30:05] ❌ Tool call edit_files failed: FILE_CONFLICT: Re-read the latest source
+ {"content":[{"type":"text","text":"No edit committed"}],"isError":true}
 ```
 
-The console stays live-only, with a local 30-second heartbeat and no remote diagnostic telemetry. Separately, `~/.brc/logs/tool-history.jsonl` (default enabled) persists up to **1,000 sanitized recent tool calls**: timestamp, safe task summary, duration, result/error and **at most 4 KiB of redacted output preview** per record. The file is capped at **5 MiB** (compacts to 4 MiB or less, with the oldest records trimmed); it is **not** a raw-argument, file-content, Code Mode script or full-result archive. Set `BRC_TOOL_HISTORY=0` to disable; `BRC_LOG_FILE` does not control it. The separate optional failure-only log still uses `BRC_ERROR_LOG=1`.
+The console stays live-only. Its 30-second local heartbeat check prints only when connection/activity changes or after five idle minutes; no remote diagnostic telemetry is emitted. Separately, `~/.brc/logs/tool-history.jsonl` (default enabled) persists up to **1,000 sanitized recent tool calls**: timestamp, safe task summary, duration, result/error and **at most 4 KiB of redacted output preview** per record. The file is capped at **5 MiB** (compacts to 4 MiB or less, with the oldest records trimmed); it is **not** a raw-argument, file-content, Code Mode script or full-result archive. Set `BRC_TOOL_HISTORY=0` to disable; `BRC_LOG_FILE` does not control it. The separate optional failure-only log still uses `BRC_ERROR_LOG=1`.
 
-Console lines are bounded to terminal width (up to 160 characters), with a **40-KiB byte-bounded pending output queue** and backpressure handling. Agent CLI sessions default to **detailed** timestamps, START/OK/FAIL phases, safe task summaries and durations. V cycles detailed → verbose → compact; `--verbose` includes bounded redacted traces. Retained UTF-8 text budgets total **500 KiB**: **428 KiB** live activity, **40 KiB** queued stdout and **32 KiB** queued/in-flight JSONL writes. Native terminal scrollback is not duplicated. Historic output previews are read from disk on request, not held in an extra 1,000-entry RAM cache. JavaScript object overhead, transient formatting, disk reads and the Node.js runtime consume additional RAM beyond this retained-text budget. The console history disappears on exit, but sanitized JSONL tool history intentionally survives restarts.
+Status and summary lines are bounded to the terminal width (up to 160 characters); in the default MyMCP-style mode, redacted JSON previews are limited to **4 KiB** and wrap naturally in the console. The pending stdout queue remains capped at **40 KiB**, with backpressure handling. Agent CLI sessions default to **MyMCP remote-device-style** logging: `[HH:MM:SS] 🔧 Received tool call ...` on arrival and `[HH:MM:SS] ✅ Tool call ... completed:` followed by a bounded, redacted JSON output preview. Failures print ❌ and a safe error summary. This replaces the previous padded one-line approximation. The 30-second status check remains but identical idle heartbeats are suppressed. V cycles MyMCP → detailed → verbose → compact; `--verbose` includes bounded redacted traces. Retained UTF-8 text budgets total **500 KiB**: **428 KiB** live activity, **40 KiB** queued stdout and **32 KiB** queued/in-flight JSONL writes. Native terminal scrollback is not duplicated. Historic output previews are read from disk on request, not held in an extra 1,000-entry RAM cache. JavaScript object overhead, transient formatting, disk reads and the Node.js runtime consume additional RAM beyond this retained-text budget. The console history disappears on exit, but sanitized JSONL tool history intentionally survives restarts.
 
 The relay retains SQLite for users, paired devices, valid tokens, API keys and other operational state. Tool-call audit data lives only in a 1,000-entry RAM ring. The legacy SQL audit table remains empty. Startup removes its old records, without deleting authentication/device data. Database metadata such as a device's last-seen time is operational state, not an activity transcript.
 

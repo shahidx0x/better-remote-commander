@@ -33,7 +33,8 @@ import { VERSION as CORE_VERSION } from './core/version.js';
 import { setCurrentClient } from './context.js';
 import { activity } from './runtime/activity.js';
 import { toolHistory } from './core/utils/toolHistory.js';
-import { formatHeartbeat,LOG_HEARTBEAT_INTERVAL_MS } from './runtime/heartbeat.js';
+import { formatHeartbeat,LOG_HEARTBEAT_INTERVAL_MS,heartbeatSignature,shouldPrintHeartbeat,
+  type HeartbeatCheckpoint } from './runtime/heartbeat.js';
 import { projectIndex } from './runtime/project-index.js';
 import { codeGraph } from './runtime/code-graph.js';
 import { consoleBanner, controlHint, connectionPanel, recentActivity, type AgentTerminal } from './terminal-ui.js';
@@ -55,10 +56,11 @@ if (debug) process.env.BRC_DEBUG = '1';
 if (flag('verbose') || debug) activity.setConsoleMode('verbose');
 else if (flag('compact') || process.env.BRC_CONSOLE_MODE === 'compact') activity.setConsoleMode('compact');
 else if (process.env.BRC_CONSOLE_MODE === 'verbose') activity.setConsoleMode('verbose');
-else activity.setConsoleMode('detailed'); // default: timestamp + call + safe outcome
+else if (process.env.BRC_CONSOLE_MODE === 'detailed') activity.setConsoleMode('detailed');
+else activity.setConsoleMode('mymcp'); // default: MyMCP remote-device received/completed JSON
 const log = (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => activity.log(level, msg);
 if (flag('help')) {
-  console.log('Local agent: START_AGENT.cmd or node packages/agent/dist/cli.js\nFirst terminal launch asks for the relay URL and device name. Saved connections start automatically after 4 seconds; Enter connects now, M opens settings.\n--setup opens settings explicitly. M also opens settings while the foreground agent is idle; active tool calls are never interrupted.\n--forget-relay / --logout forget only the local saved URL and pairing, then exit.\n--relay <base-url> keeps scripted pairing available; --non-interactive skips the menu and delay. --auto-connect is the foreground default.\nOther flags: --name <name>, --no-browser, --allow-dir <path> (repeatable), --debug, --compact, --verbose, --install-service, --uninstall-service.\nPlugins: --list-plugins, --add-plugin <id>, --remove-plugin <id>, --enable-plugin <id>, --disable-plugin <id>, --update-plugins, --no-plugins.\nTerminal controls (while live): M settings, S status, L recent activity, V detailed/verbose/compact, ? help, Ctrl+C stop. The default detailed console includes START/OK/FAIL and a local heartbeat every 30 seconds. Completed calls and errors are visible in compact TTY mode; --verbose shows START/OK/ERROR. Sanitized tool history: last 1000 records, max 4 KiB preview each, disk JSONL capped at 5 MiB (BRC_TOOL_HISTORY=0 disables).');
+  console.log('Local agent: START_AGENT.cmd or node packages/agent/dist/cli.js\nFirst terminal launch asks for the relay URL and device name. Saved connections start automatically after 4 seconds; Enter connects now, M opens settings.\n--setup opens settings explicitly. M also opens settings while the foreground agent is idle; active tool calls are never interrupted.\n--forget-relay / --logout forget only the local saved URL and pairing, then exit.\n--relay <base-url> keeps scripted pairing available; --non-interactive skips the menu and delay. --auto-connect is the foreground default.\nOther flags: --name <name>, --no-browser, --allow-dir <path> (repeatable), --debug, --compact, --verbose, --install-service, --uninstall-service.\nPlugins: --list-plugins, --add-plugin <id>, --remove-plugin <id>, --enable-plugin <id>, --disable-plugin <id>, --update-plugins, --no-plugins.\nTerminal controls (while live): M settings, S status, L recent activity, V mymcp/detailed/verbose/compact, ? help, Ctrl+C stop. Default MyMCP-style console shows timestamped Received tool call and Tool call completed/failed messages with bounded, redacted JSON previews. The 30-second status check prints only on changes or after 5 idle minutes. --verbose shows START/OK/ERROR. Sanitized tool history: last 1000 records, max 4 KiB preview each, disk JSONL capped at 5 MiB (BRC_TOOL_HISTORY=0 disables).');
   process.exit(0);
 }
 
@@ -174,6 +176,7 @@ let livePrompts: ReturnType<typeof createTerminalPrompts> | undefined;
 let settingsOpen = false;
 let shuttingDown = false;
 let heartbeatTimer:NodeJS.Timeout|undefined;
+let lastLoggedHeartbeat:HeartbeatCheckpoint|null=null;
 let pluginSetupStarted = false;
 function startPluginSetup(): void {
   if (pluginSetupStarted || flag('no-plugins') || process.env.BRC_PLUGINS === 'none' || isTermuxRuntime()) return;
@@ -210,10 +213,12 @@ function armShortcuts(): void {
   shortcuts = listenForTerminalShortcuts(process.stdin, choice => {
     if (choice === 'settings') void openSettings();
     else if (choice === 'status') console.log(connectionPanel(client.status(), { ...terminalInfo, name: activeCredentials.name, relay: activeCredentials.relayUrl }));
-    else if (choice === 'activity') console.log(recentActivity(activity.recent(), 50));
+    else if (choice === 'activity') console.log(recentActivity(activity.recent(),50,undefined,
+      activity.getConsoleMode()==='mymcp'?'mymcp':'compact'));
     else if (choice === 'verbose') {
       const mode=activity.getConsoleMode();
-      activity.setConsoleMode(mode==='detailed'?'verbose':mode==='verbose'?'compact':'detailed');
+      activity.setConsoleMode(mode==='mymcp'?'detailed':mode==='detailed'?'verbose':
+        mode==='verbose'?'compact':'mymcp');
       console.log('  Console mode: ' + activity.getConsoleMode() + '. Press L for the last 50 calls; log history stays byte-bounded.');
     }
     else if (choice === 'help') console.log(controlHint(!!process.stdin.isTTY));
@@ -335,8 +340,12 @@ start(creds);
 heartbeatTimer=setInterval(()=>{
   if(shuttingDown||settingsOpen)return;
   const live=activity.status();
-  log('info',formatHeartbeat(client.status(),{...live,
-    retainedBytes:live.retainedBytes+toolHistory.getStats().queuedBytes}));
+  const stats={...live,retainedBytes:live.retainedBytes+toolHistory.getStats().queuedBytes};
+  const connection=client.status();
+  const now=Date.now();
+  if(!shouldPrintHeartbeat(lastLoggedHeartbeat,connection,stats,now))return;
+  lastLoggedHeartbeat={signature:heartbeatSignature(connection,stats),printedAt:now};
+  log('info',formatHeartbeat(connection,stats));
 },LOG_HEARTBEAT_INTERVAL_MS);
 heartbeatTimer.unref();
 if (foregroundControls) {
