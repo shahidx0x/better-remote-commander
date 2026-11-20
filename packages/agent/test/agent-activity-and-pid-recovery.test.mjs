@@ -23,8 +23,8 @@ test('activity summarizes command and target without leaking arguments',()=>{
 });
 
 test('500 KiB is a bounded combined UTF-8 activity payload, PENDING is not OK',async()=>{
-  assert.equal(MAX_ACTIVITY_LOG_BYTES,1024*1024);
-  assert.equal(MAX_ACTIVITY_EVENT_BYTES+MAX_ACTIVITY_CONSOLE_BYTES+64*1024,MAX_ACTIVITY_LOG_BYTES);
+  assert.equal(MAX_ACTIVITY_LOG_BYTES,500*1024);
+  assert.equal(MAX_ACTIVITY_EVENT_BYTES+40*1024+32*1024,MAX_ACTIVITY_LOG_BYTES);
   const logger=new ActivityLog(undefined,true);
   logger.tool('PENDING','run_command','pending-abc',1800,undefined,'pnpm build @ frontend');
   assert.equal(logger.recent().at(-1).phase,'PENDING');

@@ -29,7 +29,7 @@ Do nothing and the saved connection starts after four seconds. Enter skips the d
 
 While the foreground agent is running, M remains available even after new live logs. The live menu's `0` option returns to the same connection without reconnecting. Opening settings only succeeds when there are no in-flight tool calls; otherwise it asks you to press M again when idle and leaves current work running. While a menu is open, new calls return retryable `SETTINGS_OPEN` without executing, while the WebSocket heartbeat stays active. Log rendering is held in the existing bounded queue until the menu closes, never written to a file.
 
-In a real CMD/PowerShell/VS Code terminal M is a single key. Other optional live shortcuts are S (connection status), L (recent sanitized activity), V (compact/verbose console) and ?/H (help). A portable `START_AGENT.bat` can be registered once and then copied anywhere on the same machine. An explicitly enabled foreground launch with piped input uses M + Enter. A closed input stream disables shortcuts rather than stopping a connected agent. Ctrl+C still stops the agent outside menus; cancelling a live menu returns to logs unless the saved pairing was explicitly forgotten.
+In a real CMD/PowerShell/VS Code terminal M is a single key. Other optional live shortcuts are S (connection status), L (recent sanitized activity), V (detailed/verbose/compact console) and ?/H (help). A portable `START_AGENT.bat` can be registered once and then copied anywhere on the same machine. An explicitly enabled foreground launch with piped input uses M + Enter. A closed input stream disables shortcuts rather than stopping a connected agent. Ctrl+C still stops the agent outside menus; cancelling a live menu returns to logs unless the saved pairing was explicitly forgotten.
 
 Change pairs with the new relay and atomically replaces `device.json` only after success. A failed or cancelled change retains the old pairing. Forget asks for confirmation, removes only the locally saved relay and device token, then asks for a new URL; `q` exits without saving another one. It does not delete project files, settings, or accounts and does not revoke the old relay's device entry. Revoke that entry from the old relay when appropriate.
 
@@ -43,7 +43,7 @@ Rebuild/restart the agent after changing its source. This startup UI update does
 
 Optional: `BRC_TOOL_PROFILE=coding` hides six document/transfer/history tools from discovery. The default advertises the full compatible set. This is not a security boundary or per-tool authorization system.
 
-## Live logging only
+## Detailed live logging + bounded, sanitized disk history
 
 Normal foreground output is limited to compact activity lines:
 
@@ -53,9 +53,9 @@ Normal foreground output is limited to compact activity lines:
 [20:30:05] ERROR edit_files [b1234567] 2ms FILE_CONFLICT
 ```
 
-No activity JSONL, `agent.log`, persisted tool history, periodic idle status messages or diagnostic telemetry is produced. The former `BRC_LOG_FILE` and retention settings cannot re-enable log persistence. Tool arguments, file contents and results are not printed by the activity logger. `--debug` only adds live diagnostic detail.
+The console stays live-only, with a local 30-second heartbeat and no remote diagnostic telemetry. Separately, `~/.brc/logs/tool-history.jsonl` (default enabled) persists up to **1,000 sanitized recent tool calls**: timestamp, safe task summary, duration, result/error and **at most 4 KiB of redacted output preview** per record. The file is capped at **5 MiB** (compacts to 4 MiB or less, with the oldest records trimmed); it is **not** a raw-argument, file-content, Code Mode script or full-result archive. Set `BRC_TOOL_HISTORY=0` to disable; `BRC_LOG_FILE` does not control it. The separate optional failure-only log still uses `BRC_ERROR_LOG=1`.
 
-Console lines are bounded to at most 160 characters, adjusted to terminal width, with a bounded 200-line pending output queue and backpressure handling. Interactive TTY sessions default to concise completion/failure output (not a separate START line for every success); `--verbose` or V restores START/OK/ERROR display without changing in-memory events. No polling or disk console state is added. A 1,000-event metadata ring supports current-process status/latency queries. It disappears when the process exits and is never written to disk.
+Console lines are bounded to terminal width (up to 160 characters), with a **40-KiB byte-bounded pending output queue** and backpressure handling. Agent CLI sessions default to **detailed** timestamps, START/OK/FAIL phases, safe task summaries and durations. V cycles detailed → verbose → compact; `--verbose` includes bounded redacted traces. Retained UTF-8 text budgets total **500 KiB**: **428 KiB** live activity, **40 KiB** queued stdout and **32 KiB** queued/in-flight JSONL writes. Native terminal scrollback is not duplicated. Historic output previews are read from disk on request, not held in an extra 1,000-entry RAM cache. JavaScript object overhead, transient formatting, disk reads and the Node.js runtime consume additional RAM beyond this retained-text budget. The console history disappears on exit, but sanitized JSONL tool history intentionally survives restarts.
 
 The relay retains SQLite for users, paired devices, valid tokens, API keys and other operational state. Tool-call audit data lives only in a 1,000-entry RAM ring. The legacy SQL audit table remains empty. Startup removes its old records, without deleting authentication/device data. Database metadata such as a device's last-seen time is operational state, not an activity transcript.
 

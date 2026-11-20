@@ -72,8 +72,8 @@ test('verbose output wraps without 160-character truncation while bounded by 500
   assert.ok(display.includes('aaaaaa'));
   assert.ok(display.replace(/\n/g,'').includes('a'.repeat(950)));
   assert.ok(display.split('\n').length>12,display);
-  assert.equal(MAX_ACTIVITY_LOG_BYTES,1024*1024);
-  assert.equal(MAX_ACTIVITY_EVENT_BYTES+MAX_ACTIVITY_CONSOLE_BYTES+64*1024,1024*1024);
+  assert.equal(MAX_ACTIVITY_LOG_BYTES,500*1024);
+  assert.equal(MAX_ACTIVITY_EVENT_BYTES+40*1024+32*1024,500*1024);
   for(let i=0;i<800;i++)log.tool('OK','run_command','id'+i,1,
     undefined,'pnpm build',undefined,'Output preview:\n'+text);
   const all=log.recent();

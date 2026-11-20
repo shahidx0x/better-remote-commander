@@ -2,7 +2,7 @@ import {createServer as createProbe} from 'node:net';
 // One-shot e2e runner: boots relay + agent on a scratch port/db, auto-pairs, runs all suites, tears down.
 // pnpm test:e2e     (needs `pnpm build` first)
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, realpathSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -76,6 +76,18 @@ try {
     const f = (out.match(/^FAIL/gm) ?? []).length;
     if (f || !/^PASS/m.test(out)) { failed += f || 1; if (!/^PASS/m.test(out)) console.log('  (suite crashed)\n' + out.slice(-600)); }
   }
+  // Real paired-agent calls must have produced sanitized local history,
+  // without changing the owner's MyMCP installation or real BRC home.
+  const historyFile=path.join(scratch,'agent-home','logs','tool-history.jsonl');
+  await waitFor(()=>{try{return statSync(historyFile).size>0;}catch{return false;}},5000,'local tool history');
+  const fileBytes=statSync(historyFile).size;
+  const entries=readFileSync(historyFile,'utf8').trim().split('\n').map(JSON.parse);
+  const historyOK=fileBytes<=5*1024*1024 && entries.length>0 && entries.length<=1000 &&
+    entries.some(row=>row.toolName==='code_mode') &&
+    entries.every(row=>row.arguments&&Object.keys(row.arguments).join(',')==='summary'&&
+      Buffer.byteLength(row.output?.content?.[0]?.text??'','utf8')<=4096);
+  console.log((historyOK?'PASS':'FAIL')+'  paired agent writes disk-backed sanitized 1000-call, 4-KiB preview, 5-MiB history');
+  if(!historyOK)failed++;
 } catch (e) {
   failed++;
   console.error('runner error:', e instanceof Error ? e.message : e);

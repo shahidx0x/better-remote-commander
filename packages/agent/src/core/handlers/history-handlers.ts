@@ -20,24 +20,37 @@ export async function handleGetRecentToolCalls(args: unknown): Promise<ServerRes
   try {
     const parsed = GetRecentToolCallsArgsSchema.parse(args);
     
-    // Use formatted version with local timezone
-    const calls = toolHistory.getRecentCallsFormatted({
-      maxResults: parsed.maxResults,
+    // Return the newest entries first. Paging avoids sending a full
+    // 1,000 x 4KiB history dump through a single MCP response.
+    const calls = (await toolHistory.getRecentCallsFormatted({
+      maxResults: Math.min(1000,parsed.maxResults+1),
+      offset: parsed.offset,
       toolName: parsed.toolName,
       since: parsed.since
-    });
-    
+    })).reverse();
     const stats = toolHistory.getStats();
-    
-    // Format the response (excluding file path per user request)
-    const summary = `Tool Call History (${calls.length} results, ${stats.totalEntries} total in memory)`;
-    const historyJson = JSON.stringify(calls, null, 2);
-    
+    const budgetBytes = 96*1024;
+    let used = 0;
+    const returned:typeof calls = [];
+    for(const entry of calls.slice(0,parsed.maxResults)){
+      const bytes=Buffer.byteLength(JSON.stringify(entry),'utf8')+2;
+      if(returned.length && used+bytes>budgetBytes)break;
+      returned.push(entry);
+      used+=bytes;
+    }
+    const more=calls.length>returned.length;
+    const nextOffset=more?parsed.offset+returned.length:null;
+    const summary='Tool Call History ('+returned.length+' shown; '+
+      stats.totalEntries+' retained; '+stats.maxEntries+' max; '+
+      (stats.persisted?'disk-backed':'live only')+')';
+    const paging=more?'MORE HISTORY: get_recent_tool_calls({offset:'+
+      nextOffset+',maxResults:'+parsed.maxResults+
+      (parsed.toolName?',toolName:'+JSON.stringify(parsed.toolName):'')+'})':'No additional history in this page.';
     return {
-      content: [{
-        type: "text",
-        text: `${summary}\n\n${historyJson}`
-      }]
+      content:[{type:'text',text:summary+'\n'+paging+'\n\n'+JSON.stringify(returned,null,2)}],
+      structuredContent:{returned:returned.length,totalRetained:stats.totalEntries,
+        persisted:stats.persisted,hasMore:more,nextOffset,maxFileBytes:stats.maxFileBytes,
+        maxOutputBytes:stats.maxOutputBytes}
     };
   } catch (error) {
     return {

@@ -1806,15 +1806,21 @@ export const BUNDLED_AGENT_TOOL_CATALOG: ToolDefinition[] = [
   },
   {
     "name": "get_recent_tool_calls",
-    "description": "USE WHEN: Inspect recent in-memory tool names, times and statuses when debugging.\nUSE INSTEAD: For tool contents or source files use read_file; for aggregate metrics use get_usage_stats.\nIMPORTANT: Does not contain command arguments, source code or durable execution logs.\nDETAILS: Get recent local tool-call metadata: tool name, timestamp, status and duration.\nArguments, source code and command output are not stored or returned.\nUses the bounded activity history (up to 1000 recent metadata events,\nmaximum age 48 hours; older diagnostics are removed by maintenance).\nUseful for inspecting execution status and debugging call sequences.\nThis is not a source-code or conversation-context archive.\n\nThis command can be referenced as \"BRC: ...\" or \"use Better Remote Commander (BRC) to ...\" in your instructions.",
+    "description": "USE WHEN: Inspect the last 1,000 sanitized, disk-backed tool records with timestamps, durations, up-to-4-KiB output previews and newest-first paging.\nUSE INSTEAD: For tool contents or source files use read_file; for aggregate metrics use get_usage_stats.\nIMPORTANT: Never stores raw arguments, file contents or full execution output. History is a bounded diagnostic aid, not a transactional audit or guaranteed job replay; disk writing can fail or lose queued entries on a crash.\nDETAILS: Get the latest sanitized local tool-call records (at most 1000).\nIncludes timestamps, duration, status, safe action summaries and a\nredacted output preview of at most 4096 UTF-8 bytes per record.\nRaw arguments, file bodies, model source and full tool results are\nNOT persisted. Disk-backed JSONL history is capped at 5 MiB and\nstreamed\n[Full parameter details: tool input schema.]",
     "inputSchema": {
       "type": "object",
       "properties": {
         "maxResults": {
-          "type": "number",
+          "type": "integer",
           "minimum": 1,
           "maximum": 1000,
           "default": 50
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 0
         },
         "toolName": {
           "type": "string"

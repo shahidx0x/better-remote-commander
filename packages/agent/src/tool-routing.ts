@@ -144,9 +144,9 @@ export const TOOL_CHOICES: Record<string, ToolChoice> = {
     caveat: 'Do not claim these are persistent full logs or project usage statistics.',
   },
   get_recent_tool_calls: {
-    use: 'Inspect recent in-memory tool names, times and statuses when debugging.',
+    use: 'Inspect the last 1,000 sanitized, disk-backed tool records with timestamps, durations, up-to-4-KiB output previews and newest-first paging.',
     instead: 'For tool contents or source files use read_file; for aggregate metrics use get_usage_stats.',
-    caveat: 'Does not contain command arguments, source code or durable execution logs.',
+    caveat: 'Never stores raw arguments, file contents or full execution output. History is a bounded diagnostic aid, not a transactional audit or guaranteed job replay; disk writing can fail or lose queued entries on a crash.',
   },
   run_command: {
     use: 'Run a ONE-SHOT command (git, build, test, package manager) and get its final exit code and bounded output.',

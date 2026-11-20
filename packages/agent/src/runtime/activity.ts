@@ -3,16 +3,20 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 export const RETENTION_MS = 0;
-/** Combined live-log text budget: structured history plus one console ring/queue. */
-// Size budgets apply to retained UTF-8 text, not the whole Node process RSS.
-// 460 KiB structured history + 500 KiB live history + 64 KiB pending stdout.
-export const MAX_ACTIVITY_LOG_BYTES = 1024 * 1024;
-export const MAX_ACTIVITY_CONSOLE_BYTES = 500 * 1024;
-export const MAX_ACTIVITY_QUEUE_BYTES = 64 * 1024;
-export const MAX_ACTIVITY_EVENT_BYTES = MAX_ACTIVITY_LOG_BYTES - MAX_ACTIVITY_CONSOLE_BYTES - MAX_ACTIVITY_QUEUE_BYTES;
+/** At most 500 KiB of RETAINED diagnostic UTF-8 payload across history and stdout queue.
+ * JS objects, buffers and the Node runtime consume additional physical RAM.
+ * Native terminal scrollback needs no duplicate in-agent 500-KiB ring.
+ */
+export const MAX_ACTIVITY_LOG_BYTES = 500 * 1024;
+export const MAX_ACTIVITY_QUEUE_BYTES = 40 * 1024;
+/** Additional fixed reservation for the disk history writer (pending + in-flight). */
+export const MAX_HISTORY_WRITER_QUEUE_BYTES = 32 * 1024;
+export const MAX_ACTIVITY_EVENT_BYTES = MAX_ACTIVITY_LOG_BYTES - MAX_ACTIVITY_QUEUE_BYTES - MAX_HISTORY_WRITER_QUEUE_BYTES;
+/** On-demand L/history rendering cap: not a separate retained allocation. */
+export const MAX_ACTIVITY_CONSOLE_BYTES = MAX_ACTIVITY_EVENT_BYTES;
 let stdoutAvailable = true;
 process.stdout.on('error', () => { stdoutAvailable = false; });
-export type ConsoleMode = 'compact' | 'verbose';
+export type ConsoleMode = 'compact' | 'detailed' | 'verbose';
 export interface ActivityEvent {
     timestamp: string;
     level: string;
@@ -92,6 +96,14 @@ export function formatActivityEvent(event: ActivityEvent, mode: ConsoleMode, wid
         ? (event.ms / 1000).toFixed(1)+'s' : Math.round(event.ms)+'ms');
     const legacyTool = /^\s*(?:START|OK|ERROR|PENDING)\s+([a-z][a-z0-9_]*)\b/i.exec(event.message)?.[1];
     const label = '['+time+'] ['+state+'] '+(event.tool??legacyTool??'operation')+duration;
+    if (mode === 'detailed') {
+        // Desktop Commander-style timestamps, call IDs, action and outcome,
+        // without copying raw arguments, command output or source into logs.
+        const summary = compactLine(label+(event.id?' #'+event.id.slice(0,12):'')+
+            (event.action?' | '+event.action:''),max);
+        const diagnostic = event.note || event.code;
+        return diagnostic ? summary+'\n'+compactLine('    '+diagnostic,max) : summary;
+    }
     if (mode === 'compact') {
         // One line per successful operation; a second line for a failure or a
         // still-running command. This maximizes actual visible history.
@@ -122,13 +134,16 @@ export class ActivityLog {
     private eventsBytes = 0;
     private consoleQueue: string[] = [];
     private queuedBytes = 0;
-    private rollingLines: string[] = [];
-    private rollingBytes = 0;
     private rollingTimer: NodeJS.Timeout | null = null;
     private rollingConsole = false;
     private blocked = false;
     private started = false;
     private consolePauses = 0;
+    private startedCalls = 0;
+    private finishedCalls = 0;
+    private failedCalls = 0;
+    private pendingCalls = 0;
+    private lastTool: string | null = null;
     // The default must remain readable for 40-50 recent operations.
     // Rich per-call traces are opt-in with V or --verbose.
     private consoleMode: ConsoleMode = process.env.BRC_CONSOLE_MODE === 'verbose' ? 'verbose' : 'compact';
@@ -149,8 +164,6 @@ export class ActivityLog {
         } else {
             if (this.rollingTimer) clearTimeout(this.rollingTimer);
             this.rollingTimer = null;
-            this.rollingLines.length = 0;
-            this.rollingBytes = 0;
         }
     }
     async start(): Promise<void> { if (this.started)
@@ -166,6 +179,11 @@ export class ActivityLog {
         code = code ? safeId(code) : undefined;
         note = note ? compactLine(note,155) : undefined;
         trace = trace ? trace.slice(0,12_000) : undefined;
+        if (phase==='START') this.startedCalls++;
+        else if (phase==='OK') this.finishedCalls++;
+        else if (phase==='ERROR') {this.finishedCalls++;this.failedCalls++;}
+        else if (phase==='PENDING') this.pendingCalls++;
+        this.lastTool=tool;
         this.record({ timestamp: new Date().toISOString(), level: phase === 'ERROR' ? 'error' : 'info', phase, tool, id, ms, code, action, note, trace,
             message: `${phase.padEnd(5)} ${tool} [${id.slice(0, 8)}]${ms === undefined ? '' : ` ${Math.round(ms)}ms`}${code ? ` ${code}` : ''}` });
     }
@@ -202,20 +220,8 @@ export class ActivityLog {
                 : event.phase === 'OK' ? '32' : event.phase === 'PENDING' ? '33' : event.level === 'warn' ? '33' : '36';
             line = line.split('\n').map(part => '\x1b['+code+'m'+part+'\x1b[0m').join('\n');
         }
-        if (this.rollingConsole) {
-            // Keep the latest 500 KiB in memory, but *append* to the terminal
-            // instead of erasing older calls on every update. This lets the
-            // terminal's normal scrollback show 40-50+ previous operations.
-            for (const row of line.split('\n')) {
-                this.rollingLines.push(row);
-                this.rollingBytes += Buffer.byteLength(row+'\n','utf8');
-            }
-            while (this.rollingBytes > MAX_ACTIVITY_CONSOLE_BYTES && this.rollingLines.length > 1) {
-                const old = this.rollingLines.shift()!;
-                this.rollingBytes -= Buffer.byteLength(old + '\n', 'utf8');
-                this.dropped++;
-            }
-        }
+        // Native terminal scrollback already owns visible history. Holding
+        // another full ring here duplicated 500 KiB with no rendering benefit.
         const queuedLine=line+'\n';
         this.consoleQueue.push(queuedLine);
         this.queuedBytes += Buffer.byteLength(queuedLine, 'utf8');
@@ -278,6 +284,15 @@ export class ActivityLog {
             }
         }
     }
+    /** O(1) safe diagnostic counters for the 30-second local heartbeat. */
+    status() {
+        return {mode:this.consoleMode,started:this.startedCalls,finished:this.finishedCalls,
+            failed:this.failedCalls,pending:this.pendingCalls,lastTool:this.lastTool,
+            retainedBytes:this.eventsBytes+this.queuedBytes,
+            historyBytes:this.eventsBytes,queueBytes:this.queuedBytes,
+            maxRetainedBytes:MAX_ACTIVITY_LOG_BYTES,dropped:this.dropped,
+            persistentHistory:false};
+    }
     recent(): ActivityEvent[] { return this.events.map(e => ({ ...e })); }
     metrics() {
         const groups = new Map<string, ActivityEvent[]>();
@@ -297,7 +312,7 @@ export class ActivityLog {
             if (!stat?.isDirectory() || stat.isSymbolicLink())
                 continue;
             for (const name of await fs.readdir(dir).catch(() => [] as string[])) {
-                if (!/^(agent\.log(?:\..*)?|tool-history\.jsonl|claude_tool_call(?:_[\w-]+)?\.log|fuzzy-search\.log|activity-\d{4}-\d{2}-\d{2}-\d{2}-\d+-\d+\.jsonl)$/.test(name))
+                if (!/^(agent\.log(?:\..*)?|claude_tool_call(?:_[\w-]+)?\.log|fuzzy-search\.log|activity-\d{4}-\d{2}-\d{2}-\d{2}-\d+-\d+\.jsonl)$/.test(name))
                     continue;
                 const file = path.join(dir, name);
                 if ((await fs.lstat(file).catch(() => null))?.isFile())
@@ -312,10 +327,13 @@ export class ActivityLog {
         this.drainConsole();
         this.events = [];
         this.eventsBytes = 0;
-        this.rollingLines = [];
-        this.rollingBytes = 0;
         this.consoleQueue = [];
         this.queuedBytes = 0;
+        this.startedCalls=0;
+        this.finishedCalls=0;
+        this.failedCalls=0;
+        this.pendingCalls=0;
+        this.lastTool=null;
     }
 }
 export const activity = new ActivityLog();

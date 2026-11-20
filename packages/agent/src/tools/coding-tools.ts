@@ -16,6 +16,7 @@ import { readBounded, decodeCode, sha256, atomicWrite, withFileLocks, lockKey } 
 import { AgentError, result, failure, errorCode } from '../runtime/errors.js';
 import { projectIndex } from '../runtime/project-index.js';
 import { activity, RETENTION_MS } from '../runtime/activity.js';
+import { toolHistory } from '../core/utils/toolHistory.js';
 import { operationStatus, cancelOperation } from '../runtime/operations.js';
 import { checkCancelled, getCallContext, withCallContext } from '../context.js';
 
@@ -219,7 +220,8 @@ export const CODING_TOOL_HANDLERS:Record<string,(args:Record<string,unknown>)=>P
       polyglotLanguageServer:lazyLanguageServer.status(),pluginConnections:runningPluginIds().length,
       ownedChildLifecycle:managedChildStatus(),managedSpawn:managedSpawnStatus(),operationalRetention:operationalRetentionStatus(),
       note:'Counts are internal manager observations; plugins may be remote and the numbers are not a complete Windows process-tree or RSS inventory.'},
-    receipts:{...mutationReceiptStatus(),recent:await recentMutationReceipts(8)},outputSpill:outputSpillLimits(),resources:cacheStatus(),indexedProjects:projectIndex.status(),codeGraphs:codeGraph.status(),parserCache:codeCacheStatus(),logging:{mode:"live-plus-optional-last-100-failure-metadata",
+    receipts:{...mutationReceiptStatus(),recent:await recentMutationReceipts(8)},outputSpill:outputSpillLimits(),resources:cacheStatus(),indexedProjects:projectIndex.status(),codeGraphs:codeGraph.status(),parserCache:codeCacheStatus(),logging:{mode:"500KiB-live-plus-5MiB-sanitized-tool-history",
+      retainedActivity:activity.status(),toolHistory:toolHistory.getStats(),
       persistent:process.env.BRC_ERROR_LOG==='1',
       failedToolLog:{enabled:process.env.BRC_ERROR_LOG==='1',path:failureLogPath(),maxEntries:100,rotation:false,
         contents:'Last 100 failures total only. No backup, paths, arguments, file content or credentials.'}},

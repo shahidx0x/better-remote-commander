@@ -705,12 +705,15 @@ export function buildToolDefinitions(): ToolDefinition[] {
     {
         name: "get_recent_tool_calls",
         description: `
-                Get recent local tool-call metadata: tool name, timestamp, status and duration.
-                Arguments, source code and command output are not stored or returned.
-                Uses the bounded activity history (up to 1000 recent metadata events,
-                maximum age 48 hours; older diagnostics are removed by maintenance).
-                Useful for inspecting execution status and debugging call sequences.
-                This is not a source-code or conversation-context archive.
+                Get the latest sanitized local tool-call records (at most 1000).
+                Includes timestamps, duration, status, safe action summaries and a
+                redacted output preview of at most 4096 UTF-8 bytes per record.
+                Raw arguments, file bodies, model source and full tool results are
+                NOT persisted. Disk-backed JSONL history is capped at 5 MiB and
+                streamed on demand instead of caching all previews in RAM.
+                Use maxResults and offset to page newest-first when output exceeds
+                the 96-KiB response budget. BRC_TOOL_HISTORY=0 disables persistence.
+                This is not a source-code, model conversation or replay archive.
 
                 ${CMD_PREFIX_DESCRIPTION}`,
         inputSchema: zodToJsonSchema(GetRecentToolCallsArgsSchema),

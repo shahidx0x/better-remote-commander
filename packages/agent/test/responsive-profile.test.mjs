@@ -176,7 +176,7 @@ test('start_process path completes a simple native command without shell persist
 test('activity history stays within its share of the combined 500-KiB log budget', async () => {
   const {ActivityLog,MAX_ACTIVITY_LOG_BYTES,MAX_ACTIVITY_EVENT_BYTES} = await import('../dist/runtime/activity.js');
   const {recentActivity} = await import('../dist/terminal-ui.js');
-  assert.equal(MAX_ACTIVITY_LOG_BYTES, 1024 * 1024);
+  assert.equal(MAX_ACTIVITY_LOG_BYTES, 500 * 1024);
   const log = new ActivityLog(path.join(scratch,'quiet-activity'),true);
   for (let i=0;i<7000;i++) log.tool('OK','read_file',String(i),i);
   const recent=log.recent();
@@ -253,19 +253,20 @@ test('completed 350-KiB command output survives in memory for read_process_outpu
   assert.ok(result.lines.join('').length>=350000,'output should not be lost on completion');
 });
 
-test('rolling BRC console stays within its share of the 500-KiB log budget', async () => {
+test('native scrollback uses no duplicate in-agent ring within the 500-KiB budget', async () => {
   const {ActivityLog,MAX_ACTIVITY_CONSOLE_BYTES} = await import('../dist/runtime/activity.js');
   const log = new ActivityLog(path.join(scratch, 'rolling-activity'),false);
   // Exercise the console buffer without drawing terminal screens during tests.
   log.rollingConsole = true;
   log.scheduleRolling = () => {};
   for(let i=0;i<3200;i++) log.tool('OK','read_file',String(i),i);
-  assert.ok(log.rollingLines.length>20, log.rollingLines.length);
-  assert.ok(log.rollingBytes<=MAX_ACTIVITY_CONSOLE_BYTES, log.rollingBytes);
-  assert.ok(log.rollingBytes>20*1024, 'the console ring should make useful use of its allocated budget');
-  assert.equal(log.rollingBytes, log.rollingLines.reduce((n,s)=>n+Buffer.byteLength(s+'\n','utf8'),0));
-  assert.ok(log.rollingLines.at(-1).includes('read_file'));
-  assert.ok(!log.rollingLines.some(s=>s.includes('[0]')));
+  assert.equal(log.rollingLines,undefined,'terminal scrollback must not be duplicated in agent RAM');
+  assert.equal(log.rollingBytes,undefined);
+  const stats=log.status();
+  assert.ok(stats.historyBytes>20*1024,'retained events are available without a second ring');
+  assert.ok(stats.retainedBytes<=stats.maxRetainedBytes);
+  assert.equal(stats.maxRetainedBytes,500*1024);
+  assert.equal(log.recent().at(-1).tool,'read_file');
   await log.close();
 });
 

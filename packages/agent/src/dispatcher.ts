@@ -24,7 +24,9 @@ import {PATCH_TOOL_HANDLERS,buildPatchToolDefinitions} from './tools/patch-tools
 import {CODE_MODE_TOOL_HANDLERS,buildCodeModeToolDefinitions,setCodeModeToolExecutor} from './tools/code-mode-tools.js';
 import { activity, activityAction } from './runtime/activity.js';
 import { traceToolArguments, traceToolResult } from './runtime/tool-trace.js';
+import { toolHistory } from './core/utils/toolHistory.js';
 import { summarizeCommandActivity } from './runtime/command-log-summary.js';
+import { summarizeToolOutcome } from './runtime/log-outcome.js';
 import { recordToolFailure, failureReason } from './runtime/failure-log.js';
 import { POLYGLOT_TOOL_HANDLERS, buildPolyglotToolDefinitions } from './tools/polyglot-tools.js';
 import { codeGraph } from './runtime/code-graph.js';
@@ -345,9 +347,15 @@ export async function callTool(name: string, args: Args): Promise<ToolResult> {
     ? ('Job '+(typeof managedId==='string'?managedId:'pending')+' | running locally; not finished')
     : name==='run_command' ? summarizeCommandActivity(out).detail
     : name==='start_process' && phase==='OK' ? 'Process started; it may still be running'
-    : phase==='ERROR' ? ((error?.code??'TOOL_FAILED')+': '+failureReason(name,error?.code??'TOOL_FAILED')) : undefined;
+    : phase==='ERROR' ? ((error?.code??'TOOL_FAILED')+': '+failureReason(name,error?.code??'TOOL_FAILED'))
+    : summarizeToolOutcome(name,out);
   activity.tool(phase,name,parent.id,durationMs,error?.code,action,note,
     activity.getConsoleMode()==='verbose'?traceToolResult(name,out):undefined);
+  // Persist sanitized metadata and a <=4-KiB output preview without adding
+  // another in-memory history ring. Never log the history query itself.
+  if(name!=='get_recent_tool_calls')
+    toolHistory.addCall(name,args,out,durationMs,{phase,callId:parent.id,
+      action,errorCode:error?.code,note});
   if(out.isError){
     const code=error?.code??'TOOL_FAILED';
     // Preserve classified failures in the bounded diagnostic records.

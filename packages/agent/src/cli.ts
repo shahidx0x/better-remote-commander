@@ -32,6 +32,8 @@ import { callTool, listTools } from './dispatcher.js';
 import { VERSION as CORE_VERSION } from './core/version.js';
 import { setCurrentClient } from './context.js';
 import { activity } from './runtime/activity.js';
+import { toolHistory } from './core/utils/toolHistory.js';
+import { formatHeartbeat,LOG_HEARTBEAT_INTERVAL_MS } from './runtime/heartbeat.js';
 import { projectIndex } from './runtime/project-index.js';
 import { codeGraph } from './runtime/code-graph.js';
 import { consoleBanner, controlHint, connectionPanel, recentActivity, type AgentTerminal } from './terminal-ui.js';
@@ -51,10 +53,12 @@ const flag = (name: string) => process.argv.includes(`--${name}`);
 const debug = flag('debug') || process.env.BRC_DEBUG === '1';
 if (debug) process.env.BRC_DEBUG = '1';
 if (flag('verbose') || debug) activity.setConsoleMode('verbose');
-else if (flag('compact')) activity.setConsoleMode('compact');
+else if (flag('compact') || process.env.BRC_CONSOLE_MODE === 'compact') activity.setConsoleMode('compact');
+else if (process.env.BRC_CONSOLE_MODE === 'verbose') activity.setConsoleMode('verbose');
+else activity.setConsoleMode('detailed'); // default: timestamp + call + safe outcome
 const log = (level: 'info' | 'warn' | 'error' | 'debug', msg: string) => activity.log(level, msg);
 if (flag('help')) {
-  console.log('Local agent: START_AGENT.cmd or node packages/agent/dist/cli.js\nFirst terminal launch asks for the relay URL and device name. Saved connections start automatically after 4 seconds; Enter connects now, M opens settings.\n--setup opens settings explicitly. M also opens settings while the foreground agent is idle; active tool calls are never interrupted.\n--forget-relay / --logout forget only the local saved URL and pairing, then exit.\n--relay <base-url> keeps scripted pairing available; --non-interactive skips the menu and delay. --auto-connect is the foreground default.\nOther flags: --name <name>, --no-browser, --allow-dir <path> (repeatable), --debug, --compact, --verbose, --install-service, --uninstall-service.\nPlugins: --list-plugins, --add-plugin <id>, --remove-plugin <id>, --enable-plugin <id>, --disable-plugin <id>, --update-plugins, --no-plugins.\nTerminal controls (while live): M settings, S status, L recent activity, V compact/verbose, ? help, Ctrl+C stop. Completed calls and errors are visible in compact TTY mode; --verbose shows START/OK/ERROR. Live-only logging: no saved tool history.');
+  console.log('Local agent: START_AGENT.cmd or node packages/agent/dist/cli.js\nFirst terminal launch asks for the relay URL and device name. Saved connections start automatically after 4 seconds; Enter connects now, M opens settings.\n--setup opens settings explicitly. M also opens settings while the foreground agent is idle; active tool calls are never interrupted.\n--forget-relay / --logout forget only the local saved URL and pairing, then exit.\n--relay <base-url> keeps scripted pairing available; --non-interactive skips the menu and delay. --auto-connect is the foreground default.\nOther flags: --name <name>, --no-browser, --allow-dir <path> (repeatable), --debug, --compact, --verbose, --install-service, --uninstall-service.\nPlugins: --list-plugins, --add-plugin <id>, --remove-plugin <id>, --enable-plugin <id>, --disable-plugin <id>, --update-plugins, --no-plugins.\nTerminal controls (while live): M settings, S status, L recent activity, V detailed/verbose/compact, ? help, Ctrl+C stop. The default detailed console includes START/OK/FAIL and a local heartbeat every 30 seconds. Completed calls and errors are visible in compact TTY mode; --verbose shows START/OK/ERROR. Sanitized tool history: last 1000 records, max 4 KiB preview each, disk JSONL capped at 5 MiB (BRC_TOOL_HISTORY=0 disables).');
   process.exit(0);
 }
 
@@ -143,6 +147,9 @@ if (!creds) {
   await activity.close();
   process.exit(startupExitCode);
 }
+await toolHistory.start().catch(error=>
+  console.error('Tool history unavailable: '+(error instanceof Error?error.message:'I/O error')+
+    '. Agent tools continue without persistent history.'));
 await startResourceMaintenance();
 const resourceProfile = getResourceProfileStatus();
 log('info', `Resource profile: ${resourceProfile.profile} (${resourceProfile.selection}); ${resourceProfile.cpuParallelism} available CPUs, ${(resourceProfile.totalMemoryBytes / (1024 ** 3)).toFixed(1)} GiB RAM, ${resourceProfile.maxConcurrentJobs} background jobs, ${resourceProfile.maxToolConcurrency} tool calls.`);
@@ -166,6 +173,7 @@ let shortcuts: ReturnType<typeof listenForTerminalShortcuts> | undefined;
 let livePrompts: ReturnType<typeof createTerminalPrompts> | undefined;
 let settingsOpen = false;
 let shuttingDown = false;
+let heartbeatTimer:NodeJS.Timeout|undefined;
 let pluginSetupStarted = false;
 function startPluginSetup(): void {
   if (pluginSetupStarted || flag('no-plugins') || process.env.BRC_PLUGINS === 'none' || isTermuxRuntime()) return;
@@ -204,7 +212,8 @@ function armShortcuts(): void {
     else if (choice === 'status') console.log(connectionPanel(client.status(), { ...terminalInfo, name: activeCredentials.name, relay: activeCredentials.relayUrl }));
     else if (choice === 'activity') console.log(recentActivity(activity.recent(), 50));
     else if (choice === 'verbose') {
-      activity.setConsoleMode(activity.getConsoleMode() === 'compact' ? 'verbose' : 'compact');
+      const mode=activity.getConsoleMode();
+      activity.setConsoleMode(mode==='detailed'?'verbose':mode==='verbose'?'compact':'detailed');
       console.log('  Console mode: ' + activity.getConsoleMode() + '. Press L for the last 50 calls; log history stays byte-bounded.');
     }
     else if (choice === 'help') console.log(controlHint(!!process.stdin.isTTY));
@@ -304,6 +313,7 @@ function shutdown(reason: string): void {
   runningAbort.abort();
   livePrompts?.close();
   stopResourceMaintenance();
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
   client?.stop();
   projectIndex.close();
   codeGraph.clear();
@@ -312,13 +322,23 @@ function shutdown(reason: string): void {
   const exit = () => process.exit(0);
   const timer = setTimeout(exit, 1500);
   import('./core/config-manager.js')
-    .then(({ configManager }) => Promise.all([configManager.close(), activity.close()]))
+    .then(({ configManager }) => Promise.all([configManager.close(), toolHistory.cleanup(), activity.close()]))
     .catch(() => {})
     .finally(() => { clearTimeout(timer); setTimeout(exit, 50); });
 }
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 start(creds);
+// Local O(1) heartbeat: no network polling, no disk log and no sensitive args.
+// Mirrors MyMCP's concise status counters while keeping the retained payload
+// strictly within the 500-KiB ActivityLog budget.
+heartbeatTimer=setInterval(()=>{
+  if(shuttingDown||settingsOpen)return;
+  const live=activity.status();
+  log('info',formatHeartbeat(client.status(),{...live,
+    retainedBytes:live.retainedBytes+toolHistory.getStats().queuedBytes}));
+},LOG_HEARTBEAT_INTERVAL_MS);
+heartbeatTimer.unref();
 if (foregroundControls) {
   console.log(settingsHint);
   armShortcuts();

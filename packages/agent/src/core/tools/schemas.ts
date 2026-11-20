@@ -284,7 +284,8 @@ export const GetPromptsArgsSchema = z.object({
 
 // Tool history schema
 export const GetRecentToolCallsArgsSchema = z.object({
-  maxResults: z.number().min(1).max(1000).optional().default(50),
+  maxResults: z.number().int().min(1).max(1000).optional().default(50),
+  offset: z.number().int().min(0).max(1000).optional().default(0),
   toolName: z.string().optional(),
   since: z.string().datetime().optional(),
 });

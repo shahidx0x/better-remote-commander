@@ -51,24 +51,22 @@ test('a failed tool gets an actionable second line but success gets only one', (
   assert.doesNotMatch(report,/Output preview|Arguments:/);
 });
 
-test('1 MiB total retained-text budget allocates 500 KiB to the console ring', async () => {
-  assert.equal(MAX_ACTIVITY_LOG_BYTES,1024*1024);
-  assert.equal(MAX_ACTIVITY_CONSOLE_BYTES,500*1024);
-  assert.equal(MAX_ACTIVITY_QUEUE_BYTES,64*1024);
-  assert.equal(MAX_ACTIVITY_EVENT_BYTES+MAX_ACTIVITY_CONSOLE_BYTES+MAX_ACTIVITY_QUEUE_BYTES,
-    MAX_ACTIVITY_LOG_BYTES);
+test('500 KiB retained log budget avoids duplicating terminal scrollback', async () => {
+  assert.equal(MAX_ACTIVITY_LOG_BYTES,500*1024);
+  assert.equal(MAX_ACTIVITY_CONSOLE_BYTES,MAX_ACTIVITY_EVENT_BYTES);
+  assert.equal(MAX_ACTIVITY_QUEUE_BYTES,40*1024);
+  assert.equal(MAX_ACTIVITY_EVENT_BYTES+MAX_ACTIVITY_QUEUE_BYTES+32*1024,MAX_ACTIVITY_LOG_BYTES);
   const log = new ActivityLog(undefined,false);
   log.rollingConsole = true;
   log.scheduleRolling = () => {};
   for(let i=0;i<20000;i++)
     log.tool('OK','read_file','item-'+i,1,undefined,'file-'+i+'-'+('x'.repeat(40)));
-  assert.ok(log.rollingBytes <= MAX_ACTIVITY_CONSOLE_BYTES);
-  assert.ok(log.rollingBytes > 300*1024);
+  assert.equal(log.rollingLines,undefined);
+  assert.equal(log.rollingBytes,undefined);
   assert.ok(log.eventsBytes <= MAX_ACTIVITY_EVENT_BYTES);
-  assert.ok(log.rollingLines.length > 50);
+  assert.ok(log.eventsBytes+log.queuedBytes<=MAX_ACTIVITY_LOG_BYTES);
   assert.ok(log.dropped > 0);
-  assert.ok(!log.rollingLines.join('').includes('file-0-'));
-  assert.ok(log.rollingLines.at(-1).includes('file-19999-'));
+  assert.equal(log.recent().at(-1).id,'item-19999');
   assert.ok(log.queuedBytes<=MAX_ACTIVITY_QUEUE_BYTES);
   // No need to flush the synthetic 20,000-call test queue to the real console.
   log.consoleQueue.length=0;
